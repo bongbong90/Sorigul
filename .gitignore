@@ -1,0 +1,40 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+
+# Rust/Tauri
+target/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs/temp
+*.log
+logs/
+tmp/
+temp/
+
+# Secrets
+.env
+.env.*
+!.env.example
+credentials*.json
+token*.json
+
+# Packaging
+*.exe
+*.msi
