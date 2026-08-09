@@ -19,3 +19,29 @@ docs/project/
 docs/design/
 
 현재 실제 transcription 기능은 구현하지 않는다.
+
+## Frontend
+
+- React
+- TypeScript
+- Vite
+
+현재 상태:
+- Frontend Foundation
+- 실제 transcription 기능 없음
+- UI/UX First 진행 중
+
+Frontend 실행 방법:
+
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend 검증:
+
+```
+npm run lint
+npm run build
+```
