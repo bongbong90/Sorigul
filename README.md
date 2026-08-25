@@ -27,7 +27,8 @@ docs/design/
 - Vite
 
 현재 상태:
-- Frontend Foundation
+- Frontend Foundation 완료
+- Design System Foundation 진행
 - 실제 transcription 기능 없음
 - UI/UX First 진행 중
 
