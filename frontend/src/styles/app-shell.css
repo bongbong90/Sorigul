@@ -1,0 +1,125 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: 64px minmax(0, 1fr);
+  block-size: 100svh;
+  overflow: hidden;
+  background-color: var(--color-background);
+}
+
+.app-sidebar {
+  display: flex;
+  grid-row: 1 / -1;
+  flex-direction: column;
+  min-block-size: 0;
+  background-color: var(--color-surface);
+  border-inline-end: var(--border-width) solid var(--color-border);
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  block-size: 64px;
+  flex: 0 0 64px;
+  gap: var(--space-control);
+  padding-inline: var(--space-section);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-ui);
+  text-decoration: none;
+}
+
+.app-navigation {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-block: var(--space-component);
+}
+
+.app-navigation-primary {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-navigation-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  block-size: 48px;
+  gap: var(--space-control);
+  padding-inline: var(--space-section);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-ui);
+  text-decoration: none;
+  transition:
+    background-color var(--motion-duration-state) var(--motion-easing-standard),
+    color var(--motion-duration-state) var(--motion-easing-standard);
+}
+
+.app-navigation-link:hover {
+  background-color: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.app-navigation-link:focus-visible,
+.app-brand:focus-visible {
+  z-index: 1;
+  outline: var(--focus-ring-width) solid var(--color-primary);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.app-navigation-link-active,
+.app-navigation-link-active:hover {
+  background-color: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+.app-navigation-link-active::before {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 3px;
+  background-color: var(--color-primary);
+  content: '';
+}
+
+.app-icon {
+  inline-size: var(--icon-size-default);
+  block-size: var(--icon-size-default);
+  flex: 0 0 auto;
+  stroke: currentColor;
+  stroke-width: var(--icon-stroke-width);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.app-top-bar {
+  display: flex;
+  align-items: center;
+  min-inline-size: 0;
+  padding-inline: var(--space-section);
+  background-color: var(--color-surface);
+  border-block-end: var(--border-width) solid var(--color-border);
+}
+
+.app-top-bar h1 {
+  margin: 0;
+}
+
+.app-main {
+  min-inline-size: 0;
+  overflow: auto;
+  padding: var(--space-section);
+  background-color: var(--color-background);
+}
+
+.app-main-content {
+  inline-size: 100%;
+  max-inline-size: 1200px;
+  min-block-size: 100%;
+  margin-inline: auto;
+}
