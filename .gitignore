@@ -15,6 +15,7 @@ build/
 target/
 
 # IDE
+.vs/
 .vscode/
 .idea/
 
