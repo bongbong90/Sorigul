@@ -1,12 +1,12 @@
 import type { ComponentType, ReactNode, SVGProps } from 'react'
 import {
-  DashboardIcon,
-  ResultsIcon,
+  FoldersIcon,
+  LogIcon,
   SettingsIcon,
   TranscriptionIcon,
 } from '../icons/AppIcons'
 
-type NavigationId = 'transcription' | 'dashboard' | 'results' | 'settings'
+export type NavigationId = 'transcription' | 'log' | 'folders' | 'settings'
 type NavigationIcon = ComponentType<SVGProps<SVGSVGElement>>
 
 interface NavigationItem {
@@ -19,13 +19,14 @@ interface NavigationItem {
 interface AppShellProps {
   activeItem: NavigationId
   title: string
+  onNavigate: (item: NavigationId) => void
   children?: ReactNode
 }
 
 const primaryNavigation: NavigationItem[] = [
   { id: 'transcription', label: '전사', href: '/', icon: TranscriptionIcon },
-  { id: 'dashboard', label: '대시보드', href: '/dashboard', icon: DashboardIcon },
-  { id: 'results', label: '결과', href: '/results', icon: ResultsIcon },
+  { id: 'log', label: '로그', href: '/log', icon: LogIcon },
+  { id: 'folders', label: 'Folders', href: '/folders', icon: FoldersIcon },
 ]
 
 const settingsNavigation: NavigationItem = {
@@ -35,7 +36,15 @@ const settingsNavigation: NavigationItem = {
   icon: SettingsIcon,
 }
 
-function NavigationLink({ item, activeItem }: { item: NavigationItem; activeItem: NavigationId }) {
+function NavigationLink({
+  item,
+  activeItem,
+  onNavigate,
+}: {
+  item: NavigationItem
+  activeItem: NavigationId
+  onNavigate: (item: NavigationId) => void
+}) {
   const Icon = item.icon
   const isActive = item.id === activeItem
 
@@ -46,6 +55,10 @@ function NavigationLink({ item, activeItem }: { item: NavigationItem; activeItem
         .join(' ')}
       href={item.href}
       aria-current={isActive ? 'page' : undefined}
+      onClick={(event) => {
+        event.preventDefault()
+        onNavigate(item.id)
+      }}
     >
       <Icon />
       <span>{item.label}</span>
@@ -53,21 +66,38 @@ function NavigationLink({ item, activeItem }: { item: NavigationItem; activeItem
   )
 }
 
-export function AppShell({ activeItem, title, children }: AppShellProps) {
+export function AppShell({ activeItem, title, onNavigate, children }: AppShellProps) {
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
-        <a className="app-brand" href="/" aria-label="소리글 홈">
+        <a
+          className="app-brand"
+          href="/"
+          aria-label="소리글 홈"
+          onClick={(event) => {
+            event.preventDefault()
+            onNavigate('transcription')
+          }}
+        >
           <span>소리글</span>
         </a>
 
         <nav className="app-navigation" aria-label="주요 메뉴">
           <div className="app-navigation-primary">
             {primaryNavigation.map((item) => (
-              <NavigationLink key={item.id} item={item} activeItem={activeItem} />
+              <NavigationLink
+                key={item.id}
+                item={item}
+                activeItem={activeItem}
+                onNavigate={onNavigate}
+              />
             ))}
           </div>
-          <NavigationLink item={settingsNavigation} activeItem={activeItem} />
+          <NavigationLink
+            item={settingsNavigation}
+            activeItem={activeItem}
+            onNavigate={onNavigate}
+          />
         </nav>
       </aside>
 

@@ -2,7 +2,7 @@
 
 **Status: PASS**
 
-> **Contract alignment:** 이 PASS는 당시 App Shell layout 구현 기록이다. 구현 범위에 기록된 당시 navigation(`전사`, `대시보드`, `결과`, `설정`)은 현재 제품 계약이 아니다. `MIGRATION_CONTRACT.md`에 따라 제품 navigation은 `전사`, `로그`, `Folders`와 설정 진입점으로 바뀌며 Dashboard 전용 화면은 제거한다. 실제 component 정렬은 UI Feature Gap Closure에서 수행한다.
+> **Contract alignment:** 최초 PASS 당시의 navigation은 UI Feature Gap Closure에서 `전사`, `로그`, `Folders`와 설정 진입점으로 정렬했다. Dashboard 전용 화면과 navigation은 제거했다. 아래 검증 이력 중 과거 범위 설명은 당시 기록으로 보존한다.
 
 ## 1. 목적
 
@@ -15,7 +15,7 @@
 - 64px 고정 높이 Top Bar
 - 24px padding과 1200px 최대 너비를 적용한 Main Content slot
 - 승인된 별도 Brand symbol asset이 없어 text brand로 유지한 `소리글`
-- 당시 구현된 전사, 대시보드, 결과, 설정 navigation (현재 Contract gap은 상단 주석 참조)
+- 전사, 로그, Folders navigation과 별도 설정 진입점
 - 활성 navigation 배경, 색상, 3px 좌측 indicator
 - `lucide-react` 기반 20px outline navigation icon (stroke 1.75px)
 - keyboard focus와 hover 상태

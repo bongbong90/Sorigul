@@ -63,6 +63,7 @@
 
 .action-buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-control);
 }
 
@@ -151,7 +152,11 @@
 }
 
 .status-column {
-  inline-size: 96px;
+  inline-size: 112px;
+}
+
+.row-action-column {
+  inline-size: 56px;
 }
 
 .queue-table th,
@@ -199,10 +204,24 @@
   white-space: nowrap;
 }
 
+.queue-row-detail {
+  display: block;
+  margin-block-start: var(--space-tight);
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .duration-cell,
 .status-cell {
   text-align: end;
   white-space: nowrap;
+}
+
+.row-action-cell {
+  text-align: center;
 }
 
 .visually-hidden {

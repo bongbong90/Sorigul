@@ -1,14 +1,26 @@
 import { useEffect, useMemo, useRef } from 'react'
+import { MoreHorizontal, RotateCcw } from 'lucide-react'
 import { Badge } from '../ui/Badge'
 import { Card } from '../ui/Card'
 
-export type QueueStatus = 'WAITING' | 'TRANSCRIBING' | 'DONE' | 'CANCELLED'
+export type QueueStatus =
+  | 'WAITING'
+  | 'TRANSCRIBING'
+  | 'VERIFYING'
+  | 'DONE'
+  | 'FAILED'
+  | 'STOPPED'
+  | 'CANCELLED'
+  | 'CRASHED'
+  | 'RETRYING'
+  | 'CANCEL_REQUESTED'
 
 export interface QueueRow {
   id: string
   filename: string
   duration: string
   status: QueueStatus
+  detail?: string
 }
 
 interface QueueTableProps {
@@ -17,14 +29,24 @@ interface QueueTableProps {
   currentId?: string
   onToggle: (id: string) => void
   onToggleAll: () => void
+  onRetry: (id: string) => void
+  onRetranscribe: (id: string) => void
 }
 
 const statusPresentation = {
   WAITING: { label: '대기', tone: 'waiting' as const },
   TRANSCRIBING: { label: '전사 중', tone: 'transcribing' as const },
+  VERIFYING: { label: '검증 중', tone: 'verifying' as const },
   DONE: { label: '완료', tone: 'done' as const },
-  CANCELLED: { label: '중지됨', tone: 'cancelled' as const },
+  FAILED: { label: '실패', tone: 'failed' as const },
+  STOPPED: { label: '중지됨', tone: 'stopped' as const },
+  CANCELLED: { label: '취소됨', tone: 'cancelled' as const },
+  CRASHED: { label: '복구 필요', tone: 'crashed' as const },
+  RETRYING: { label: '재시도 중', tone: 'retrying' as const },
+  CANCEL_REQUESTED: { label: '취소 요청 중', tone: 'cancelled' as const },
 }
+
+const retryableStatuses: QueueStatus[] = ['FAILED', 'STOPPED', 'CANCELLED', 'CRASHED']
 
 export function QueueTable({
   rows,
@@ -32,6 +54,8 @@ export function QueueTable({
   currentId,
   onToggle,
   onToggleAll,
+  onRetry,
+  onRetranscribe,
 }: QueueTableProps) {
   const selectAllRef = useRef<HTMLInputElement>(null)
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
@@ -54,6 +78,7 @@ export function QueueTable({
             <col className="filename-column" />
             <col className="duration-column" />
             <col className="status-column" />
+            <col className="row-action-column" />
           </colgroup>
           <thead>
             <tr>
@@ -72,6 +97,9 @@ export function QueueTable({
               </th>
               <th scope="col" className="status-cell">
                 상태
+              </th>
+              <th scope="col" className="row-action-cell">
+                <span className="visually-hidden">파일 작업</span>
               </th>
             </tr>
           </thead>
@@ -96,10 +124,35 @@ export function QueueTable({
                     <span className="queue-filename" title={row.filename}>
                       {row.filename}
                     </span>
+                    {row.detail ? <span className="queue-row-detail">{row.detail}</span> : null}
                   </td>
                   <td className="duration-cell text-numeric">{row.duration}</td>
                   <td className="status-cell">
                     <Badge tone={presentation.tone}>{presentation.label}</Badge>
+                  </td>
+                  <td className="row-action-cell">
+                    {row.status === 'DONE' ? (
+                      <button
+                        type="button"
+                        className="icon-action"
+                        aria-label={`${row.filename} 다시 전사`}
+                        title="다시 전사"
+                        onClick={() => onRetranscribe(row.id)}
+                      >
+                        <MoreHorizontal aria-hidden="true" focusable="false" />
+                      </button>
+                    ) : null}
+                    {retryableStatuses.includes(row.status) ? (
+                      <button
+                        type="button"
+                        className="icon-action"
+                        aria-label={`${row.filename} 다시 시도`}
+                        title="다시 시도"
+                        onClick={() => onRetry(row.id)}
+                      >
+                        <RotateCcw aria-hidden="true" focusable="false" />
+                      </button>
+                    ) : null}
                   </td>
                 </tr>
               )

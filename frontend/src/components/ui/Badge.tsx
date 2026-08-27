@@ -1,13 +1,17 @@
 import type { HTMLAttributes } from 'react'
 
-type BadgeTone =
+export type BadgeTone =
   | 'waiting'
   | 'preparing'
   | 'transcribing'
   | 'saving'
   | 'done'
   | 'failed'
+  | 'stopped'
   | 'cancelled'
+  | 'crashed'
+  | 'retrying'
+  | 'verifying'
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   tone: BadgeTone
