@@ -13,9 +13,11 @@ Sidebar:
 
 - 소리글
 - 전사
-- 대시보드
-- 결과
+- 로그
+- Folders
 - 설정
+
+기본 진입 화면은 `전사`이며 Dashboard 전용 화면은 사용하지 않는다.
 
 ## Folder Area
 
@@ -53,10 +55,14 @@ IDLE:
 전사 시작 = enabled
 전사 중지 = disabled
 
+선택 파일이 없을 때도 전사 시작은 enabled다. Start 시 완료 bundle을 제외한 전체 범위를 확인하고, 확인 화면에는 가능한 범위에서 전체 파일 수, skip 수, 실제 처리 대상 수를 표시한다. 실제 처리 대상이 0개면 작업을 시작하지 않는다.
+
 TRANSCRIBING:
 
 전사 시작 = disabled
 전사 중지 = enabled
+
+전사 중 Stop은 현재 파일을 `STOPPED`로 만든다. 대기 또는 작업 자체의 Cancel은 `CANCELLED`로 구분하며, 두 상태의 Retry는 현재 파일을 처음부터 처리한다.
 
 ## Long Filename
 

@@ -19,9 +19,16 @@
 - **PREPARING** -> 준비 중
 - **TRANSCRIBING** -> 전사 중
 - **SAVING** -> 저장 중
+- **VERIFYING** -> 검증 중
 - **DONE** -> 완료
 - **FAILED** -> 실패
-- **CANCELLED** -> 중지됨
+- **STOPPED** -> 중지됨
+- **CANCELLED** -> 취소됨
+- **CRASHED** -> 복구 필요
+- **RETRYING** -> 재시도 중
+- **CANCEL_REQUESTED** -> 취소 요청 중
+
+`STOPPED`와 `CANCELLED`는 같은 문구로 합치지 않는다. 파생·복합 상태와 action은 `UI_STATE_MATRIX.md`를 따른다.
 
 ## 5. Spacing System
 
