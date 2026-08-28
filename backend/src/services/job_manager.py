@@ -1,6 +1,7 @@
 import json
 import uuid
 import shutil
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -11,6 +12,7 @@ class JobManager:
     def __init__(self, storage_path: str):
         self.storage_path = Path(storage_path)
         self.jobs: Dict[str, JobModel] = {}
+        self._lock = threading.RLock()
         self.load_jobs()
 
     def load_jobs(self):
@@ -79,6 +81,10 @@ class JobManager:
         return job, needs_recovery
 
     def save_jobs(self):
+        with self._lock:
+            self._save_jobs_unlocked()
+
+    def _save_jobs_unlocked(self):
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.storage_path.with_suffix('.tmp')
         data = {k: v.model_dump(mode='json') for k, v in self.jobs.items()}
@@ -89,13 +95,22 @@ class JobManager:
         # Atomic replace
         temp_path.replace(self.storage_path)
 
-    def create_job(self, folder: str, file_ids: List[str], engine: str = "local_whisper") -> JobModel:
+    def create_job(
+        self,
+        folder: str,
+        file_ids: List[str],
+        engine: str = "local_whisper",
+        engine_config: Optional[dict] = None,
+        force_retranscribe: bool = False,
+    ) -> JobModel:
         job_id = str(uuid.uuid4())
         job = JobModel(
             job_id=job_id,
             status=FileStatus.WAITING,
             folder=folder,
             engine=engine,
+            engine_config=engine_config or {},
+            force_retranscribe=force_retranscribe,
             total_files=len(file_ids),
             done_files=0,
             failed_files=0,
@@ -105,14 +120,33 @@ class JobManager:
             level="info", category="Job", message=f"작업 생성됨 ({len(file_ids)}개 파일)"
         ))
 
-        self.jobs[job_id] = job
-        self.save_jobs()
-        return job
+        with self._lock:
+            self.jobs[job_id] = job
+            self._save_jobs_unlocked()
+            return job
 
     def get_job(self, job_id: str) -> Optional[JobModel]:
-        return self.jobs.get(job_id)
+        with self._lock:
+            job = self.jobs.get(job_id)
+            return job.model_copy(deep=True) if job else None
+
+    def list_jobs(self) -> List[JobModel]:
+        with self._lock:
+            return [job.model_copy(deep=True) for job in self.jobs.values()]
 
     def update_job(self, job: JobModel):
-        job.updated_at = datetime.now()
-        self.jobs[job.job_id] = job
-        self.save_jobs()
+        with self._lock:
+            job.updated_at = datetime.now()
+            self.jobs[job.job_id] = job
+            self._save_jobs_unlocked()
+
+    def mutate_job(self, job_id: str, mutation) -> Optional[JobModel]:
+        """Apply a mutation and persist it while holding the process lock."""
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            mutation(job)
+            job.updated_at = datetime.now()
+            self._save_jobs_unlocked()
+            return job.model_copy(deep=True)
