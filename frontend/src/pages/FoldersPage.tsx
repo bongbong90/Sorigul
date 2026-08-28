@@ -72,11 +72,14 @@ export function FoldersPage() {
   async function requestOpenFolder(itemId?: string) {
     if (!scanId) return
     try {
-      const intent = await api.openFolderIntent(scanId, itemId)
       if (isTauri()) {
-        await openInExplorer(intent.folder, intent.item_filename)
-        setMessage(`탐색기에서 폴더를 열었습니다 · ${intent.folder}`)
+        // Rust open_folder_by_intent fetches the backend-validated path and
+        // opens Explorer; the frontend never handles a raw filesystem path.
+        await openInExplorer(scanId, itemId)
+        setMessage('탐색기에서 폴더를 열었습니다.')
       } else {
+        // Browser dev: call the intent API just to show the resolved path.
+        const intent = await api.openFolderIntent(scanId, itemId)
         setMessage(`Desktop 폴더 열기 요청 준비됨 · ${intent.folder}`)
       }
     } catch (cause) { setError(getUserMessage(cause)) }

@@ -40,6 +40,129 @@ fn reset_shutdown_gate(state: State<AppState>) {
     state.shutdown_gate.reset();
 }
 
+/// Opens the backend-validated folder (or reveals a specific item within it)
+/// in Windows Explorer. The frontend passes only opaque identifiers (scan_id,
+/// optional item_id); this command fetches the validated path from the backend
+/// and opens it -- the frontend never constructs or passes a raw filesystem
+/// path to any native open call.
+///
+/// Security: `opener:allow-open-path` and `opener:allow-reveal-item-in-dir`
+/// are NOT granted to the frontend capability. All filesystem open calls
+/// happen inside this Rust command after backend validation.
+#[tauri::command]
+fn open_folder_by_intent(scan_id: String, item_id: Option<String>) -> Result<(), String> {
+    let url = format!(
+        "http://127.0.0.1:{BACKEND_PORT}/api/folders/{scan_id}/open-intent{}",
+        item_id
+            .as_deref()
+            .map(|id| format!("?item_id={id}"))
+            .unwrap_or_default()
+    );
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .build();
+
+    let response = agent
+        .post(&url)
+        .call()
+        .map_err(|err| format!("BACKEND_UNREACHABLE: {err}"))?;
+
+    if response.status() != 200 {
+        return Err(format!("BACKEND_ERROR: HTTP {}", response.status()));
+    }
+
+    let body = response
+        .into_string()
+        .map_err(|err| format!("RESPONSE_READ_ERROR: {err}"))?;
+
+    // Parse the validated folder and optional item_filename from the backend JSON.
+    // We do minimal parsing here -- we only extract the two fields we need,
+    // never forwarding any other data to the OS command.
+    let folder = extract_json_string(&body, "folder")
+        .ok_or_else(|| "INTENT_PARSE_ERROR: missing folder".to_string())?;
+    let item_filename = extract_json_string(&body, "item_filename");
+
+    open_in_explorer(&folder, item_filename.as_deref())
+        .map_err(|err| format!("EXPLORER_OPEN_FAILED: {err}"))
+}
+
+/// Opens a folder in Windows Explorer, optionally revealing a specific file.
+/// Uses `std::process::Command` with a fixed executable and a sanitised
+/// argument list -- no shell string concatenation.
+fn open_in_explorer(folder: &str, item_filename: Option<&str>) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let target = match item_filename {
+            Some(name) => {
+                let mut p = std::path::PathBuf::from(folder);
+                p.push(name);
+                p.to_string_lossy().into_owned()
+            }
+            None => folder.to_owned(),
+        };
+
+        std::process::Command::new("explorer.exe")
+            .arg(&target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Non-Windows fallback: open the folder with xdg-open / open.
+        let _ = item_filename; // item reveal not supported on non-Windows in this impl
+        std::process::Command::new("xdg-open").arg(folder).spawn()?;
+        Ok(())
+    }
+}
+
+/// Minimal JSON string extractor -- avoids pulling in a full JSON crate
+/// just for two string fields. Handles `null` values (returns `None`).
+fn extract_json_string(body: &str, key: &str) -> Option<String> {
+    let search = format!("\"{}\":", key);
+    let start = body.find(&search)? + search.len();
+    let rest = body[start..].trim_start();
+    if rest.starts_with("null") {
+        return None;
+    }
+    if !rest.starts_with('"') {
+        return None;
+    }
+    // Walk forward, respecting `\"` escapes.
+    let mut result = String::new();
+    let mut chars = rest[1..].chars();
+    loop {
+        match chars.next()? {
+            '\\' => {
+                match chars.next()? {
+                    '"' => result.push('"'),
+                    '\\' => result.push('\\'),
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    'u' => {
+                        // \uXXXX -- decode the four hex digits
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                            if let Some(c) = char::from_u32(code) {
+                                result.push(c);
+                            }
+                        }
+                    }
+                    other => result.push(other),
+                }
+            }
+            '"' => break,
+            c => result.push(c),
+        }
+    }
+    Some(result)
+}
+
 fn health_url() -> String {
     format!("http://127.0.0.1:{BACKEND_PORT}/api/health")
 }
@@ -133,7 +256,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(
             app.default_window_icon()
                 .cloned()
@@ -152,6 +275,13 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
+
+    // Explicitly mark the tray visible. On some Windows/Tauri combinations
+    // build() registers the icon with the shell but does not call
+    // Shell_NotifyIcon(NIM_SETVERSION) + NIF_STATE until set_visible(true)
+    // is also called; without it the icon may be registered but hidden.
+    let _ = tray.set_visible(true);
+
     Ok(())
 }
 
@@ -180,6 +310,7 @@ pub fn run() {
             set_close_behavior,
             native_shutdown,
             reset_shutdown_gate,
+            open_folder_by_intent,
         ])
         .setup(move |app| {
             build_tray(app)?;
@@ -209,4 +340,68 @@ pub fn run() {
             sidecar_for_exit.cleanup();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_json_string;
+
+    fn make_intent(folder: &str, item_filename: Option<&str>) -> String {
+        let item_part = match item_filename {
+            Some(name) => format!("\"{}\"", name),
+            None => "null".to_owned(),
+        };
+        format!(
+            r#"{{"action":"OPEN_FOLDER","folder":"{}","item_filename":{}}}"#,
+            folder, item_part
+        )
+    }
+
+    #[test]
+    fn extracts_ascii_folder() {
+        let body = make_intent("C:\\\\Users\\\\test\\\\docs", None);
+        assert_eq!(
+            extract_json_string(&body, "folder"),
+            Some("C:\\Users\\test\\docs".to_owned())
+        );
+    }
+
+    #[test]
+    fn extracts_korean_unicode_folder() {
+        // Korean path injected directly (no \\uXXXX encoding needed for UTF-8 JSON)
+        let body = r#"{"action":"OPEN_FOLDER","folder":"C:\\전사자료\\개념완성_민법","item_filename":null}"#;
+        assert_eq!(
+            extract_json_string(body, "folder"),
+            Some("C:\\전사자료\\개념완성_민법".to_owned())
+        );
+    }
+
+    #[test]
+    fn returns_none_for_null_item_filename() {
+        let body = make_intent("C:\\\\docs", None);
+        assert_eq!(extract_json_string(&body, "item_filename"), None);
+    }
+
+    #[test]
+    fn extracts_item_filename() {
+        let body = make_intent("C:\\\\docs", Some("result.txt"));
+        assert_eq!(
+            extract_json_string(&body, "item_filename"),
+            Some("result.txt".to_owned())
+        );
+    }
+
+    #[test]
+    fn path_traversal_string_is_extracted_verbatim_not_executed() {
+        // The parser just extracts the string; it does not validate path safety.
+        // That validation is the backend's responsibility. We confirm the value
+        // comes through unchanged so the backend contract is the single source.
+        // Use raw JSON directly to avoid double-escaping confusion.
+        let body =
+            r#"{"action":"OPEN_FOLDER","folder":"..\\..\\Windows\\System32","item_filename":null}"#;
+        assert_eq!(
+            extract_json_string(body, "folder"),
+            Some("..\\..\\Windows\\System32".to_owned())
+        );
+    }
 }
