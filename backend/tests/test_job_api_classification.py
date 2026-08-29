@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from src.domain.models import FileMetadata, FileStatus
 from src.services.job_manager import JobManager
+from src.services.normalizer import FilenameNormalizer
 from src.services.settings import SettingsManager
 
 
@@ -130,3 +133,178 @@ def test_job_creation_rejects_unknown_subject_without_stage_or_override(tmp_path
     )
     with pytest.raises(HTTPException):
         create_job(req)
+
+
+# ---------------------------------------------------------------------------
+# C. /rename rejects path traversal in old_stem/new_stem
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_stem", ["../x", "..\\x", "subdir/x", "subdir\\x", ".."])
+def test_rename_endpoint_rejects_path_traversal(tmp_path, bad_stem):
+    from fastapi import HTTPException
+    from src.api.routes import RenameRequest, apply_rename
+
+    (tmp_path / "old.mp3").write_bytes(b"mp3")
+
+    with pytest.raises(HTTPException):
+        apply_rename(RenameRequest(folder=str(tmp_path), old_stem="old", new_stem=bad_stem))
+    with pytest.raises(HTTPException):
+        apply_rename(RenameRequest(folder=str(tmp_path), old_stem=bad_stem, new_stem="new"))
+
+    # Nothing was touched by either rejected attempt.
+    assert (tmp_path / "old.mp3").exists()
+
+
+# ---------------------------------------------------------------------------
+# D. /rename rejects forbidden/control chars and trailing dot/space, plus
+# an empty stem
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("char", list('<>:"|?*'))
+def test_rename_endpoint_rejects_forbidden_characters(tmp_path, char):
+    from fastapi import HTTPException
+    from src.api.routes import RenameRequest, apply_rename
+
+    (tmp_path / "old.mp3").write_bytes(b"mp3")
+    with pytest.raises(HTTPException):
+        apply_rename(RenameRequest(folder=str(tmp_path), old_stem="old", new_stem=f"bad{char}name"))
+
+
+def test_rename_endpoint_rejects_control_character(tmp_path):
+    from fastapi import HTTPException
+    from src.api.routes import RenameRequest, apply_rename
+
+    (tmp_path / "old.mp3").write_bytes(b"mp3")
+    with pytest.raises(HTTPException):
+        apply_rename(RenameRequest(folder=str(tmp_path), old_stem="old", new_stem="bad\x07name"))
+
+
+@pytest.mark.parametrize("bad_stem", ["trailing.", "trailing ", ""])
+def test_rename_endpoint_rejects_trailing_dot_space_and_empty(tmp_path, bad_stem):
+    from fastapi import HTTPException
+    from src.api.routes import RenameRequest, apply_rename
+
+    (tmp_path / "old.mp3").write_bytes(b"mp3")
+    with pytest.raises(HTTPException):
+        apply_rename(RenameRequest(folder=str(tmp_path), old_stem="old", new_stem=bad_stem))
+
+
+# ---------------------------------------------------------------------------
+# E. a legitimate standard stem containing underscores still renames --
+# validate_safe_stem must not overreach into the classification-text rule
+# ---------------------------------------------------------------------------
+
+def test_rename_endpoint_accepts_standard_stem_with_underscores(tmp_path):
+    from src.api.routes import RenameRequest, apply_rename
+
+    (tmp_path / "개념완성_민법_1주차_1강.mp3").write_bytes(b"mp3")
+
+    response = apply_rename(RenameRequest(
+        folder=str(tmp_path), old_stem="개념완성_민법_1주차_1강", new_stem="개념완성_민법_1주차_2강",
+    ))
+
+    assert response.status == "success"
+    assert (tmp_path / "개념완성_민법_1주차_2강.mp3").exists()
+
+
+# ---------------------------------------------------------------------------
+# F. raw temp MP3 -> normalize -> rename -> create Job -> normalized_name
+# populated (pre-job metadata integration)
+# ---------------------------------------------------------------------------
+
+def test_prejob_rename_then_create_job_populates_normalized_name(tmp_path):
+    from src.api.routes import CreateJobRequest, RenameRequest, apply_rename, create_job
+    import src.api.routes
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    (folder / "1강_[1주차]_원본.mp3").touch()
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
+
+    preview = FilenameNormalizer().normalize("1강_[1주차]_원본.mp3", "개념완성", "민법", set())
+    assert preview.result_type == "NORMALIZED"
+    new_stem = Path(preview.suggested_name).stem
+
+    response = apply_rename(RenameRequest(folder=str(folder), old_stem="1강_[1주차]_원본", new_stem=new_stem))
+    assert response.new_file_id == new_stem
+
+    job = create_job(CreateJobRequest(
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+    ))
+
+    assert job.file_metadata[new_stem].normalized_name == new_stem
+
+
+# ---------------------------------------------------------------------------
+# G. /normalize/batch gives colliding raw inputs distinct deterministic
+# target stems (batch collision reservation)
+# ---------------------------------------------------------------------------
+
+def test_normalize_batch_endpoint_reserves_unique_stems(tmp_path):
+    from src.api.routes import NormalizeBatchRequest, preview_normalization_batch
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+
+    req = NormalizeBatchRequest(
+        folder=str(folder),
+        filenames=["1강_[1주차]_a.mp3", "1강_[1주차]_b.mp3"],
+        course="개념완성",
+        subject="민법",
+    )
+    results = preview_normalization_batch(req)
+
+    stems = [Path(r.suggested_name).stem for r in results]
+    assert len(set(stems)) == 2
+    assert stems[0] == "개념완성_민법_1주차_1강"
+    assert stems[1] == "개념완성_민법_1주차_2강"
+
+
+# ---------------------------------------------------------------------------
+# Extra: create_job's server-side backstop for unresolved MISMATCH/
+# INVALID_TARGET/CONFLICT targets (Section 12)
+# ---------------------------------------------------------------------------
+
+def test_job_creation_rejects_unresolved_mismatch_without_continue_original(tmp_path):
+    from fastapi import HTTPException
+    from src.api.routes import CreateJobRequest, create_job
+    import src.api.routes
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    # Standard-named, but embedded course/subject differ from typed -> MISMATCH.
+    (folder / "기본이론_민법_1주차_1강.mp3").touch()
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
+
+    req = CreateJobRequest(
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론",
+    )
+    with pytest.raises(HTTPException):
+        create_job(req)
+
+
+def test_job_creation_allows_explicit_continue_original_resolution(tmp_path):
+    from src.api.routes import CreateJobRequest, create_job
+    import src.api.routes
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    (folder / "기본이론_민법_1주차_1강.mp3").touch()
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
+
+    req = CreateJobRequest(
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론",
+        file_resolutions={"기본이론_민법_1주차_1강": "CONTINUE_ORIGINAL"},
+    )
+    job = create_job(req)
+
+    assert job.file_metadata["기본이론_민법_1주차_1강"].normalized_name is None

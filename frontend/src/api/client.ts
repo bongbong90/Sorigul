@@ -225,6 +225,10 @@ export const api = {
     request<NormalizationPreview>('/normalize/preview', {
       method: 'POST', body: JSON.stringify({ folder, filename, course, subject }),
     }),
+  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string) =>
+    request<NormalizationPreview[]>('/normalize/batch', {
+      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }),
+    }),
   rename: (folder: string, oldStem: string, newStem: string) =>
     request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
       method: 'POST', body: JSON.stringify({ folder, old_stem: oldStem, new_stem: newStem }),
@@ -242,6 +246,7 @@ export const api = {
     course: string
     subject: string
     stage?: '1차' | '2차'
+    file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST' }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>

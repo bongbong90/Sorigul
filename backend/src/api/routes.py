@@ -12,7 +12,7 @@ from src.services.normalizer import (
     collect_existing_stems,
     validate_classification_text,
 )
-from src.services.renamer import BundleRenamer
+from src.services.renamer import BundleRenamer, UnsafeStemError, validate_safe_stem
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
@@ -225,6 +225,30 @@ def preview_normalization(req: NormalizeRequest):
     )
     return normalizer.normalize(req.filename, course, subject, existing_stems)
 
+
+class NormalizeBatchRequest(BaseModel):
+    folder: str
+    filenames: List[str]
+    course: str
+    subject: str
+
+
+@router.post("/normalize/batch", response_model=List[NormalizationPreview])
+def preview_normalization_batch(req: NormalizeBatchRequest):
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    normalizer = FilenameNormalizer()
+    # Existing on-disk stems are the collision truth, except a batch member's
+    # own current stem -- it's a rename candidate, not a foreign collision.
+    existing_stems = collect_existing_stems(Path(req.folder))
+    batch_stems = {Path(name).stem for name in req.filenames}
+    existing_stems -= batch_stems
+    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems)
+
+
 class RenameRequest(BaseModel):
     folder: str
     old_stem: str
@@ -237,11 +261,16 @@ class RenameResponse(BaseModel):
 
 @router.post("/rename", response_model=RenameResponse)
 def apply_rename(req: RenameRequest):
+    try:
+        old_stem = validate_safe_stem(req.old_stem, "기존 파일명")
+        new_stem = validate_safe_stem(req.new_stem, "새 파일명")
+    except UnsafeStemError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     renamer = BundleRenamer()
-    success = renamer.apply_rename(req.folder, req.old_stem, req.new_stem)
+    success = renamer.apply_rename(req.folder, old_stem, new_stem)
     if not success:
         raise HTTPException(status_code=400, detail="Rename failed due to conflict or error.")
-    return RenameResponse(status="success", old_file_id=req.old_stem, new_file_id=req.new_stem)
+    return RenameResponse(status="success", old_file_id=old_stem, new_file_id=new_stem)
 
 class CreateJobRequest(BaseModel):
     folder: str
@@ -254,6 +283,14 @@ class CreateJobRequest(BaseModel):
     course: str
     subject: str
     stage: Optional[Literal["1차", "2차"]] = None
+    # Explicit per-file acknowledgement that the caller chose to proceed
+    # under the file's original (unresolved) name -- the only resolution
+    # that still leaves normalization/classification unresolved. Any target
+    # whose fresh normalize() result is MISMATCH/INVALID_TARGET/CONFLICT
+    # must appear here with "CONTINUE_ORIGINAL", or Job creation is
+    # rejected; this is the server-side backstop for "never create a Job
+    # with an unresolved file" (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
+    file_resolutions: Dict[str, Literal["CONTINUE_ORIGINAL"]] = Field(default_factory=dict)
 
 @router.post("/jobs", response_model=JobModel)
 def create_job(req: CreateJobRequest):
@@ -305,6 +342,14 @@ def create_job(req: CreateJobRequest):
             continue
         existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
         preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        if (
+            preview.result_type in {"MISMATCH", "INVALID_TARGET", "CONFLICT"}
+            and req.file_resolutions.get(fid) != "CONTINUE_ORIGINAL"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{scanned.filename}' 파일의 이름 정규화가 해결되지 않았습니다.",
+            )
         normalized_name = (
             Path(preview.suggested_name).stem
             if preview.result_type == "UNCHANGED" and preview.suggested_name
