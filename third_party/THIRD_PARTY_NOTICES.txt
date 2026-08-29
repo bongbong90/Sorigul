@@ -1,0 +1,75 @@
+Sorigul -- Third-Party Notices
+================================
+
+This installation of Sorigul bundles the following third-party components
+in addition to Sorigul's own code. This file is installed alongside the
+application (C:\Program Files\Sorigul\THIRD_PARTY_NOTICES.txt) and is
+removed together with the rest of the installed program files on
+uninstall -- it does not affect, and is not affected by, user data under
+%LOCALAPPDATA%\Sorigul.
+
+
+1. FFmpeg
+---------
+
+Component:       FFmpeg (bundled as `binaries\ffmpeg.exe`)
+Exact build:     ffmpeg version 7.1-essentials_build-www.gyan.dev
+                 (identified directly from this bundled binary's own
+                 `ffmpeg -version` / `ffmpeg -L` output; not assumed)
+Build source:    Windows builds provided by Gyan Doshi, published at
+                 https://www.gyan.dev/ffmpeg/builds/
+Upstream project: https://ffmpeg.org/  (source: https://github.com/FFmpeg/FFmpeg)
+License:         GNU General Public License, version 3 (GPLv3)
+
+License determination: this bundled binary's own `-L` output (see
+`ffmpeg -L`) states it was configured with `--enable-gpl --enable-version3`
+and prints the GPLv3 notice directly -- the license below was identified
+from the binary itself, not assumed or guessed between GPL/LGPL.
+
+Full license text: see `licenses\ffmpeg-gpl-3.0.txt` in this same
+directory -- the official GNU General Public License v3 text, downloaded
+verbatim from the Free Software Foundation at
+https://www.gnu.org/licenses/gpl-3.0.txt (the canonical publication of
+this license, not a third-party copy).
+
+Source code availability: FFmpeg's complete corresponding source code is
+publicly available at all times, at no charge, from the FFmpeg project
+itself (https://github.com/FFmpeg/FFmpeg and https://ffmpeg.org/download.html)
+and from the Windows-build provider whose build is bundled here
+(https://www.gyan.dev/ffmpeg/builds/, which also documents the exact
+build configuration and any patches applied). This notice, together with
+those publicly-accessible locations, constitutes Sorigul's offer of
+access to the Corresponding Source as permitted under GPLv3 section 6(d)
+(the source being already publicly available via the same means).
+
+No modification was made to FFmpeg's source or to this binary by the
+Sorigul project; it is redistributed unmodified.
+
+
+2. imageio-ffmpeg
+-----------------
+
+Component:       imageio-ffmpeg (Python packaging-time dependency used to
+                 provision the FFmpeg binary above during the build --
+                 imageio-ffmpeg's own Python code is NOT bundled into the
+                 installed application; only the FFmpeg binary it
+                 provided is)
+Version:         0.6.0
+Project:         https://github.com/imageio/imageio-ffmpeg
+License:         BSD 2-Clause License
+
+Full license text: see `licenses\imageio-ffmpeg-bsd-2-clause.txt` in this
+same directory -- copied verbatim from the installed package's own
+`imageio_ffmpeg-0.6.0.dist-info\LICENSE` file (the package's own bundled
+license file, not a third-party copy).
+
+
+Provenance summary
+-------------------
+
+Every license text and version string in this notice was taken from one
+of: (a) the exact bundled binary's own `-version`/`-L` output, (b) the
+exact installed Python package's own metadata/license file, or (c) the
+license-issuing organization's own canonical publication (gnu.org for
+GPLv3). No license text here was copied from a blog, forum, or other
+secondary/unofficial source.

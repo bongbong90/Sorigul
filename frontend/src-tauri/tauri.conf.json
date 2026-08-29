@@ -32,6 +32,13 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "binaries/sorigul-backend.exe": "binaries/sorigul-backend.exe",
+      "binaries/ffmpeg.exe": "binaries/ffmpeg.exe",
+      "../../third_party/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../../third_party/licenses/ffmpeg-gpl-3.0.txt": "licenses/ffmpeg-gpl-3.0.txt",
+      "../../third_party/licenses/imageio-ffmpeg-bsd-2-clause.txt": "licenses/imageio-ffmpeg-bsd-2-clause.txt"
+    }
   }
 }
