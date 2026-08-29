@@ -32,6 +32,11 @@
 
 ## 5. 브랜드 심볼
 
-- Lucide icon은 Sorigul의 Brand logo/symbol 대체 용도로 사용하지 않는다.
-- 승인된 별도 Brand symbol asset이 없으면 Brand 영역은 text brand만 사용한다.
-- Brand symbol은 별도 승인된 asset이 제공된 뒤에만 추가한다.
+- Lucide icon은 Navigation, Action, Status 등 UI 기능 아이콘에만 사용하며 Sorigul의
+  Native App Brand Icon을 대체하지 않는다.
+- Sorigul Native App Brand Icon의 canonical master asset은
+  `docs/design/reference/app-icon-v1.png`이다.
+- canonical master는 Window title bar, Windows Taskbar, Alt+Tab, EXE, Tray와 향후
+  Installer branding의 단일 원본이다.
+- Native App Brand Icon 적용은 React UI의 Brand 영역에 심볼을 추가한다는 뜻이 아니다.
+  UI Freeze에 따라 현재 text brand 구조는 변경하지 않는다.
