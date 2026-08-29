@@ -1,0 +1,24 @@
+# Release Checklist 0.1.0
+
+- [x] Contract
+- [x] ACTIVE 43
+- [x] Intentional Changes
+- [x] UI Freeze
+- [x] Backend
+- [x] Frontend
+- [x] Rust
+- [x] Local
+- [x] Colab
+- [x] Drive
+- [x] Results
+- [x] Native UX
+- [x] Installer
+- [x] Unicode
+- [x] Orphan
+- [x] Licenses
+- [x] Credentials
+- [x] Generated artifact
+- [x] User data
+- [x] Known risks
+- [ ] Manual gates (Actual Windows Shutdown Pending)
+- [x] Release verdict
