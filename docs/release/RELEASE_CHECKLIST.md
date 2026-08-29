@@ -7,9 +7,9 @@
 - [x] Backend
 - [x] Frontend
 - [x] Rust
-- [x] Local
-- [x] Colab
-- [x] Drive
+- [ ] Local — actual Korean MP3 required
+- [ ] Colab — endpoint required
+- [ ] Drive — OAuth credential + mutation approval required
 - [x] Results
 - [x] Native UX
 - [x] Installer
@@ -20,5 +20,5 @@
 - [x] Generated artifact
 - [x] User data
 - [x] Known risks
-- [ ] Manual gates (Actual Windows Shutdown Pending)
+- [ ] Actual Windows shutdown — manual supervised check pending
 - [x] Release verdict
