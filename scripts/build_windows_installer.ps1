@@ -4,14 +4,17 @@
     Full reproducible build of the Sorigul Windows MSI installer.
 
 .DESCRIPTION
-    1. Builds + self-tests the packaged backend sidecar (build_backend_sidecar.ps1).
-    2. Confirms that self-test passed (non-zero exit stops the script).
-    3. Builds the frontend production bundle (npm run build).
-    4. Validates the Rust/Tauri crate (fmt --check, check, clippy, test).
-    5. Builds the Windows MSI via the official Tauri CLI syntax
+    1. Confirms the required third-party notice/license files exist
+       (third_party/THIRD_PARTY_NOTICES.txt and its licenses/) -- a release
+       installer must never ship the bundled ffmpeg without its license.
+    2. Builds + self-tests the packaged backend sidecar (build_backend_sidecar.ps1).
+    3. Confirms that self-test passed (non-zero exit stops the script).
+    4. Builds the frontend production bundle (npm run build).
+    5. Validates the Rust/Tauri crate (fmt --check, check, clippy, test).
+    6. Builds the Windows MSI via the official Tauri CLI syntax
        (`tauri build --bundles msi`), confirmed against `tauri build --help`
        rather than a guessed flag.
-    6. Reports the MSI artifact path, size, and SHA-256.
+    7. Reports the MSI artifact path, size, and SHA-256.
 
     Fails fast: any step failing stops the script immediately (no partial
     "ignore and continue"). NSIS is not built here -- MSI is this project's
@@ -36,6 +39,18 @@ if (-not (Test-Path (Join-Path $RepoRoot "backend\src\main.py"))) {
     exit 1
 }
 Set-Location $RepoRoot
+
+Write-Step "Checking required third-party notice/license files"
+$RequiredNotices = @(
+    "third_party\THIRD_PARTY_NOTICES.txt",
+    "third_party\licenses\ffmpeg-gpl-3.0.txt",
+    "third_party\licenses\imageio-ffmpeg-bsd-2-clause.txt"
+)
+$MissingNotices = $RequiredNotices | Where-Object { -not (Test-Path (Join-Path $RepoRoot $_)) }
+if ($MissingNotices) {
+    Write-Error "Missing required third-party notice/license file(s): $($MissingNotices -join ', '). A release installer must not ship bundled ffmpeg without its license/notice."
+    exit 1
+}
 
 Write-Step "Building + self-testing the backend sidecar"
 & (Join-Path $PSScriptRoot "build_backend_sidecar.ps1")

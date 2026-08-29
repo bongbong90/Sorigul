@@ -282,6 +282,29 @@ fn spawn_spec_for_current_build(app: &AppHandle) -> Result<SpawnSpec, String> {
     }
 }
 
+/// Dev backend (a plain `uvicorn` process on an already-warm interpreter)
+/// starts in well under a second; the existing 20s ceiling is unchanged.
+const DEV_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The packaged PyInstaller one-file backend re-extracts its ~230MB bundle
+/// to a temp directory on every launch. Measured cold-start latency in
+/// this project's own installer validation was ~15-18s; 20s left too
+/// little margin on a slower disk or with antivirus real-time scanning a
+/// freshly-placed exe. 60s gives real headroom without changing the happy
+/// path at all -- `wait_until_healthy` already returns the moment health
+/// succeeds (polled every 400ms, unchanged), so a fast cold start still
+/// reports `Connected` in a few seconds; this only raises the ceiling
+/// before a slow one is declared `STARTUP_TIMEOUT`.
+const PACKAGED_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn startup_timeout_for_current_build() -> Duration {
+    if cfg!(debug_assertions) {
+        DEV_STARTUP_TIMEOUT
+    } else {
+        PACKAGED_STARTUP_TIMEOUT
+    }
+}
+
 fn start_backend(app: AppHandle, sidecar: Arc<SidecarManager>) {
     std::thread::spawn(move || {
         let probe = HttpHealthProbe {
@@ -292,7 +315,7 @@ fn start_backend(app: AppHandle, sidecar: Arc<SidecarManager>) {
             Ok(spec) => match sidecar.start(&probe, spec) {
                 SidecarStatus::Starting => sidecar.wait_until_healthy(
                     &probe,
-                    Duration::from_secs(20),
+                    startup_timeout_for_current_build(),
                     Duration::from_millis(400),
                 ),
                 other => other,
