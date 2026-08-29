@@ -1,6 +1,6 @@
-import { isTauri } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { openPath, openUrl, revealItemInDir } from '@tauri-apps/plugin-opener'
+import { openUrl } from '@tauri-apps/plugin-opener'
 
 export { isTauri }
 
@@ -19,18 +19,18 @@ export async function pickFolder(currentValue: string): Promise<string | undefin
 }
 
 /**
- * Opens the backend-validated folder (or reveals a specific file within
- * it) in Windows Explorer. Only ever called with a path the backend has
- * already resolved and validated -- never an arbitrary frontend value.
+ * Opens the backend-validated folder (or reveals a specific file within it)
+ * in Windows Explorer. The frontend passes only the opaque scan_id and
+ * optional item_id identifiers; the Rust `open_folder_by_intent` command
+ * fetches the validated path from the backend and opens it natively.
+ *
+ * Security: the frontend never constructs or passes a raw filesystem path to
+ * any native open call. `opener:allow-open-path` and
+ * `opener:allow-reveal-item-in-dir` are NOT in the capability manifest.
  */
-export async function openInExplorer(folder: string, itemFilename?: string | null): Promise<void> {
+export async function openInExplorer(scanId: string, itemId?: string | null): Promise<void> {
   if (!isTauri()) return
-  if (itemFilename) {
-    const separator = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\'
-    await revealItemInDir(`${folder}${separator}${itemFilename}`)
-  } else {
-    await openPath(folder)
-  }
+  await invoke('open_folder_by_intent', { scanId, itemId: itemId ?? null })
 }
 
 /** Opens a URL in the user's default system browser (Drive OAuth handoff). */
