@@ -4,9 +4,10 @@ import pytest
 from pathlib import Path
 from src.domain.models import BundleStatus, FileStatus
 from src.services.scanner import FileScanner
-from src.services.normalizer import FilenameNormalizer
+from src.services.normalizer import ClassificationValidationError, FilenameNormalizer, validate_classification_text
 from src.services.renamer import BundleRenamer
 from src.services.job_manager import JobManager
+from src.services.settings import SettingsManager
 
 @pytest.fixture
 def test_dir(tmp_path):
@@ -72,27 +73,113 @@ def test_file_scan_rejects_invalid_segment(tmp_path):
     scanned = FileScanner(str(tmp_path)).scan()
     assert scanned[0].completion_status == BundleStatus.INVALID_RESULT
 
+# ---------------------------------------------------------------------------
+# course/subject input validation (D23B) -- these feed directly into the
+# generated filename, so they get the same safety net filenames require.
+# ---------------------------------------------------------------------------
+
+def test_validate_classification_text_trims_and_accepts_ordinary_input():
+    assert validate_classification_text("  개념완성  ", "과정명") == "개념완성"
+    assert validate_classification_text("Real Estate 101_v2", "과목명") == "Real Estate 101_v2"
+
+
+def test_validate_classification_text_rejects_empty():
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text("   ", "과정명")
+
+
+def test_validate_classification_text_rejects_control_characters():
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text("개념완성\x07", "과정명")
+
+
+@pytest.mark.parametrize("char", list('<>:"/\\|?*'))
+def test_validate_classification_text_rejects_each_forbidden_character(char):
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text(f"개념완성{char}", "과정명")
+
+
+def test_validate_classification_text_rejects_trailing_dot():
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text("개념완성.", "과정명")
+
+
+def test_validate_classification_text_never_needs_trailing_space_check_after_trim():
+    # Trimming already removes a trailing space; the resulting value is valid.
+    assert validate_classification_text("개념완성   ", "과정명") == "개념완성"
+
+
 def test_filename_normalization():
     norm = FilenameNormalizer()
 
-    # Clean forbidden chars, + to space
-    p1 = norm.normalize("기본이론_민법_<1주차>_1강.mp3", set())
-    assert p1.suggested_name == "기본이론_민법_1주차_1강.mp3" # Course subject heuristically parsed
+    # Course/subject are typed by the user, not auto-detected from the
+    # filename (D12) -- only week/lesson are extracted, and forbidden
+    # chars/+ are cleaned up beforehand for a robust match.
+    p1 = norm.normalize("기본이론_민법_<1주차>_1강.mp3", "기본이론", "민법", set())
+    assert p1.suggested_name == "기본이론_민법_1주차_1강.mp3"
+    assert p1.result_type == "NORMALIZED"
 
     # Standard name protected
-    p2 = norm.normalize("개념완성_민법_8주차_4강.mp3", set())
+    p2 = norm.normalize("개념완성_민법_8주차_4강.mp3", "개념완성", "민법", set())
     assert p2.suggested_name == "개념완성_민법_8주차_4강.mp3"
     assert p2.result_type == "UNCHANGED"
 
+
+def test_filename_normalization_real_lecture_title():
+    norm = FilenameNormalizer()
+    original = "1강_[1주차]_26_03_04_[교재]+01+토지의+용어+및+분류+문제01+(p.+8+~+).mp3"
+    preview = norm.normalize(original, "개념완성", "부동산학개론", set())
+    assert preview.suggested_name == "개념완성_부동산학개론_1주차_1강.mp3"
+    assert preview.result_type == "NORMALIZED"
+
+
+def test_filename_normalization_no_alias_guessing():
+    # Words that look like a known course/subject/teacher name inside the
+    # raw filename must never override the typed course/subject (D12).
+    norm = FilenameNormalizer()
+    preview = norm.normalize(
+        "민법_기본이론_특강_1주차_1강.mp3", "개념완성", "부동산학개론", set()
+    )
+    assert preview.suggested_name == "개념완성_부동산학개론_1주차_1강.mp3"
+    assert preview.detected_course == "개념완성"
+    assert preview.detected_subject == "부동산학개론"
+
+
+def test_filename_normalization_standard_mismatch_warns_never_silently_renames():
+    norm = FilenameNormalizer()
+    preview = norm.normalize("기본이론_민법_1주차_1강.mp3", "개념완성", "부동산학개론", set())
+    assert preview.result_type == "MISMATCH"
+    assert preview.suggested_name == "기본이론_민법_1주차_1강.mp3"  # unchanged, not silently renamed
+    assert preview.detected_course == "기본이론"
+    assert preview.detected_subject == "민법"
+    assert preview.can_apply is False
+
+
+def test_filename_normalization_missing_week_lesson_is_invalid_target():
+    norm = FilenameNormalizer()
+    preview = norm.normalize("아무개_강의_녹음본.mp3", "개념완성", "부동산학개론", set())
+    assert preview.result_type == "INVALID_TARGET"
+    assert preview.suggested_name is None
+    assert preview.detected_week is None
+    assert preview.detected_lesson is None
+
+
+def test_filename_normalization_collision_uses_filesystem_stems():
+    norm = FilenameNormalizer()
+    existing = {"개념완성_부동산학개론_1주차_1강", "개념완성_부동산학개론_1주차_2강"}
+    preview = norm.normalize("1강_[1주차]_원본.mp3", "개념완성", "부동산학개론", existing)
+    assert preview.suggested_name == "개념완성_부동산학개론_1주차_3강.mp3"
+
+
 def test_next_lesson_batch_reservation():
     norm = FilenameNormalizer()
-    # Batch test
+    # Batch test -- course/subject are uniform across a batch (one Job).
     names = [
         "기본이론_민법_1주차_1강.mp3",
         "기본이론_민법_1주차_1강 copy.mp3",
         "기본이론_민법_1주차_2강.mp3"
     ]
-    res = norm.normalize_batch(names, set())
+    res = norm.normalize_batch(names, "기본이론", "민법", set())
     assert res[0].suggested_name == "기본이론_민법_1주차_1강.mp3"
     assert res[1].suggested_name == "기본이론_민법_1주차_2강.mp3" # auto incremented
     assert res[2].suggested_name == "기본이론_민법_1주차_3강.mp3" # incremented because 2강 was taken
@@ -171,14 +258,23 @@ def test_job_create_modes(tmp_path, test_dir):
     from src.api.routes import CreateJobRequest, create_job
     import src.api.routes
     src.api.routes.job_manager = jm
+    # Isolate from the real %LOCALAPPDATA%\Sorigul\settings.json.
+    src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
     # all_incomplete mode: should skip "done"
-    req1 = CreateJobRequest(folder=str(d), file_ids=[], scope="all_incomplete")
+    req1 = CreateJobRequest(
+        folder=str(d), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법"
+    )
     job1 = create_job(req1)
     assert len(job1.files) == 2 # "no_srt", "invalid_json"
+    assert job1.course == "개념완성"
+    assert job1.subject == "민법"
+    assert job1.stage == "1차"
 
     # selected mode
-    req2 = CreateJobRequest(folder=str(d), file_ids=["invalid_json"], scope="selected")
+    req2 = CreateJobRequest(
+        folder=str(d), file_ids=["invalid_json"], scope="selected", course="개념완성", subject="민법"
+    )
     job2 = create_job(req2)
     assert len(job2.files) == 1
 
