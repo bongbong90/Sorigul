@@ -1,8 +1,17 @@
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from src.services.scanner import FileScanner
-from src.services.normalizer import FilenameNormalizer, NormalizationPreview
+from src.services.classification import StageRequiredError, resolve_stage
+from src.services.normalizer import (
+    ClassificationValidationError,
+    FilenameNormalizer,
+    NormalizationPreview,
+    collect_existing_stems,
+    validate_classification_text,
+)
 from src.services.renamer import BundleRenamer
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
@@ -13,6 +22,7 @@ from src.services.transcription_runner import (
 from src.domain.models import (
     BundleStatus,
     DriveFileState,
+    FileMetadata,
     FileStatus,
     JobEvent,
     JobModel,
@@ -199,25 +209,39 @@ def complete_drive_auth(req: DriveAuthCompleteRequest):
 class NormalizeRequest(BaseModel):
     folder: str
     filename: str
-    existing_basenames: List[str]
+    course: str
+    subject: str
 
 @router.post("/normalize/preview", response_model=NormalizationPreview)
 def preview_normalization(req: NormalizeRequest):
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     normalizer = FilenameNormalizer()
-    return normalizer.normalize(req.filename, set(req.existing_basenames))
+    existing_stems = collect_existing_stems(
+        Path(req.folder), exclude_stem=Path(req.filename).stem
+    )
+    return normalizer.normalize(req.filename, course, subject, existing_stems)
 
 class RenameRequest(BaseModel):
     folder: str
     old_stem: str
     new_stem: str
 
-@router.post("/rename")
+class RenameResponse(BaseModel):
+    status: str
+    old_file_id: str
+    new_file_id: str
+
+@router.post("/rename", response_model=RenameResponse)
 def apply_rename(req: RenameRequest):
     renamer = BundleRenamer()
     success = renamer.apply_rename(req.folder, req.old_stem, req.new_stem)
     if not success:
         raise HTTPException(status_code=400, detail="Rename failed due to conflict or error.")
-    return {"status": "success"}
+    return RenameResponse(status="success", old_file_id=req.old_stem, new_file_id=req.new_stem)
 
 class CreateJobRequest(BaseModel):
     folder: str
@@ -227,6 +251,9 @@ class CreateJobRequest(BaseModel):
     engine: str = "local_whisper"
     colab_url: Optional[str] = None
     upload_to_drive: bool = False
+    course: str
+    subject: str
+    stage: Optional[Literal["1차", "2차"]] = None
 
 @router.post("/jobs", response_model=JobModel)
 def create_job(req: CreateJobRequest):
@@ -234,8 +261,25 @@ def create_job(req: CreateJobRequest):
         raise HTTPException(status_code=400, detail="Unsupported transcription engine.")
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")
+
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    current_settings = settings_manager.get()
+    try:
+        stage = resolve_stage(subject, req.stage, current_settings.subject_stage_overrides)
+    except StageRequiredError:
+        raise HTTPException(
+            status_code=400,
+            detail="알 수 없는 과목입니다. 1차/2차를 선택해 주세요.",
+        )
+
     scanner = FileScanner(req.folder)
     files = scanner.scan()
+    files_by_id = {f.id: f for f in files}
 
     # Filter files
     target_ids = []
@@ -252,6 +296,26 @@ def create_job(req: CreateJobRequest):
     if not target_ids:
         raise HTTPException(status_code=400, detail="No eligible files to transcribe.")
 
+    file_metadata: Dict[str, FileMetadata] = {}
+    normalizer = FilenameNormalizer()
+    folder_path = Path(req.folder)
+    for fid in target_ids:
+        scanned = files_by_id.get(fid)
+        if scanned is None:
+            continue
+        existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
+        preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        normalized_name = (
+            Path(preview.suggested_name).stem
+            if preview.result_type == "UNCHANGED" and preview.suggested_name
+            else None
+        )
+        file_metadata[fid] = FileMetadata(
+            week=preview.detected_week,
+            lesson=preview.detected_lesson,
+            normalized_name=normalized_name,
+        )
+
     engine_config = {"base_url": req.colab_url} if req.colab_url else {}
     job = job_manager.create_job(
         req.folder,
@@ -260,6 +324,10 @@ def create_job(req: CreateJobRequest):
         engine_config=engine_config,
         force_retranscribe=req.force_retranscribe,
         upload_to_drive=req.upload_to_drive,
+        course=course,
+        subject=subject,
+        stage=stage,
+        file_metadata=file_metadata,
     )
     return job
 
