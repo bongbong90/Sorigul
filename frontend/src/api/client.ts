@@ -46,7 +46,7 @@ export interface ScannedFile {
 
 export interface NormalizationPreview {
   original_name: string
-  suggested_name: string
+  suggested_name: string | null
   detected_course: string | null
   detected_subject: string | null
   detected_week: string | null
@@ -54,7 +54,14 @@ export interface NormalizationPreview {
   warnings: string[]
   conflicts: string[]
   can_apply: boolean
+  // NORMALIZED | UNCHANGED | MISMATCH | INVALID_TARGET | CONFLICT
   result_type: string
+}
+
+export interface FileMetadata {
+  week: string | null
+  lesson: string | null
+  normalized_name: string | null
 }
 
 export interface JobEvent {
@@ -84,6 +91,10 @@ export interface JobModel {
   events: JobEvent[]
   drive: Record<string, DriveFileState>
   error: string | null
+  course: string | null
+  subject: string | null
+  stage: '1차' | '2차' | null
+  file_metadata: Record<string, FileMetadata>
 }
 
 export type FolderFilter = 'all' | 'complete' | 'incomplete' | 'results'
@@ -125,6 +136,12 @@ export interface RuntimeSettings {
   }
   close_behavior: 'tray' | 'exit'
   shutdown: 'disabled' | 'immediate' | '15_seconds' | '30_seconds'
+  transcription_folder: string | null
+  last_course: string | null
+  last_subject: string | null
+  // Drive auto-upload is intentionally NOT part of this shape -- it is a
+  // per-run CreateJobRequest field, never a persisted setting (D23A).
+  subject_stage_overrides: Record<string, '1차' | '2차'>
 }
 
 export interface ShutdownState {
@@ -204,13 +221,14 @@ export const api = {
   scan: (folder: string) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }),
   }),
-  normalize: (folder: string, filename: string, existingBasenames: string[]) =>
+  normalize: (folder: string, filename: string, course: string, subject: string) =>
     request<NormalizationPreview>('/normalize/preview', {
-      method: 'POST', body: JSON.stringify({ folder, filename, existing_basenames: existingBasenames }),
+      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }),
     }),
-  rename: (folder: string, oldStem: string, newStem: string) => request<{ status: string }>('/rename', {
-    method: 'POST', body: JSON.stringify({ folder, old_stem: oldStem, new_stem: newStem }),
-  }),
+  rename: (folder: string, oldStem: string, newStem: string) =>
+    request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
+      method: 'POST', body: JSON.stringify({ folder, old_stem: oldStem, new_stem: newStem }),
+    }),
   jobs: () => request<JobModel[]>('/jobs'),
   job: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (payload: {
@@ -221,6 +239,9 @@ export const api = {
     engine?: 'local_whisper' | 'direct_colab'
     colab_url?: string
     upload_to_drive?: boolean
+    course: string
+    subject: string
+    stage?: '1차' | '2차'
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST' }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>

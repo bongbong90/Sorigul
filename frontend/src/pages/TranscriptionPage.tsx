@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Cloud, FilePenLine, RefreshCw, WifiOff } from 'lucide-react'
-import { api, getSavedFolder, getUserMessage, saveFolder, type JobModel, type NormalizationPreview, type ScannedFile } from '../api/client'
+import {
+  api,
+  getSavedFolder,
+  getUserMessage,
+  saveFolder,
+  type JobModel,
+  type NormalizationPreview,
+  type RuntimeSettings,
+  type ScannedFile,
+} from '../api/client'
 import { pickFolder } from '../lib/native'
+import { knownStageFor, overrideStageFor, validateClassificationText, type Stage } from '../lib/classification'
+import { ClassificationSection } from '../components/transcription/ClassificationSection'
 import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transcription/CurrentTaskSection'
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
@@ -48,16 +59,66 @@ export function TranscriptionPage() {
   const [filenameValue, setFilenameValue] = useState('')
   const [filenameResolution, setFilenameResolution] = useState('')
   const [filenameMode, setFilenameMode] = useState<'review' | 'editing' | 'resolved'>('review')
+  // D23A: Drive auto-upload is a per-run choice only -- always unchecked on
+  // launch, never restored from a prior Job or persisted to RuntimeSettings.
   const [uploadToDrive, setUploadToDrive] = useState(false)
+  const [settings, setSettings] = useState<RuntimeSettings>()
+  const [course, setCourse] = useState('')
+  const [subject, setSubject] = useState('')
+  const [courseError, setCourseError] = useState<string>()
+  const [subjectError, setSubjectError] = useState<string>()
+  const [editingOverride, setEditingOverride] = useState(false)
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
+
+  const knownStage = knownStageFor(subject)
+  const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
+  const needsStagePrompt = Boolean(subject.trim()) && !knownStage && (!overrideStage || editingOverride)
+  const resolvedStage = knownStage ?? (editingOverride ? undefined : overrideStage)
+
+  // Loaded once at startup: the backend transcription_folder setting is the
+  // source of truth going forward, but a pre-existing localStorage folder
+  // from before this upgrade is non-destructively adopted rather than
+  // dropped (D22). last_course/last_subject prefill the classification
+  // inputs.
+  const loadSettings = useCallback(async () => {
+    try {
+      const loaded = await api.settings()
+      let effectiveFolder = loaded.transcription_folder
+      if (!effectiveFolder) {
+        const legacy = getSavedFolder()
+        if (legacy) {
+          effectiveFolder = legacy
+          try {
+            const adopted = await api.saveSettings({ ...loaded, transcription_folder: legacy })
+            setSettings(adopted)
+          } catch {
+            setSettings(loaded)
+          }
+        } else {
+          setSettings(loaded)
+        }
+      } else {
+        setSettings(loaded)
+      }
+      if (effectiveFolder && effectiveFolder !== folder) setFolder(effectiveFolder)
+      setCourse((current) => current || loaded.last_course || '')
+      setSubject((current) => current || loaded.last_subject || '')
+    } catch {
+      // Backend offline at startup: fall back to whatever localStorage has;
+      // the health/reconnect flow will retry settings once connected.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => { void loadSettings() }, [loadSettings])
 
   const loadFolder = useCallback(async () => {
     if (!folder) { setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return }
     try {
       const [scanned, jobs, drive] = await Promise.all([api.scan(folder), api.jobs(), api.driveStatus()])
       const matching = jobs.filter((item) => item.folder === folder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
-      setFiles(scanned); setJob(matching); setUploadToDrive(matching?.upload_to_drive ?? false); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
+      setFiles(scanned); setJob(matching); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
     } catch (cause) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
   }, [folder])
 
@@ -100,6 +161,32 @@ export function TranscriptionPage() {
     const value = await pickFolder(folder)
     if (!value) return
     saveFolder(value); setFolder(value); setSelectedIds([]); setJob(undefined); setNormalization(undefined)
+    if (settings) {
+      try { setSettings(await api.saveSettings({ ...settings, transcription_folder: value })) }
+      catch { /* best-effort; localStorage still has the current selection */ }
+    }
+  }
+
+  function onCourseChange(value: string) {
+    setCourse(value)
+    setCourseError(value.trim() ? validateClassificationText(value, '과정명').error : undefined)
+  }
+
+  function onSubjectChange(value: string) {
+    setSubject(value)
+    setSubjectError(value.trim() ? validateClassificationText(value, '과목명').error : undefined)
+    setEditingOverride(false)
+  }
+
+  async function onPickStage(stage: Stage) {
+    if (!settings) return
+    const trimmedSubject = subject.trim()
+    if (!trimmedSubject) return
+    const nextOverrides = { ...settings.subject_stage_overrides, [trimmedSubject]: stage }
+    try {
+      setSettings(await api.saveSettings({ ...settings, subject_stage_overrides: nextOverrides }))
+      setEditingOverride(false)
+    } catch (cause) { setMessage(getUserMessage(cause)) }
   }
 
   function toggle(id: string) {
@@ -111,14 +198,22 @@ export function TranscriptionPage() {
   async function reviewFilename(id: string) {
     const file = files.find((item) => item.id === id)
     if (!file || !folder) return
+    const courseCheck = validateClassificationText(course, '과정명')
+    const subjectCheck = validateClassificationText(subject, '과목명')
+    if (courseCheck.error || subjectCheck.error) return
     try {
-      const result = await api.normalize(folder, file.filename, files.filter((item) => item.id !== id).map((item) => item.filename))
-      setNormalization(result); setFilenameValue(result.suggested_name); setFilenameMode('review'); setFilenameResolution('')
+      const result = await api.normalize(folder, file.filename, courseCheck.value, subjectCheck.value)
+      setNormalization(result); setFilenameValue(result.suggested_name ?? file.filename); setFilenameMode('review'); setFilenameResolution('')
     } catch (cause) { setMessage(getUserMessage(cause)) }
   }
 
   function handleStart() {
     if (!folder || isProcessing) return
+    const courseCheck = validateClassificationText(course, '과정명')
+    const subjectCheck = validateClassificationText(subject, '과목명')
+    setCourseError(courseCheck.error); setSubjectError(subjectCheck.error)
+    if (courseCheck.error || subjectCheck.error) { setMessage('과정명/과목명을 확인해 주세요.'); return }
+    if (needsStagePrompt) { setMessage('과목의 1차/2차 분류를 먼저 선택해 주세요.'); return }
     if (selectedIds.length === 0) {
       const targets = rows.filter((row) => row.status !== 'DONE').map((row) => row.id)
       setPendingIds(targets); setDialog(targets.length ? 'start-all' : 'empty-target'); return
@@ -129,10 +224,21 @@ export function TranscriptionPage() {
   }
 
   async function createAndStart(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
+    const courseCheck = validateClassificationText(course, '과정명')
+    const subjectCheck = validateClassificationText(subject, '과목명')
+    if (courseCheck.error || subjectCheck.error) { setDialog(null); setMessage('과정명/과목명을 확인해 주세요.'); return }
     try {
-      const created = await api.createJob({ folder, file_ids: ids, scope, force_retranscribe: force, upload_to_drive: uploadToDrive })
+      const created = await api.createJob({
+        folder, file_ids: ids, scope, force_retranscribe: force, upload_to_drive: uploadToDrive,
+        course: courseCheck.value, subject: subjectCheck.value, stage: resolvedStage,
+      })
       setJob(created); setDialog(null); setPendingIds([]); setMessage('Job을 생성했습니다. 전사를 시작합니다.')
       setJob(await api.startJob(created.job_id))
+      // Only remember a course/subject that actually produced a valid Job.
+      if (settings) {
+        try { setSettings(await api.saveSettings({ ...settings, last_course: courseCheck.value, last_subject: subjectCheck.value })) }
+        catch { /* best-effort */ }
+      }
     } catch (cause) { setMessage(getUserMessage(cause)); setDialog(null) }
   }
 
@@ -156,11 +262,48 @@ export function TranscriptionPage() {
     setJob(await api.job(job.job_id))
   }
 
+  // Rename success -> remap selection onto the new id *before* rescanning,
+  // so the same logical file stays selected across the rescan (Section 5.3
+  // / Section 26 -- a rename-transaction id remap, not a global stable-id
+  // redesign).
+  async function remapSelectionAfterRename(oldFileId: string, newFileId: string) {
+    if (oldFileId === newFileId) return
+    setSelectedIds((current) => current.map((id) => (id === oldFileId ? newFileId : id)))
+  }
+
   async function applyFilename() {
     if (!normalization || !folder || !filenameValue.toLowerCase().endsWith('.mp3')) return
     try {
-      await api.rename(folder, normalization.original_name.replace(/\.mp3$/i, ''), filenameValue.replace(/\.mp3$/i, ''))
+      const response = await api.rename(folder, normalization.original_name.replace(/\.mp3$/i, ''), filenameValue.replace(/\.mp3$/i, ''))
+      await remapSelectionAfterRename(response.old_file_id, response.new_file_id)
       setFilenameMode('resolved'); setFilenameResolution(`이름을 “${filenameValue}”로 변경했습니다.`); await loadFolder()
+    } catch (cause) { setMessage(getUserMessage(cause)) }
+  }
+
+  // D24 mismatch option A: adopt the file's own embedded classification as
+  // the job-level typed course/subject instead of renaming the file.
+  function useFileClassification() {
+    if (!normalization) return
+    if (normalization.detected_course) onCourseChange(normalization.detected_course)
+    if (normalization.detected_subject) onSubjectChange(normalization.detected_subject)
+    setFilenameMode('resolved'); setFilenameResolution('현재 파일의 분류를 그대로 사용합니다.')
+  }
+
+  // D24 mismatch option B: keep the typed course/subject and rename this one
+  // file to match -- built from the typed values plus the week/lesson
+  // already embedded in its current standard name. Never overwrites: the
+  // rename endpoint rejects the call outright if the target already exists.
+  async function renameToTypedClassification() {
+    if (!normalization || !folder || !normalization.detected_week || !normalization.detected_lesson) return
+    const courseCheck = validateClassificationText(course, '과정명')
+    const subjectCheck = validateClassificationText(subject, '과목명')
+    if (courseCheck.error || subjectCheck.error) return
+    const targetStem = `${courseCheck.value}_${subjectCheck.value}_${normalization.detected_week}주차_${normalization.detected_lesson}강`
+    try {
+      const oldStem = normalization.original_name.replace(/\.mp3$/i, '')
+      const response = await api.rename(folder, oldStem, targetStem)
+      await remapSelectionAfterRename(response.old_file_id, response.new_file_id)
+      setFilenameMode('resolved'); setFilenameResolution(`이름을 “${targetStem}.mp3”로 변경했습니다.`); await loadFolder()
     } catch (cause) { setMessage(getUserMessage(cause)) }
   }
 
@@ -170,12 +313,26 @@ export function TranscriptionPage() {
     <div className="transcription-page">
       <RuntimeBanner status={backendStatus} message={message} onReconnect={() => void reconnect()} />
       <FolderSection folderPath={folder || '선택된 폴더 없음'} onChangeFolder={() => void changeFolder()} />
+      <ClassificationSection
+        course={course}
+        subject={subject}
+        courseError={courseError}
+        subjectError={subjectError}
+        onCourseChange={onCourseChange}
+        onSubjectChange={onSubjectChange}
+        knownStage={knownStage}
+        overrideStage={overrideStage}
+        needsStagePrompt={needsStagePrompt}
+        onPickStage={(stage) => void onPickStage(stage)}
+        onEditOverride={() => setEditingOverride(true)}
+        disabled={isProcessing}
+      />
       {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" onClick={() => void action('retry')}>다시 시도</Button></div> : null}
       <TranscriptionActions completedCount={completedCount} selectedCount={selectedIds.length} totalCount={rows.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing} canStop={canControl} canCancel={canControl} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => void action('retry')} />
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
       <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={toggle} onToggleAll={() => setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id))} onRetry={() => void action('retry')} onRetranscribe={(id) => { setPendingIds([id]); setDialog('retranscribe') }} />
-      <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} resolution={filenameResolution} onValueChange={setFilenameValue} onContinueOriginal={() => { setFilenameMode('resolved'); setFilenameResolution('원래 이름으로 Local 전사를 계속합니다. Drive 분류는 보류될 수 있습니다.') }} onEdit={() => setFilenameMode('editing')} onApply={() => void applyFilename()} onReset={() => setFilenameMode('review')} />
+      <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} resolution={filenameResolution} onValueChange={setFilenameValue} onContinueOriginal={() => { setFilenameMode('resolved'); setFilenameResolution('원래 이름으로 Local 전사를 계속합니다. Drive 분류는 보류될 수 있습니다.') }} onEdit={() => setFilenameMode('editing')} onApply={() => void applyFilename()} onReset={() => setFilenameMode('review')} onUseFileClassification={useFileClassification} onRenameToTyped={() => void renameToTypedClassification()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
         <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p><label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>MP3/TXT/JSON/SRT 정확히 4개</small></span><input type="checkbox" checked={uploadToDrive} onChange={(event) => setUploadToDrive(event.target.checked)} /></label><div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED')} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
@@ -194,9 +351,74 @@ function RuntimeBanner({ status, message, onReconnect }: { status: BackendStatus
   return <div className={connected ? 'runtime-banner runtime-banner-connected' : 'runtime-banner'} role="status">{connected ? <CheckCircle2 aria-hidden="true" /> : <WifiOff aria-hidden="true" />}<div><strong>{status === 'OFFLINE' ? 'Backend 오프라인' : status === 'STARTING' ? 'Backend 시작 중' : 'Backend 연결됨'}</strong><span>{message}</span></div>{!connected ? <Button variant="secondary" disabled={status === 'STARTING'} onClick={onReconnect}><RefreshCw aria-hidden="true" />{status === 'STARTING' ? '연결 중' : '다시 연결'}</Button> : null}</div>
 }
 
-function FilenameReview({ preview, mode, value, resolution, onValueChange, onContinueOriginal, onEdit, onApply, onReset }: { preview?: NormalizationPreview; mode: 'review' | 'editing' | 'resolved'; value: string; resolution: string; onValueChange: (value: string) => void; onContinueOriginal: () => void; onEdit: () => void; onApply: () => void; onReset: () => void }) {
+interface FilenameReviewProps {
+  preview?: NormalizationPreview
+  mode: 'review' | 'editing' | 'resolved'
+  value: string
+  resolution: string
+  onValueChange: (value: string) => void
+  onContinueOriginal: () => void
+  onEdit: () => void
+  onApply: () => void
+  onReset: () => void
+  onUseFileClassification: () => void
+  onRenameToTyped: () => void
+}
+
+function FilenameReview({
+  preview, mode, value, resolution, onValueChange, onContinueOriginal, onEdit, onApply, onReset,
+  onUseFileClassification, onRenameToTyped,
+}: FilenameReviewProps) {
   const invalid = /[<>:"/\\|?*]/.test(value.replace(/\.mp3$/i, '')) || !value.toLowerCase().endsWith('.mp3')
-  return <Card className="filename-review"><div className="section-heading-row"><div><span className="eyebrow">파일명 확인</span><h2 className="text-section-heading">정규화 결과를 확인해 주세요</h2></div><FilePenLine aria-hidden="true" /></div>
-    {!preview ? <p>파일을 선택하면 실제 Backend 정규화 결과를 표시합니다.</p> : mode === 'resolved' ? <div className="resolved-state" role="status"><CheckCircle2 aria-hidden="true" /><span>{resolution}</span><button type="button" className="text-action" onClick={onReset}>다시 확인</button></div> : <><dl className="filename-comparison"><div><dt>원본</dt><dd>{preview.original_name}</dd></div><div><dt>추천</dt><dd>{preview.suggested_name}</dd></div></dl>{preview.warnings.map((warning) => <p key={warning}>{warning}</p>)}{mode === 'editing' ? <div className="filename-editor"><label htmlFor="normalized-filename">수정할 이름</label><input className={invalid ? 'input input-error' : 'input'} id="normalized-filename" value={value} onChange={(event) => onValueChange(event.target.value)} /></div> : null}<div className="inline-actions"><Button variant="secondary" onClick={onContinueOriginal}>원래 이름으로 계속</Button>{mode === 'editing' ? <Button disabled={invalid} onClick={onApply}>이름 적용</Button> : <Button onClick={onEdit}>이름 수정</Button>}</div></>}
-  </Card>
+  const mismatch = preview?.result_type === 'MISMATCH'
+
+  return (
+    <Card className="filename-review">
+      <div className="section-heading-row">
+        <div><span className="eyebrow">파일명 확인</span><h2 className="text-section-heading">정규화 결과를 확인해 주세요</h2></div>
+        <FilePenLine aria-hidden="true" />
+      </div>
+      {!preview ? (
+        <p>파일을 선택하면 실제 Backend 정규화 결과를 표시합니다.</p>
+      ) : mode === 'resolved' ? (
+        <div className="resolved-state" role="status">
+          <CheckCircle2 aria-hidden="true" /><span>{resolution}</span>
+          <button type="button" className="text-action" onClick={onReset}>다시 확인</button>
+        </div>
+      ) : mismatch ? (
+        // D24: never silently rename/reclassify -- always require an
+        // explicit choice among the file's own classification, renaming to
+        // the typed classification, or continuing under the original name.
+        <div role="alert">
+          <dl className="filename-comparison">
+            <div><dt>현재 파일</dt><dd>{preview.original_name} ({preview.detected_course}/{preview.detected_subject})</dd></div>
+          </dl>
+          {preview.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          <div className="inline-actions">
+            <Button variant="secondary" onClick={onUseFileClassification}>현재 파일의 분류 사용</Button>
+            <Button variant="secondary" onClick={onRenameToTyped}>입력한 분류로 파일명 변경</Button>
+            <Button variant="secondary" onClick={onContinueOriginal}>원래 이름으로 Local 전사 계속</Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <dl className="filename-comparison">
+            <div><dt>원본</dt><dd>{preview.original_name}</dd></div>
+            <div><dt>추천</dt><dd>{preview.suggested_name ?? preview.original_name}</dd></div>
+          </dl>
+          {preview.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          {mode === 'editing' ? (
+            <div className="filename-editor">
+              <label htmlFor="normalized-filename">수정할 이름</label>
+              <input className={invalid ? 'input input-error' : 'input'} id="normalized-filename" value={value} onChange={(event) => onValueChange(event.target.value)} />
+            </div>
+          ) : null}
+          <div className="inline-actions">
+            <Button variant="secondary" onClick={onContinueOriginal}>원래 이름으로 계속</Button>
+            {mode === 'editing' ? <Button disabled={invalid} onClick={onApply}>이름 적용</Button> : <Button onClick={onEdit}>이름 수정</Button>}
+          </div>
+        </>
+      )}
+    </Card>
+  )
 }
