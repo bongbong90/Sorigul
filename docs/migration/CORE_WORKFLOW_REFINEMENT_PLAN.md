@@ -5,6 +5,8 @@ Status: `LOCKED` (Phase 0 — documentation only, no implementation)
 Branch: `feature/core-workflow-refinement`
 Base: `validation/full-feature-parity-release` @ `47aa500b5453e42f186292b41d9b8054f96bc638`
 
+> **Correction pass (2026-08-29, Phase 0.1):** before Phase 1 started, this plan's own first draft was reviewed and corrected in place — over-engineered scope was cut, one internal contract inconsistency was fixed, and several gaps were closed. Corrected/added: D21 no longer exposes Colab chunk counts in the UI (was inconsistent with the already-locked D08 chunk-invisibility contract); D22/D23A drop the planned persistent `drive_auto_upload` setting in favor of a per-run, never-persisted checkbox; D16 gains the `subject_stage_overrides` persistence needed to actually satisfy its own "ask once" contract; Section 5.3's planned global stable-file-ID redesign is replaced by a narrower rename-transaction id remap (D23B, D24, D25, D26 add input validation, mismatch-warning, legacy-Job-compatibility, and Colab-side-artifact/URL-normalization requirements that the first draft omitted). Superseded/replaced text is marked inline rather than deleted; nothing here changes D11, D12, D15, or any decision in `MIGRATION_CONTRACT_REVIEW.md`.
+
 ## 1. Background
 
 `MIGRATION_CONTRACT.md` locked the Legacy→Sorigul parity contract from the `jeonsa_doumi` audit. Since that lock, real usage review surfaced that literal 1:1 Legacy parity is not the right target for several areas: Whisper prompt/correction machinery never helped transcription quality, MP3 upload/import/move added risk without value, and fixed course/subject dropdowns fought how the user actually names courses.
@@ -76,10 +78,12 @@ Drive classification reads `course`, `subject`, `stage` from Job-level metadata 
 
 ### D16 — Stage ([1차]/[2차]) mapping: automatic for known subjects, fallback for unknown
 
-Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, extends D12/D15)`
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, extends D12/D15)` — **corrected 2026-08-29** to specify how "once per new subject value" is actually satisfied.
 
 Final user contract:
-Known subjects map to stage automatically: 1차 = {부동산학개론, 민법}; 2차 = {공인중개사법, 부동산공법, 부동산공시법, 부동산세법}. When the user's typed subject does not match any known subject, Sorigul asks the user to pick 1차 or 2차 as a fallback, once per new subject value (not on every job). The default UI flow does not ask for stage on every run — only when the subject is unrecognized and stage cannot be inferred.
+Known subjects map to stage automatically: 1차 = {부동산학개론, 민법}; 2차 = {공인중개사법, 부동산공법, 부동산공시법, 부동산세법}. When the user's typed subject does not match any known subject, Sorigul asks the user to pick 1차 or 2차 as a fallback. The default UI flow does not ask for stage on every run — only when the subject is unrecognized and stage cannot be inferred.
+
+To make "once" real rather than aspirational, the answer is persisted: `RuntimeSettings` (see Section 5.4) stores `subject_stage_overrides: Dict[str, "1차" | "2차"]`, keyed by the exact subject string after trimming leading/trailing whitespace — no alias inference, no fuzzy matching, no reintroduction of Legacy's alias table. On a later job with the same trimmed subject string, Sorigul reads the override instead of asking again. A minimal edit affordance (not a separate management screen) lets the user change a previously-picked stage for a given subject value — e.g. an inline "1차/2차 변경" control next to the subject field when an override exists for the current typed subject. No bulk-management UI is introduced.
 
 ### D17 — Google Drive exam root: persistent setting, not hardcoded
 
@@ -111,19 +115,67 @@ Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, new area)`
 Final user contract:
 MP3 duration is read via a bundled Python library (`mutagen`, pending Phase 3 spike confirmation — see Section 8) rather than shelling out to `ffprobe.exe`. `ffmpeg.exe` remains required and bundled for actual 300-second chunk splitting (`backend/src/engines/colab.py`'s `ffmpeg -ss ... -t ...` cut, unaffected). Duration reads that fail return an honest "unknown" state rather than blocking transcription.
 
-### D21 — Honest duration, progress, and ETA; no fabricated values
+### D21 — Honest duration, progress, and ETA; no fabricated values; no chunk internals in UI
 
-Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, reinforces `MIGRATION_CONTRACT.md` §6.1's existing "실제 처리 대상 수" denominator requirement, which was never fully implemented in the frontend)`
-
-Final user contract:
-Queue duration display uses the real MP3 duration (D20) or shows `—` on read failure — no fake numeric duration. Overall progress denominator is `Job.total_files` (already present in `JobModel`, `backend/src/domain/models.py`), not the folder's total MP3 count; files skipped because a valid bundle already exists are excluded from the denominator, consistent with the existing D01/D03 skip contract. Local ETA is either omitted (while too little history exists) or computed from observed processing speed for completed files in the current run — never a hardcoded string like "예상 남은 시간 12분". Colab ETA may use exact chunk-count progress (e.g. "3 / 5 구간") since chunk boundaries are already known.
-
-### D22 — Course/subject/engine/exam-root persistence; Colab URL never persisted
-
-Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, extends existing `RuntimeSettings`)`
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, reinforces `MIGRATION_CONTRACT.md` §6.1's existing "실제 처리 대상 수" denominator requirement, which was never fully implemented in the frontend)` — **corrected 2026-08-29** to remove a chunk-count UI example that violated D08's existing "chunk ON/OFF나 chunk seconds 설정을 사용자 UI에 노출하지 않는다" contract (`MIGRATION_CONTRACT.md` §9.1).
 
 Final user contract:
-`RuntimeSettings` (`backend/src/services/settings.py`) gains persistent fields for: transcription folder, last course, last subject, last engine, Google Drive exam root folder (D17). Existing fields (`notifications`, `close_behavior`, `shutdown`) are unchanged. The Colab tunnel URL is never persisted to settings — it is rediscovered each session via rendezvous (D19) or re-entered manually. Drive auto-upload defaults to **off** on first run and after upgrade unless the user already has an explicit saved preference; this is a deliberate default chosen to avoid surprise cloud uploads, not a preservation of any prior default (none was previously locked).
+Queue duration display uses the real MP3 duration (D20) or shows `—` on read failure — no fake numeric duration. Overall progress denominator is `Job.total_files` (already present in `JobModel`, `backend/src/domain/models.py`), not the folder's total MP3 count; files skipped because a valid bundle already exists are excluded from the denominator, consistent with the existing D01/D03 skip contract. Local ETA is either omitted (while too little history exists) or computed from observed processing speed for completed files in the current run — never a hardcoded string like "예상 남은 시간 12분".
+
+Colab progress may be *computed internally* from chunk completion (chunk boundaries are already known — see `MIGRATION_CONTRACT.md` §9.1), but the internal chunk unit itself is never surfaced to the user. The user only ever sees: a progress percentage, elapsed time, and an ETA — never "3 / 5 구간", "chunk 3/5", "300초 조각", or any other chunk-count/chunk-duration phrasing. This is not a new restriction; it is this document correctly applying D08's already-locked chunk-invisibility contract to the progress/ETA display, which the original D21 text drafted in this plan's first version had inconsistently violated.
+
+### D22 — Course/subject/engine/exam-root persistence; Colab URL and Drive auto-upload never persisted
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, extends existing `RuntimeSettings`)` — **corrected 2026-08-29** to remove `drive_auto_upload` as a persistent field (see D23A) and to specify non-destructive migration of the existing `sorigul.transcriptionFolder` localStorage value.
+
+Final user contract:
+`RuntimeSettings` (`backend/src/services/settings.py`) gains persistent fields for: transcription folder, last course, last subject, last engine, Google Drive exam root folder (D17), and `subject_stage_overrides` (D16). Existing fields (`notifications`, `close_behavior`, `shutdown`) are unchanged. The Colab tunnel URL is never persisted to settings — it is rediscovered each session via rendezvous (D19) or re-entered manually. Google Drive auto-upload is **not** a persistent setting at all — see D23A; it is a per-run choice made fresh every launch.
+
+Frontend currently persists the selected transcription folder client-side under the `sorigul.transcriptionFolder` `localStorage` key (`frontend/src/api/client.ts`'s `FOLDER_STORAGE_KEY`). When backend `transcription_folder` becomes the settings source of truth, the first read after upgrade must not simply ignore this existing value: if backend `transcription_folder` is empty/unset and a `sorigul.transcriptionFolder` localStorage value exists, Sorigul non-destructively adopts that value into the backend setting on first use, so the user's already-selected folder does not appear to vanish after upgrade. `localStorage` is not deleted immediately — a transition-period fallback read is allowed until the backend setting is confirmed populated.
+
+### D23A — Google Drive auto-upload: per-run checkbox, never persisted
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE)` — corrects the original Phase 0 draft, which had proposed `drive_auto_upload` as a persistent `RuntimeSettings` field (`SUPERSEDED_BY_PRODUCT_DECISION` relative to this document's own first version, not relative to `MIGRATION_CONTRACT.md`).
+
+Final user contract:
+The Transcription screen carries a per-run "전사 완료 후 Google Drive 업로드" checkbox (this is `CreateJobRequest.upload_to_drive`, `backend/src/api/routes.py`, which already exists as a per-job field — no backend field addition needed here). It defaults to unchecked every time the app starts, regardless of what the user chose in a previous run. It is never written to `RuntimeSettings` and never restored from a prior session. This reduces both the surprise-upload risk and the settings surface, replacing the originally-planned global persistent toggle.
+
+### D23B — Course/subject input validation
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, new area — course/subject become filename components under D12, so they need the same safety net filenames already require)`
+
+Final user contract:
+Because course and subject feed directly into the generated filename (`{course}_{subject}_{N주차}_{M강}`), free-text input is constrained before it is accepted:
+- leading/trailing whitespace is trimmed
+- empty string (after trim) is rejected
+- control characters are rejected
+- Windows forbidden filename characters are rejected: `< > : " / \ | ? *`
+- a trailing dot or trailing space (both invalid at the end of a Windows filename component) is rejected
+
+Ordinary Korean/English/digit/space/underscore input is accepted. On rejection, Sorigul asks the user to correct the input — it never silently substitutes, strips, or replaces invalid characters on the user's behalf. This mirrors the "user confirms, never silent substitution" principle already locked for filename normalization uncertainty in `MIGRATION_CONTRACT.md` §10.2.
+
+### D24 — Standard-name / typed course-subject mismatch: warn, never silently reroute
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, new area)`
+
+Final user contract:
+When a file's name is already in standard form (`{course}_{subject}_{N}주차_{M}강.mp3`) and the course/subject embedded in that existing filename differ from the course/subject currently typed for the job, Sorigul does not silently rename the file, does not silently overwrite the file's stored classification metadata, and does not silently route the Drive upload to the newly-typed subject's folder. It shows an explicit mismatch warning and requires the user to resolve it (keep the file's existing course/subject, or confirm the retype and let normalization apply it) before that file proceeds. Local transcription itself is not blocked by an unresolved mismatch — only the classification/rename side is held — but if Drive upload is requested for that file, upload does not proceed to a possibly-wrong folder until the mismatch is resolved.
+
+### D25 — Legacy Job Drive-retry compatibility: fallback filename parsing is legacy-only
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, new area — narrows D15's scope to new Jobs only)`
+
+Final user contract:
+D15 (Job/file metadata as Drive classification truth) governs every **new** Job created after Phase 1/2 ship. For a **pre-existing** persisted Job that predates `course`/`subject`/`stage`/file metadata (see Section 5.1's backward-compatibility note) and is Drive-retried after upgrade, Sorigul may fall back to parsing the file's already-standard filename to recover a classification — but only for that legacy compatibility path, never as part of the new-Job classification flow, and never reintroducing Legacy's alias-guessing table beyond the same known-subject set D16 already locks. If the legacy file's name cannot be safely classified this way, Drive upload for that file fails with `CLASSIFICATION_FAILED` exactly as today, and the file's Local `DONE` status is left untouched — consistent with `MIGRATION_CONTRACT.md` §12's Local/Drive independence.
+
+### D26 — Colab-side rendezvous artifact and URL normalization are in scope
+
+Status: `DECIDED (APPROVED_INTENTIONAL_CHANGE, new area, extends D19)`
+
+Final user contract:
+D19's automatic rendezvous cannot work from Desktop-side code alone — something running inside the user's Colab notebook has to write the connection metadata Desktop polls for. Since no such artifact currently exists in this repository, producing one (a small, greenfield Sorigul-authored Colab notebook cell or bootstrap script — not a copy/import of any Legacy source) implementing the writer side of rendezvous is explicitly in Phase 3 scope, not assumed to already exist. It writes only `schema_version`, `request_id`, `url`, `status`, `updated_at`, `expires_at` — never MP3, transcript, token, or credential data, matching D19/Section 5's metadata shape.
+
+Both the auto-discovered URL and the manual-entry fallback are normalized to a bare base URL before use: `https://host`, `https://host/`, `https://host/health`, and `https://host/transcribe` all normalize to `https://host`, and the health/transcribe calls are then built as `{base}/health` / `{base}/transcribe` — never producing a doubled path such as `/health/health` or `/transcribe/transcribe`.
 
 ## 3. Removed Legacy Features (final, do not re-open without new user decision)
 
@@ -138,6 +190,9 @@ Final user contract:
 | Fixed subject alias dropdown as the primary classification path | Not migrated (fallback stage picker only, D16) | D12, D16 |
 | Filename-reparsing as Drive classification truth | Not migrated | D15 |
 | `ffprobe.exe` runtime dependency | Not migrated | D20 |
+| Chunk count / chunk-duration wording in user-visible progress (e.g. "3 / 5 구간") | Not migrated — corrected out of this plan's own D21 draft | D21, D08 (`MIGRATION_CONTRACT.md` §9.1) |
+| Persistent global Drive auto-upload setting | Not migrated — corrected out of this plan's own D22 draft, replaced by per-run checkbox | D23A |
+| Global stable file-ID redesign (content hash / inode / persisted ID map) | Not migrated — corrected out of this plan's own Phase 1 draft, replaced by rename-transaction id remap | Section 5.3 |
 | Dashboard, Drive Queue, Resume, MYBOX, provider selector | Already excluded by `MIGRATION_CONTRACT.md` §16 — reaffirmed, not reopened | Prior contract |
 | Whisper advanced controls, Colab chunk controls, global output folder | Already excluded by `MIGRATION_CONTRACT.md` §16 — reaffirmed, not reopened | Prior contract |
 | STOPPED/CANCELLED state merge | Already rejected by D04 — reaffirmed, not reopened | Prior contract |
@@ -166,106 +221,117 @@ lesson: Optional[str]
 normalized_name: Optional[str]
 ```
 
-`CreateJobRequest` (`backend/src/api/routes.py`) gains `course: str` and `subject: str` (required), with `stage` derived server-side per D16 (auto for known subjects, otherwise supplied by the client after the fallback prompt).
+`CreateJobRequest` (`backend/src/api/routes.py`) gains `course: str` and `subject: str` (required), with `stage` derived server-side per D16 (auto for known subjects, otherwise supplied by the client after the fallback prompt, using `subject_stage_overrides` when the subject has been resolved before — see D16, Section 5.4).
+
+Backward compatibility: the new `course`/`subject`/`stage` `JobModel` fields and the new per-file metadata model are `Optional`/default-populated so that a pre-existing `jobs.json` written before this change loads without validation failure — absent metadata is treated as "legacy Job, no metadata," not as a corrupt record. New Job creation always populates these fields; only already-persisted Jobs may legitimately lack them. See D25 for how legacy Jobs without this metadata are handled specifically in Drive retry.
 
 ### 5.2 Drive classification (revised)
 
 `DriveClassifier.classify()` (`backend/src/services/drive.py`) changes signature from `classify(filename: str)` to something keyed on Job + file metadata (e.g. `classify(course: str, subject: str, week: str, lesson: str)`), sourced from D15's Job/file metadata rather than re-parsing `Path(filename).stem`. `DriveClassification.folders` continues to yield the same `(exam_root, "전사자료", course, "[stage] subject", "course_subject_Nweek")` tuple shape, with `exam_root` now sourced from Settings (D17) instead of the `DRIVE_ROOT_HIERARCHY` constant, and the upload path list (currently `[source, bundle.txt, bundle.json, bundle.srt]` in `DriveUploadService.upload()`) drops `source` (D11).
 
-### 5.3 Filename identity (revised)
+### 5.3 Filename identity (revised — corrected 2026-08-29, no global ID redesign)
 
-`ScannedFile.id` (`backend/src/domain/models.py`) is currently `file_path.stem` (`backend/src/services/scanner.py::FileScanner.scan()`), which breaks identity across rename since a rename changes the stem. Phase 1 must define a rename-stable id — see Section 6's exit condition and Section 8's investigation note. This document does not lock the specific mechanism (content hash, persisted id map, or path-plus-fingerprint); that remains a Phase 1 technical decision, deferred the same way `MIGRATION_CONTRACT.md` §17 defers D09's internal mechanism, provided the product contract (selection survives rename) is met.
+`ScannedFile.id` (`backend/src/domain/models.py`) is currently `file_path.stem` (`backend/src/services/scanner.py::FileScanner.scan()`). The first version of this plan proposed replacing this scheme entirely (content hash, inode, or a persisted id map) so that ids survive rename. That is now explicitly rejected as over-engineering for what the actual failure is: **stem-based `id` is kept as-is.** `FileScanner`, `JobManager`, and `DriveUploadService`'s existing `item.id == file_id` lookups are not touched.
 
-### 5.4 Settings (revised)
+Instead, the fix lives entirely in the rename transaction: the rename endpoint (`POST /rename`, `backend/src/api/routes.py` → `backend/src/services/renamer.py`) returns both the `old_file_id` and the resulting `new_file_id` (the new stem) in its response. The frontend, on a successful rename, immediately replaces the old id with the new id inside `selectedIds` (and any other local id-keyed state) *before* triggering a rescan — so when the rescan lands, the already-updated selection matches the new stem and the same logical file stays selected. No identity survives across an app restart or a rescan the frontend didn't just trigger itself from a rename it initiated; that is out of scope, because the actual user-facing failure this fixes is exactly "I renamed and now my selection is gone," not general persistent cross-session file identity.
 
-`RuntimeSettings` / `SettingsPatch` (`backend/src/services/settings.py`) gain: `transcription_folder: Optional[str]`, `last_course: Optional[str]`, `last_subject: Optional[str]`, `last_engine: Optional[str]`, `drive_exam_root: str` (default: current hardcoded value), `drive_auto_upload: bool` (default `False`). Schema growth must stay backward-compatible: `SettingsManager._load()` already tolerates unknown/missing fields via Pydantic defaults and quarantines unparseable files — new fields must all have safe defaults so existing `settings.json` files load unchanged (no migration script needed, per Pydantic's additive-field behavior).
+This also constrains scope directly: normalization rename only ever happens before Job creation, as part of the raw-MP3 → rename → rescan → select → start flow. Once a Job exists for a file, that Job's normalization rename does not re-run — a file mid-Job is not subject to this remap path.
+
+### 5.4 Settings (revised — corrected 2026-08-29)
+
+`RuntimeSettings` / `SettingsPatch` (`backend/src/services/settings.py`) gain: `transcription_folder: Optional[str]`, `last_course: Optional[str]`, `last_subject: Optional[str]`, `last_engine: Optional[str]`, `drive_exam_root: str` (default: current hardcoded value), `subject_stage_overrides: Dict[str, Literal["1차", "2차"]]` (default `{}`, keyed by trimmed exact subject string — D16). `drive_auto_upload` is explicitly **not** added here — see D23A; Drive auto-upload stays a per-job field on `CreateJobRequest` (`upload_to_drive`, already present) and is never read from or written to `RuntimeSettings`. Schema growth must stay backward-compatible: `SettingsManager._load()` already tolerates unknown/missing fields via Pydantic defaults and quarantines unparseable files — new fields must all have safe defaults so existing `settings.json` files load unchanged (no migration script needed, per Pydantic's additive-field behavior). `transcription_folder`'s first-run population additionally follows the non-destructive `localStorage` adoption described in D22.
+
+### 5.5 Course/subject input validation (new)
+
+See D23B for the full rule set (trim, non-empty, no control characters, no Windows-forbidden characters, no trailing dot/space). Validation is enforced server-side in the Job-creation path (`CreateJobRequest` validation in `backend/src/api/routes.py` or a dedicated validator called from `JobManager`) so it cannot be bypassed by a frontend that forgets to check; the frontend additionally validates inline for immediate feedback. Rejection is always explicit and correctable by the user — never a silent character substitution.
 
 ## 6. Phase 1 — Classification / Filename / Job
 
-Purpose: implement D12, D15, D16, D22 (course/subject persistence only), and the rename-identity fix.
+Purpose: implement D12, D15, D16 (including `subject_stage_overrides` persistence), D22's `transcription_folder` migration, D23B (input validation), D24 (standard-name mismatch warning), and the rename-selection fix described in Section 5.3 (explicitly **not** a global stable-id redesign).
 
 Expected files:
-- `backend/src/domain/models.py` — add `course`, `subject`, `stage` to `JobModel`; add per-file metadata model; revise `ScannedFile.id` scheme
-- `backend/src/services/scanner.py` — rename-stable id generation
-- `backend/src/services/normalizer.py` — drop course/subject alias detection from the primary path (D12); keep week/lesson regex, forbidden-char cleanup, `+`→space, standard-name detection, first-free-lesson-number logic
-- `backend/src/services/renamer.py` — bundle-safe rename must preserve/update the file's stable id mapping
-- `backend/src/services/job_manager.py` — accept and store `course`/`subject`/`stage`, propagate per-file `week`/`lesson`/`normalized_name`
-- `backend/src/services/settings.py` — add `last_course`, `last_subject` fields
-- `backend/src/api/routes.py` — `CreateJobRequest` gains `course`/`subject`; `ScanRequest`/scan response surfaces stable ids
-- `frontend/src/pages/TranscriptionPage.tsx` — course/subject text inputs, prefilled from last-used settings; stage fallback prompt when subject is unrecognized
-- `frontend/src/api/client.ts` — request/response types for the above
+- `backend/src/domain/models.py` — add `course`, `subject`, `stage` to `JobModel` (all `Optional`/default for backward compatibility, see Section 5.1); add per-file metadata model. `ScannedFile.id` scheme is **unchanged** (still `file_path.stem`).
+- `backend/src/services/scanner.py` — no id-scheme change.
+- `backend/src/services/normalizer.py` — drop course/subject alias detection from the primary path (D12); keep week/lesson regex, forbidden-char cleanup, `+`→space, standard-name detection, first-free-lesson-number logic; add course/subject input validation (D23B); add standard-name-vs-typed-course/subject mismatch detection (D24)
+- `backend/src/services/renamer.py` — bundle-safe rename unchanged in mechanics; rename endpoint response gains `old_file_id`/`new_file_id` (Section 5.3) — no id-mapping storage introduced
+- `backend/src/services/job_manager.py` — accept and store `course`/`subject`/`stage`, propagate per-file `week`/`lesson`/`normalized_name`; surface D24 mismatch state to the caller instead of silently proceeding
+- `backend/src/services/settings.py` — add `transcription_folder`, `last_course`, `last_subject`, `subject_stage_overrides` fields
+- `backend/src/api/routes.py` — `CreateJobRequest` gains `course`/`subject` (validated per D23B); `POST /rename` response gains `old_file_id`/`new_file_id`
+- `frontend/src/pages/TranscriptionPage.tsx` — course/subject text inputs with inline validation, prefilled from last-used settings; stage fallback prompt (with inline override-edit affordance) when subject is unrecognized or previously overridden; mismatch warning UI (D24); rename-response id remap into `selectedIds` before rescan (Section 5.3)
+- `frontend/src/api/client.ts` — request/response types for the above; on first load, read backend `transcription_folder` and, if empty, fall back to and adopt the existing `sorigul.transcriptionFolder` `localStorage` value (`FOLDER_STORAGE_KEY`) into the backend setting (D22) rather than dropping it
 
-Backend changes: new `FileMetadata` model; `JobManager` job-creation path stores course/subject/stage on the Job and week/lesson/normalized_name per file; `FileScanner` and `FilenameNormalizer` decoupled from Drive's `COURSES`/`SUBJECT_ALIASES` (that logic narrows to D16's known-subject → stage table only, relocated out of the alias-detection role).
+Backend changes: new `FileMetadata` model; `JobManager` job-creation path stores course/subject/stage on the Job and week/lesson/normalized_name per file; `FileScanner` and `FilenameNormalizer` decoupled from Drive's `COURSES`/`SUBJECT_ALIASES` (that logic narrows to D16's known-subject → stage table only, relocated out of the alias-detection role); course/subject validated per D23B before a Job is created; a standard-named file whose embedded course/subject disagrees with the typed course/subject is flagged (D24) rather than silently renamed/reclassified.
 
-Frontend changes: two free-text inputs (course, subject) above the folder picker or in a job-start panel; last-used values loaded from `GET /settings` and saved via `PUT /settings` on job start; a stage-selection dialog that appears only when the typed subject is not in the known-subject table.
+Frontend changes: two free-text inputs (course, subject) above the folder picker or in a job-start panel, with immediate validation feedback (D23B); last-used values loaded from `GET /settings` and saved via `PUT /settings` on job start; a stage-selection dialog that appears only when the typed subject is not in the known-subject table and has no existing override, plus a minimal inline "변경" affordance when an override already exists (D16); a mismatch warning surfaced per-file when D24 triggers, requiring explicit user resolution before that file's classification/rename/Drive-routing proceeds; on rename success, the frontend swaps the renamed file's id inside `selectedIds` using the endpoint's `old_file_id`/`new_file_id` response before the next rescan (Section 5.3) — Job creation only happens after this settles.
 
 Tauri changes: none expected.
 
-Tests: normalizer unit tests updated to remove alias-detection assertions and add course/subject-passthrough assertions; a new rename-identity test that renames a scanned file and asserts the same logical file/selection still resolves after rescan; Job creation test asserting course/subject/stage/week/lesson land in `JobModel`/file metadata and survive retry.
+Tests: normalizer unit tests updated to remove alias-detection assertions and add course/subject-passthrough assertions; input-validation tests for each D23B rule (empty, control char, each forbidden character, trailing dot/space); a rename-selection test that renames a scanned file via the endpoint and asserts the frontend's id remap keeps the same logical file selected across the following rescan (replacing the previous "global stable id" test framing with a transaction-scoped one); a mismatch-warning test (standard-named file, differing typed course/subject, confirms warning fires and neither rename nor Drive routing silently proceeds); Job creation test asserting course/subject/stage/week/lesson land in `JobModel`/file metadata and survive retry, including a test that a legacy Job record missing these fields still loads.
 
-Regression risk: any code path still assuming `ScannedFile.id == file stem` (e.g. `DriveUploadService.upload()`'s `FileScanner(job.folder).scan()` lookup by `item.id == file_id`) must be audited for the id-scheme change — flag as a Phase 1 sub-task, not a Phase 2 surprise.
+Regression risk: none from an id-scheme change, since none is happening — this was the primary risk in the plan's first draft and is now eliminated by keeping `ScannedFile.id` as-is. Remaining risk is narrower: the rename-response contract change (`old_file_id`/`new_file_id` added to `POST /rename`) must not break any caller assuming the old response shape — check `frontend/src/api/client.ts`'s rename call site.
 
-Migration/data compatibility: existing persisted Jobs (`jobs.json`) predate `course`/`subject`/`stage` fields — they must load with those fields absent/`None` rather than failing validation; no destructive migration.
+Migration/data compatibility: existing persisted Jobs (`jobs.json`) predate `course`/`subject`/`stage` fields — they must load with those fields absent/`None` rather than failing validation; no destructive migration. Existing `sorigul.transcriptionFolder` `localStorage` value is adopted into the backend setting on first post-upgrade read, not discarded (D22).
 
-Completion condition: user-entered course/subject and file-detected week/lesson land in the same Job's metadata, and rename no longer breaks file selection across rescan.
+Completion condition: user-entered course/subject (validated per D23B) and file-detected week/lesson land in the same Job's metadata; rename no longer breaks file selection across rescan via the id-remap transaction (not a global id redesign); a pre-existing `sorigul.transcriptionFolder` selection survives upgrade; a standard-named file with a course/subject mismatch against the typed values is warned, never silently rewritten.
 
-Commit boundaries: (1a) domain model + scanner id scheme, (1b) normalizer alias-detection removal + tests, (1c) Job/API course-subject plumbing, (1d) frontend course/subject inputs + settings persistence, (1e) rename-identity regression test.
+Commit boundaries: (1a) domain model course/subject/stage fields + backward-compatible load, (1b) normalizer alias-detection removal + input validation + tests, (1c) Job/API course-subject plumbing, (1d) rename endpoint id-remap response + frontend selection remap + regression test, (1e) frontend course/subject inputs + settings persistence + localStorage folder migration, (1f) mismatch-warning detection + UI + test, (1g) `subject_stage_overrides` persistence + inline override-edit affordance.
 
 ## 7. Phase 2 — Google Drive
 
-Purpose: implement D11, D15, D17, D18.
+Purpose: implement D11, D15, D17, D18, D23A (per-run upload checkbox, not a persistent setting), D25 (legacy Job Drive-retry fallback).
 
 Expected files:
-- `backend/src/services/drive.py` — `DriveClassifier.classify()` re-keyed to Job/file metadata (D15); `DRIVE_ROOT_HIERARCHY` sourced from Settings (D17); `DriveUploadService.upload()` drops MP3 from the upload/preflight path list (D11)
-- `backend/src/services/settings.py` — `drive_exam_root`, `drive_auto_upload` fields
-- `backend/src/api/routes.py` — settings endpoints already generic; verify Drive status/response payload doesn't assume 4 files
-- `frontend/src/pages/SettingsPage.tsx` — exam root text input; Drive auto-upload toggle (default off)
-- `frontend/src/pages/TranscriptionPage.tsx` / a Drive status component — Drive path preview reflecting the 3-file bundle and configurable root
+- `backend/src/services/drive.py` — `DriveClassifier.classify()` re-keyed to Job/file metadata (D15) for new Jobs, with a legacy-only fallback path for pre-metadata Jobs (D25); `DRIVE_ROOT_HIERARCHY` sourced from Settings (D17); `DriveUploadService.upload()` drops MP3 from the upload/preflight path list (D11)
+- `backend/src/services/settings.py` — `drive_exam_root` field only (**not** `drive_auto_upload` — see D23A, Section 5.4)
+- `backend/src/api/routes.py` — settings endpoints already generic; verify Drive status/response payload doesn't assume 4 files; `CreateJobRequest.upload_to_drive` (already existing per-job field) remains the sole auto-upload control
+- `frontend/src/pages/SettingsPage.tsx` — exam root text input only; **no** Drive auto-upload toggle added here
+- `frontend/src/pages/TranscriptionPage.tsx` — per-run "전사 완료 후 Google Drive 업로드" checkbox, unchecked by default on every launch, bound to `CreateJobRequest.upload_to_drive`; Drive path preview reflecting the 3-file bundle and configurable root
 
-Backend changes: `DriveClassification.folders` built from Settings-sourced exam root + Job course/subject/stage + file week, not from filename re-parsing; upload path list becomes `[bundle.txt, bundle.json, bundle.srt]`.
+Backend changes: `DriveClassification.folders` built from Settings-sourced exam root + Job course/subject/stage + file week, not from filename re-parsing, for any Job created after this ships; a narrow, explicitly-labeled legacy-compatibility path in `DriveClassifier` that only activates when a Job lacks the new metadata (pre-upgrade persisted Job) and falls back to standard-filename parsing per D25 — this path must not be reachable from new-Job creation; upload path list becomes `[bundle.txt, bundle.json, bundle.srt]`.
 
-Frontend changes: exam-root Settings field; Drive-only retry UI unaffected structurally (still targets TXT/JSON/SRT, now naturally excludes MP3); Drive auto-upload checkbox defaulting off with explicit save.
+Frontend changes: exam-root Settings field (Settings screen); per-run Drive-upload checkbox on the Transcription screen, never persisted, always defaulting to unchecked (D23A); Drive-only retry UI unaffected structurally (still targets TXT/JSON/SRT, now naturally excludes MP3).
 
 Tauri changes: none expected.
 
-Tests: `DriveClassifier` unit tests rewritten for metadata-keyed input instead of filename-stem parsing; upload-path assertions updated to 3 files; preflight test confirming MP3 absence no longer blocks/no-ops a Drive upload; exam-root setting round-trip test.
+Tests: `DriveClassifier` unit tests rewritten for metadata-keyed input instead of filename-stem parsing (new-Job path); a separate legacy-fallback test suite covering: standard-named legacy Job → successful fallback classification, non-standard-named legacy Job → `CLASSIFICATION_FAILED` with Local `DONE` preserved (D25); upload-path assertions updated to 3 files; preflight test confirming MP3 absence no longer blocks/no-ops a Drive upload; exam-root setting round-trip test; a test asserting `RuntimeSettings` never gains a `drive_auto_upload` field and the per-run checkbox resets to unchecked across a simulated app restart.
 
-Regression risk: any stored reference to `remote_ids` keyed by 4 filenames (`DriveFileState.remote_file_ids`) — existing persisted Drive state for jobs uploaded under the old 4-file contract must not crash on load; treat as read-compatible (dict with an extra/missing key is not a schema break).
+Regression risk: any stored reference to `remote_ids` keyed by 4 filenames (`DriveFileState.remote_file_ids`) — existing persisted Drive state for jobs uploaded under the old 4-file contract must not crash on load; treat as read-compatible (dict with an extra/missing key is not a schema break). The legacy-fallback classification path (D25) is itself a regression-risk surface if its guard leaks into the new-Job path — test explicitly that a new Job with complete metadata never falls through to filename parsing even if parsing would have succeeded.
 
-Migration/data compatibility: no deletion of previously uploaded MP3s from Drive — this document does not retroactively clean up Drive; only new uploads follow the 3-file contract.
+Migration/data compatibility: no deletion of previously uploaded MP3s from Drive — this document does not retroactively clean up Drive; only new uploads follow the 3-file contract. Legacy Jobs without course/subject/stage metadata remain retryable via the D25 fallback rather than becoming permanently unclassifiable after upgrade.
 
-Completion condition: MP3 never reaches Drive, and TXT/JSON/SRT are correctly update-or-created under the configured exam root and Job-metadata-derived subject/stage/week folders.
+Completion condition: MP3 never reaches Drive; TXT/JSON/SRT are correctly update-or-created under the configured exam root and Job-metadata-derived subject/stage/week folders for new Jobs; legacy Jobs retain a working (if narrower) Drive-retry path; no global Drive auto-upload setting exists anywhere in `RuntimeSettings`.
 
-Commit boundaries: (2a) Settings exam-root + auto-upload fields, (2b) `DriveClassifier` metadata-keyed rewrite + tests, (2c) upload path 4→3 file change + preflight tests, (2d) Settings UI for exam root and auto-upload toggle.
+Commit boundaries: (2a) Settings exam-root field (no auto-upload field), (2b) `DriveClassifier` metadata-keyed rewrite + tests, (2c) upload path 4→3 file change + preflight tests, (2d) legacy-fallback classification path + tests (D25), (2e) Settings UI for exam root + per-run Drive-upload checkbox on Transcription screen.
 
 ## 8. Phase 3 — Colab
 
-Purpose: implement D19, D20; keep D08's 300-second chunk contract from `MIGRATION_CONTRACT.md` §9 unchanged.
+Purpose: implement D19, D20, D26 (Colab-side rendezvous artifact, URL normalization); keep D08's 300-second chunk contract from `MIGRATION_CONTRACT.md` §9 unchanged, including chunk-invisibility (reaffirmed by D21's correction).
 
 Expected files:
-- `backend/src/engines/colab.py` — replace `_probe_duration()`'s `ffprobe` subprocess call with a shared audio-metadata read (D20); keep the `ffmpeg -ss/-t` splitting subprocess unchanged
+- `backend/src/engines/colab.py` — replace `_probe_duration()`'s `ffprobe` subprocess call with a shared audio-metadata read (D20); keep the `ffmpeg -ss/-t` splitting subprocess unchanged; centralize base-URL normalization (D26) used for both `/health` and `/transcribe` calls
 - `backend/src/utils/ffmpeg_runtime.py` — remove ffprobe resolution/requirement; keep ffmpeg resolution
 - `backend/src/services/` — new `audio_metadata.py` (or similar) service wrapping `mutagen`, usable by both queue-duration display (Phase 4) and Colab chunk planning
 - `backend/src/services/` — new Colab rendezvous service reading/polling a small JSON file (`colab_connection.json`) under the Sorigul runtime metadata folder
 - `backend/src/api/routes.py` — Colab connection status endpoint(s) for the frontend to poll
-- `frontend/src/pages/TranscriptionPage.tsx` — Colab connection state UI ("연결 대기 중" → "연결됨"), manual URL fallback field
+- `frontend/src/pages/TranscriptionPage.tsx` — Colab connection state UI ("연결 대기 중" → "연결됨"), manual URL fallback field with the same normalization applied client-side before submission
 - `frontend/src-tauri/` — none expected unless the rendezvous poll needs a Tauri-side file watch instead of backend polling (default: backend polls, since it already owns filesystem/Drive-adjacent I/O)
+- **new: a Colab-side artifact** (D26) — a Sorigul-authored notebook cell or bootstrap script, greenfield (not copied/imported from Legacy), implementing the `/health` and `/transcribe` endpoints already specified by the Direct Colab protocol plus the rendezvous *writer* half: it writes `colab_connection.json` with `schema_version`, `request_id`, `url`, `status`, `updated_at`, `expires_at` to wherever Phase 3's spike (below) determines Desktop reads it from. This is a real Phase 3 deliverable, not an assumption that such an artifact already exists — none currently does in this repository.
 
-Backend changes: `AudioMetadataService.duration_seconds(path) -> Optional[float]` using `mutagen`, with a documented fallback (`None`) on read failure — never raises past the caller; a rendezvous poller that reads `colab_connection.json`, validates `schema_version`, `request_id` freshness/TTL, and calls `/health` before reporting `CONNECTED` — stale JSON alone is never sufficient.
+Backend changes: `AudioMetadataService.duration_seconds(path) -> Optional[float]` using `mutagen`, with a documented fallback (`None`) on read failure — never raises past the caller; a rendezvous poller that reads `colab_connection.json`, validates `schema_version`, `request_id` freshness/TTL, and calls `/health` before reporting `CONNECTED` — stale JSON alone is never sufficient; a shared URL-normalization function applied to both the rendezvous-discovered URL and the manually-entered URL, collapsing `https://host`, `https://host/`, `https://host/health`, `https://host/transcribe` all to `https://host` before building `{base}/health` / `{base}/transcribe`, so a doubled path (`/health/health`, `/transcribe/transcribe`) cannot occur regardless of what the user or the notebook wrote.
 
-Frontend changes: connection state machine (waiting → found URL → verifying health → connected / failed) and a manual-entry fallback gated behind "직접 URL 입력", not surfaced as the default control.
+Frontend changes: connection state machine (waiting → found URL → verifying health → connected / failed) and a manual-entry fallback gated behind "직접 URL 입력", not surfaced as the default control; manual entry is normalized identically to the auto-discovered path before being sent to the backend.
 
-Tauri changes: only if rendezvous requires OS-level file watching beyond what the backend's own polling loop can do — default plan keeps this entirely in the backend, since the backend already owns Drive credential access needed to read the rendezvous file if the file lives in a Drive-synced or Drive-API-mediated location. Verify in Phase 3 spike whether `colab_connection.json` is exchanged via Drive API (consistent with Section 17's "Sorigul runtime metadata folder" being a Drive-hosted, small-file channel) or a local well-known path the Colab notebook cannot write to directly by definition — this affects whether Rust needs any involvement. Record the answer as a Phase 3 sub-decision before implementation.
+Tauri changes: only if rendezvous requires OS-level file watching beyond what the backend's own polling loop can do — default plan keeps this entirely in the backend, since the backend already owns Drive credential access needed to read the rendezvous file if the file lives in a Drive-synced or Drive-API-mediated location. Verify in Phase 3 spike whether `colab_connection.json` is exchanged via Drive API (consistent with Section 17's "Sorigul runtime metadata folder" being a Drive-hosted, small-file channel) or a local well-known path the Colab notebook cannot write to directly by definition — this affects whether Rust needs any involvement, and also determines where the Colab-side artifact (above) writes to. Record the answer as a Phase 3 sub-decision before implementation.
 
-Tests: `AudioMetadataService` unit tests (valid MP3, corrupt MP3, missing file → `None`); rendezvous freshness/TTL tests (stale JSON rejected, wrong `request_id` rejected, valid JSON + failing `/health` rejected, valid JSON + passing `/health` accepted); packaged-runtime validation that `mutagen` ships correctly and `ffprobe.exe` is no longer required by the installer.
+Tests: `AudioMetadataService` unit tests (valid MP3, corrupt MP3, missing file → `None`); rendezvous freshness/TTL tests (stale JSON rejected, wrong `request_id` rejected, valid JSON + failing `/health` rejected, valid JSON + passing `/health` accepted); URL normalization tests covering all four input shapes in D26 collapsing to the same base and producing non-doubled `/health`/`/transcribe` paths, for both the rendezvous-discovered and manually-entered cases; packaged-runtime validation that `mutagen` ships correctly and `ffprobe.exe` is no longer required by the installer; an end-to-end check that the Colab-side artifact's writer output is readable by the Desktop-side rendezvous poller (schema round-trip).
 
-Regression risk: `mutagen` may not read duration correctly for all MP3 encodings Legacy produced (VBR edge cases) — spike against a sample of real user MP3s before committing to the library; keep `Optional[float]` contract so a bad read degrades to `—` display rather than blocking transcription (consistent with D21).
+Regression risk: `mutagen` may not read duration correctly for all MP3 encodings Legacy produced (VBR edge cases) — spike against a sample of real user MP3s before committing to the library; keep `Optional[float]` contract so a bad read degrades to `—` display rather than blocking transcription (consistent with D21). The Colab-side artifact is new surface area with no prior version to regress against — its own correctness (health/transcribe protocol conformance, rendezvous write correctness) is the primary risk, not a regression of existing behavior.
 
 Migration/data compatibility: none — this is a runtime dependency change, not a data format change.
 
-Completion condition: opening and running the Colab notebook connects Sorigul without URL copy/paste, and packaged Local/Colab transcription work without `ffprobe.exe` present.
+Completion condition: opening and running the Colab-side artifact connects Sorigul without URL copy/paste; packaged Local/Colab transcription work without `ffprobe.exe` present; all four URL input shapes normalize identically with no doubled paths.
 
-Commit boundaries: (3a) `AudioMetadataService` + tests, (3b) `_probe_duration` replacement in `colab.py` + `ffmpeg_runtime.py` ffprobe removal, (3c) rendezvous service + tests, (3d) frontend Colab connection UI + manual fallback.
+Commit boundaries: (3a) `AudioMetadataService` + tests, (3b) `_probe_duration` replacement in `colab.py` + `ffmpeg_runtime.py` ffprobe removal, (3c) URL normalization function + tests, (3d) rendezvous service (reader/poller) + tests, (3e) Colab-side rendezvous writer artifact, (3f) frontend Colab connection UI + manual fallback.
 
 ## 9. Phase 4 — Runtime UX
 
@@ -275,23 +341,23 @@ Expected files:
 - `frontend/src/pages/TranscriptionPage.tsx` — replace hardcoded `duration: '—'` (line ~33) with real duration from `AudioMetadataService` via scan response; replace any fixed/fake ETA text with the honest computation described in D21
 - `backend/src/api/routes.py` / `backend/src/services/scanner.py` — surface duration in the scan response payload
 - `backend/src/services/job_manager.py` — expose per-run observed processing speed (elapsed / files done) for ETA computation, and confirm `total_files`/`done_files`/`failed_files` already exclude skipped-complete files (verify against D01/D03 skip contract, `MIGRATION_CONTRACT.md` §6.1–6.2)
-- `frontend/src/pages/TranscriptionPage.tsx`, Colab chunk display — chunk-based progress ("3 / 5 구간") sourced from `AudioChunk` count already present in `backend/src/engines/colab.py`
+- `frontend/src/pages/TranscriptionPage.tsx`, Colab progress display — percentage/elapsed/ETA computed internally from `AudioChunk` completion already present in `backend/src/engines/colab.py`, but the chunk unit itself is never rendered to the user (D21, D08)
 
-Backend changes: scan response includes `duration_seconds: Optional[float]`; Job model already has `total_files`/`done_files`/`failed_files` (`backend/src/domain/models.py`) — Phase 4 is primarily verifying these are correctly denominator-scoped (excluding auto-skipped complete files) and wiring them to the frontend, not adding new fields.
+Backend changes: scan response includes `duration_seconds: Optional[float]`; Job model already has `total_files`/`done_files`/`failed_files` (`backend/src/domain/models.py`) — Phase 4 is primarily verifying these are correctly denominator-scoped (excluding auto-skipped complete files) and wiring them to the frontend, not adding new fields; Colab progress computation may use chunk completion internally but its output to the frontend is a percentage/ETA value, not a chunk count.
 
-Frontend changes: remove all hardcoded progress/ETA strings; render `—` when duration or ETA is unavailable rather than a fabricated number; Colab progress renders exact chunk fractions.
+Frontend changes: remove all hardcoded progress/ETA strings; render `—` when duration or ETA is unavailable rather than a fabricated number; Colab progress renders as percentage/elapsed/ETA only — no "N / M 구간", "chunk", or "300초" wording anywhere in the UI (D21 correction, reaffirming D08's existing chunk-invisibility lock).
 
 Tauri changes: none expected.
 
-Tests: scan-response duration field test; ETA-omitted-when-no-history test; ETA-present-and-plausible-when-history-exists test; denominator test confirming auto-skipped complete files are excluded from `total_files`.
+Tests: scan-response duration field test; ETA-omitted-when-no-history test; ETA-present-and-plausible-when-history-exists test; denominator test confirming auto-skipped complete files are excluded from `total_files`; a UI-content test/lint asserting no chunk-count or "300초" string appears in Colab progress rendering (D21 correction).
 
 Regression risk: low — this phase mostly removes fabricated UI values and wires already-existing backend fields (`JobModel.total_files` etc. already exist per Section 5.1's baseline read) rather than introducing new state.
 
 Migration/data compatibility: none.
 
-Completion condition: no fake progress percentage, no fixed ETA string, no unconditional `—` placeholder for duration appear in the running app.
+Completion condition: no fake progress percentage, no fixed ETA string, no unconditional `—` placeholder for duration, and no chunk-count/chunk-duration wording appear in the running app.
 
-Commit boundaries: (4a) scan-response duration wiring + frontend display, (4b) honest Local ETA computation + tests, (4c) Colab chunk-based progress display, (4d) denominator audit/fix if needed.
+Commit boundaries: (4a) scan-response duration wiring + frontend display, (4b) honest Local ETA computation + tests, (4c) Colab percentage/elapsed/ETA progress display with no chunk-unit exposure, (4d) denominator audit/fix if needed.
 
 ## 10. Phase 5 — Release Validation
 
@@ -338,7 +404,7 @@ Phase 0 (this document) is exit-ready when:
 
 - `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` exists with all 14 sections and is internally consistent with `MIGRATION_CONTRACT.md`'s still-valid sections.
 - Every conflict between this document and prior locked contracts (D11, D12, D15) is explicitly marked `SUPERSEDED_BY_PRODUCT_DECISION` with the exact superseded document/line identified — not silently overwritten.
-- Every new-area decision (D13, D14, D16–D22) is explicitly marked `APPROVED_INTENTIONAL_CHANGE`.
+- Every new-area decision (D13, D14, D16–D26) is explicitly marked `APPROVED_INTENTIONAL_CHANGE`.
 - `MIGRATION_CONTRACT.md`, `FEATURE_PARITY.md`, and `LEGACY_FEATURE_PARITY_AUDIT.md` carry non-destructive amendment notices pointing here for the superseded lines (Section 2's D11/D12/D15 entries), without deleting their original evidence/content.
 - No Python/React/Rust/test/installer/dependency file is touched.
 - The branch is pushed for review; `main` is untouched.
