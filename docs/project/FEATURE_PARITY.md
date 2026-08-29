@@ -1,5 +1,7 @@
 # Sorigul Feature Parity
 
+> **Amendment notice (2026-08-29):** `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md`가 아래 두 항목을 `SUPERSEDED_BY_PRODUCT_DECISION`으로 갱신한다. "Google Drive" 절의 MP3/TXT/JSON/SRT 4종 업로드는 TXT/JSON/SRT 3종으로 축소된다 (D11). "파일명과 결과 bundle" 절의 과정/과목 alias는 사용자 직접 입력으로 대체되며, 주차/강 감지만 그대로 유지된다 (D12). 이 문서의 나머지 내용은 그대로 유효하다.
+
 이 문서는 `MIGRATION_CONTRACT.md`를 따르는 기능 이식 기준 요약이다. Legacy 구현 구조를 복사하는 목록이 아니라, 신규 Sorigul이 보존하거나 승인된 `INTENTIONAL_CHANGE`로 다뤄야 할 사용자 계약을 정리한다. 세부 행동이 충돌하면 `MIGRATION_CONTRACT.md`를 우선한다.
 
 ## 전사 흐름과 복구
