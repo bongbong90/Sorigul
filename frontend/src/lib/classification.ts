@@ -34,6 +34,12 @@ export function validateClassificationText(raw: string, fieldLabel: string): Cla
   if (FORBIDDEN_CHARS_PATTERN.test(trimmed)) {
     return { value: trimmed, error: `${fieldLabel}에는 다음 문자를 사용할 수 없습니다: < > : " / \\ | ? *` }
   }
+  // Underscore is reserved as the structural delimiter in the generated
+  // standard filename ({course}_{subject}_{week}주차_{lesson}강) -- see
+  // backend/src/services/normalizer.py's validate_classification_text.
+  if (trimmed.includes('_')) {
+    return { value: trimmed, error: `${fieldLabel}에는 밑줄(_)을 사용할 수 없습니다.` }
+  }
   if (trimmed.endsWith('.')) {
     return { value: trimmed, error: `${fieldLabel}은(는) 마침표(.)로 끝날 수 없습니다.` }
   }

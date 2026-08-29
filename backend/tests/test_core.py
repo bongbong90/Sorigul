@@ -80,7 +80,17 @@ def test_file_scan_rejects_invalid_segment(tmp_path):
 
 def test_validate_classification_text_trims_and_accepts_ordinary_input():
     assert validate_classification_text("  개념완성  ", "과정명") == "개념완성"
-    assert validate_classification_text("Real Estate 101_v2", "과목명") == "Real Estate 101_v2"
+    assert validate_classification_text("Real Estate 101 v2", "과목명") == "Real Estate 101 v2"
+
+
+def test_validate_classification_text_rejects_underscore_in_course():
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text("개념완성_2026", "과정명")
+
+
+def test_validate_classification_text_rejects_underscore_in_subject():
+    with pytest.raises(ClassificationValidationError):
+        validate_classification_text("부동산학개론_기본", "과목명")
 
 
 def test_validate_classification_text_rejects_empty():
@@ -261,9 +271,13 @@ def test_job_create_modes(tmp_path, test_dir):
     # Isolate from the real %LOCALAPPDATA%\Sorigul\settings.json.
     src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
-    # all_incomplete mode: should skip "done"
+    # all_incomplete mode: should skip "done". Neither remaining file has a
+    # detectable week/lesson (INVALID_TARGET), so each must carry an explicit
+    # CONTINUE_ORIGINAL resolution -- otherwise Job creation is blocked
+    # (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
     req1 = CreateJobRequest(
-        folder=str(d), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법"
+        folder=str(d), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        file_resolutions={"no_srt": "CONTINUE_ORIGINAL", "invalid_json": "CONTINUE_ORIGINAL"},
     )
     job1 = create_job(req1)
     assert len(job1.files) == 2 # "no_srt", "invalid_json"
@@ -273,7 +287,8 @@ def test_job_create_modes(tmp_path, test_dir):
 
     # selected mode
     req2 = CreateJobRequest(
-        folder=str(d), file_ids=["invalid_json"], scope="selected", course="개념완성", subject="민법"
+        folder=str(d), file_ids=["invalid_json"], scope="selected", course="개념완성", subject="민법",
+        file_resolutions={"invalid_json": "CONTINUE_ORIGINAL"},
     )
     job2 = create_job(req2)
     assert len(job2.files) == 1

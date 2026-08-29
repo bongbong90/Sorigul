@@ -48,6 +48,12 @@ def validate_classification_text(value: str, field_label: str) -> str:
         raise ClassificationValidationError(f"{field_label}에 사용할 수 없는 제어 문자가 포함되어 있습니다.")
     if FORBIDDEN_CHARS_PATTERN.search(trimmed):
         raise ClassificationValidationError(f'{field_label}에는 다음 문자를 사용할 수 없습니다: < > : " / \\ | ? *')
+    # Underscore is reserved as the structural delimiter in the generated
+    # standard filename ({course}_{subject}_{week}주차_{lesson}강,
+    # STANDARD_PATTERN below) -- allowing it inside course/subject would make
+    # the course/subject boundary unrecoverable when the name is re-parsed.
+    if '_' in trimmed:
+        raise ClassificationValidationError(f"{field_label}에는 밑줄(_)을 사용할 수 없습니다.")
     if trimmed.endswith('.'):
         raise ClassificationValidationError(f"{field_label}은(는) 마침표(.)로 끝날 수 없습니다.")
     return trimmed
