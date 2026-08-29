@@ -22,7 +22,7 @@ The existing React UI (`frontend/src`) is unchanged in structure and is wrapped,
 frontend/src-tauri/
   Cargo.toml, build.rs, tauri.conf.json
   capabilities/default.json   -- minimal permission set
-  icons/                      -- generated via `tauri icon` from a brand-color placeholder
+  icons/                      -- generated Windows assets from the approved Sorigul brand source
   src/
     main.rs                   -- entry point, suppresses console subsystem in release
     lib.rs                    -- app builder: plugins, tray, window-close policy, commands
@@ -181,7 +181,9 @@ No shell/process-execution permission exists in any capability file (the shell p
 
 - The manual OAuth code-paste fallback is more friction than an automatic callback and depends on the user correctly copying the `code` query parameter out of a browser address bar that shows a failed page load.
 - `packaged_spawn_spec`'s resource path is unexercised by any test (no packaged build was produced this pass); it should be smoke-tested once a real `tauri build` + sidecar binary exist.
-- Icons are a solid-brand-color placeholder generated for this pass (`icons/source-icon.png` was deleted after generation), not final design assets.
+- The former solid-brand-color placeholder was replaced by the approved transparent Sorigul
+  Windows branding assets. See `docs/runtime/WINDOWS_APP_ICON_BRANDING.md` for provenance,
+  small-surface rules, native smoke evidence, and the remaining Installer validation scope.
 
 ## Final verdict
 
