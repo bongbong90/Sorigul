@@ -45,12 +45,10 @@
 | RT-002 | 종료 시 process tree 정리 | Contract enforced | PASS | Rust Cargo Test (24 passed) / Workstream 7 MSI validation | PASS | NOT RUN | |
 | RT-003 | 설치형 Job/Drive 복원 | Contract enforced | PASS | Rust Cargo Test (24 passed) / Workstream 7 MSI validation | PASS | NOT RUN | |
 | RT-004 | Windows MSI/Unicode/no-console | Contract enforced | PASS | Rust Cargo Test (24 passed) / Workstream 7 MSI validation | PASS | NOT RUN | |
-| UI-visible | `WAITING`, `TRANSCRIBING`/`RUNNING`, `DONE`, `FAILED`, `CANCELLED`/`STOPPED`, `CRASHED` | Contract enforced | PASS | Workstream 7 installed validation | PASS | NOT RUN | |
-| UI-derived | 파일 완료 수/대상 수, ETA, Local DONE + Drive FAILED, retry 가능 여부 | Contract enforced | PASS | Workstream 7 installed validation | PASS | NOT RUN | |
 
 ## Summary
-- Total: 45
-- PASS: 25
+- Total: 43
+- PASS: 23
 - APPROVED_INTENTIONAL_CHANGE: 6
 - PENDING_USER_INPUT: 14
 - BLOCKED: 0

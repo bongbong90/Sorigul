@@ -20,8 +20,9 @@
        the self-test also exercises the bundled ffmpeg it will actually run
        against) and fails the build on a non-zero exit code.
 
-    Only ever deletes directories it created itself this run
-    (backend/packaging/build, backend/packaging/dist) -- never an
+    Only ever deletes the unique temp build/dist root it created itself
+    this run (under $env:TEMP\Sorigul_PyInstaller_<guid>) -- never
+    backend/packaging/build, backend/packaging/dist, or any other
     unrelated/pre-existing directory.
 
 .EXAMPLE
