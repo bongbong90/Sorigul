@@ -1,9 +1,13 @@
+import http.server
 import json
 import re
+import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Protocol
+from urllib.parse import parse_qs, urlparse
 
 from src.domain.models import (
     DriveAuthState,
@@ -19,6 +23,7 @@ from src.services.scanner import FileScanner
 
 
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+OAUTH_CALLBACK_TIMEOUT_SECONDS = 300.0
 DRIVE_ROOT_HIERARCHY = ("2026 제37회 공인중개사 자격시험", "전사자료")
 COURSES = {"개념완성", "기본이론", "기초이론", "핵심이론"}
 SUBJECT_ALIASES = {
@@ -152,6 +157,144 @@ class GoogleDriveClient:
         return updated["id"]
 
 
+_CALLBACK_SUCCESS_HTML = (
+    "<html><body><p>Google Drive 연결이 완료되었습니다.<br>"
+    "이 창을 닫고 소리글로 돌아가세요.</p></body></html>"
+)
+_CALLBACK_ERROR_HTML = (
+    "<html><body><p>Google Drive 연결에 실패했습니다.<br>"
+    "이 창을 닫고 소리글에서 다시 시도해 주세요.</p></body></html>"
+)
+
+
+class _CallbackOutcome:
+    """Captures at most one result from the loopback listener.
+
+    `resolve()` is safe to call from concurrent requests (only the first
+    call wins); everything after is a strict no-op so a duplicate/replayed
+    callback can never re-trigger a token exchange.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.consumed = False
+        self.code: Optional[str] = None
+        self.error: Optional[str] = None
+        self.event = threading.Event()
+
+    def resolve(self, code: Optional[str], error: Optional[str]) -> bool:
+        with self._lock:
+            if self.consumed:
+                return False
+            self.consumed = True
+            self.code = code
+            self.error = error
+            self.event.set()
+            return True
+
+
+def _make_callback_handler(expected_state: str, outcome: _CallbackOutcome):
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        # Silence BaseHTTPRequestHandler's default per-request stderr log,
+        # which would otherwise print the full request line -- including
+        # the `code`/`state` query parameters -- to the process's logs.
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib-mandated name
+            query = parse_qs(urlparse(self.path).query)
+            state_values = query.get("state", [])
+            code_values = query.get("code", [])
+            error_values = query.get("error", [])
+
+            if error_values:
+                outcome.resolve(None, error_values[0])
+                self._respond(_CALLBACK_ERROR_HTML)
+                return
+
+            if not state_values or state_values[0] != expected_state:
+                # Wrong/missing state: reject this request only, without
+                # consuming the outcome -- keep listening for the
+                # legitimate callback.
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(_CALLBACK_ERROR_HTML.encode("utf-8"))
+                return
+
+            if not code_values:
+                outcome.resolve(None, "MISSING_CODE")
+                self._respond(_CALLBACK_ERROR_HTML)
+                return
+
+            outcome.resolve(code_values[0], None)
+            self._respond(_CALLBACK_SUCCESS_HTML)
+
+        def _respond(self, html: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+
+    return _Handler
+
+
+class LoopbackCallbackServer:
+    """Temporary 127.0.0.1 HTTP listener for the Google OAuth desktop
+    redirect. Binds an OS-assigned ephemeral port (never a fixed port such
+    as 80, which would require elevation), validates the `state` query
+    parameter this flow generated, and captures at most one authorization
+    `code`. Never logs the code, the state, or any token.
+    """
+
+    def __init__(self, expected_state: str):
+        self._outcome = _CallbackOutcome()
+        handler = _make_callback_handler(expected_state, self._outcome)
+        self._httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
+        self._httpd.timeout = 1.0
+        self.port: int = self._httpd.server_address[1]
+        self._thread: Optional[threading.Thread] = None
+
+    @property
+    def redirect_uri(self) -> str:
+        return f"http://127.0.0.1:{self.port}/"
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._outcome.event.is_set():
+            try:
+                self._httpd.handle_request()
+            except (OSError, ValueError):
+                # The listener socket was closed from another thread (e.g.
+                # `wait_for_code()` timing out and calling `shutdown()`
+                # while this thread was blocked in `select()` -- closing a
+                # socket registered with a selector on another thread
+                # surfaces as ValueError("Invalid file descriptor") here).
+                # Nothing left to serve.
+                break
+
+    def wait_for_code(self, timeout: float = OAUTH_CALLBACK_TIMEOUT_SECONDS) -> Optional[str]:
+        """Blocks (from a background thread, not the request thread) until
+        a callback arrives or `timeout` elapses, then shuts the listener
+        down either way. Returns the authorization code, or None on
+        timeout, state mismatch exhaustion, or an explicit error callback.
+        """
+        got_result = self._outcome.event.wait(timeout)
+        self.shutdown()
+        if not got_result or self._outcome.error:
+            return None
+        return self._outcome.code
+
+    def shutdown(self) -> None:
+        try:
+            self._httpd.server_close()
+        except OSError:
+            pass
+
+
 class GoogleOAuthService:
     def __init__(self, credential_path: Path, token_path: Path):
         self.credential_path = credential_path
@@ -203,20 +346,45 @@ class GoogleOAuthService:
         try:
             from google_auth_oauthlib.flow import Flow
 
+            expected_state = secrets.token_urlsafe(24)
+            callback_server = LoopbackCallbackServer(expected_state)
+
             self._flow = Flow.from_client_secrets_file(
                 str(self.credential_path),
                 scopes=[DRIVE_SCOPE],
-                redirect_uri="http://127.0.0.1",
+                redirect_uri=callback_server.redirect_uri,
             )
             authorization_url, state = self._flow.authorization_url(
                 access_type="offline",
                 include_granted_scopes="true",
                 prompt="consent",
+                state=expected_state,
             )
             self._state = DriveAuthState.AUTHORIZING
+            callback_server.start()
+            threading.Thread(
+                target=self._await_callback,
+                args=(callback_server,),
+                daemon=True,
+            ).start()
             return {"state": state, "authorization_url": authorization_url, "scope": DRIVE_SCOPE}
         except ImportError as exc:
             raise DriveError("DRIVE_LIBRARY_MISSING", "Google Drive runtime dependency가 설치되지 않았습니다.") from exc
+
+    def _await_callback(self, callback_server: LoopbackCallbackServer) -> None:
+        """Runs on a background thread started by `start()`. Waits for the
+        system-browser redirect to hit the loopback listener, then
+        completes the flow automatically -- the user never pastes a code.
+        """
+        code = callback_server.wait_for_code()
+        if code is None:
+            if self._state == DriveAuthState.AUTHORIZING:
+                self._state = DriveAuthState.REAUTH_REQUIRED
+            return
+        try:
+            self.complete(code)
+        except DriveError:
+            pass  # complete() already updated self._state on failure
 
     def complete(self, code: str) -> DriveAuthState:
         if self._flow is None or not code:

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ExternalLink, FileText, FolderOpen, Maximize2, RefreshCw, X } from 'lucide-react'
 import { api, getSavedFolder, getUserMessage, saveFolder, type FolderFilter, type FolderItem } from '../api/client'
+import { isTauri, openInExplorer, pickFolder } from '../lib/native'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -56,8 +57,8 @@ export function FoldersPage() {
     } catch (cause) { setPreview(getUserMessage(cause)) }
   }
 
-  function changeFolder() {
-    const value = window.prompt('전사 폴더 경로를 입력하세요.', folder)?.trim()
+  async function changeFolder() {
+    const value = await pickFolder(folder)
     if (!value) return
     saveFolder(value); setFolder(value); setSelectedId(undefined)
   }
@@ -71,8 +72,16 @@ export function FoldersPage() {
   async function requestOpenFolder(itemId?: string) {
     if (!scanId) return
     try {
-      const intent = await api.openFolderIntent(scanId, itemId)
-      setMessage(`Desktop 폴더 열기 요청 준비됨 · ${intent.folder}`)
+      if (isTauri()) {
+        // Rust open_folder_by_intent fetches the backend-validated path and
+        // opens Explorer; the frontend never handles a raw filesystem path.
+        await openInExplorer(scanId, itemId)
+        setMessage('탐색기에서 폴더를 열었습니다.')
+      } else {
+        // Browser dev: call the intent API just to show the resolved path.
+        const intent = await api.openFolderIntent(scanId, itemId)
+        setMessage(`Desktop 폴더 열기 요청 준비됨 · ${intent.folder}`)
+      }
     } catch (cause) { setError(getUserMessage(cause)) }
   }
 
@@ -80,7 +89,7 @@ export function FoldersPage() {
   return (
     <div className="feature-page folders-page">
       <div className="page-intro"><div><p className="eyebrow">실제 파일 기준</p><h2>전사 폴더의 결과를 확인하세요</h2><p>{error ?? message}</p></div>
-        <div className="inline-actions"><Button variant="secondary" onClick={changeFolder}><FolderOpen aria-hidden="true" /> 폴더 변경</Button><Button variant="secondary" disabled={!scanId} onClick={() => void requestOpenFolder()}><FolderOpen aria-hidden="true" /> 폴더 열기</Button><Button disabled={!folder || loading} onClick={() => void refresh()}><RefreshCw aria-hidden="true" /> {loading ? '새로고침 중' : '새로고침'}</Button></div></div>
+        <div className="inline-actions"><Button variant="secondary" onClick={() => void changeFolder()}><FolderOpen aria-hidden="true" /> 폴더 변경</Button><Button variant="secondary" disabled={!scanId} onClick={() => void requestOpenFolder()}><FolderOpen aria-hidden="true" /> 폴더 열기</Button><Button disabled={!folder || loading} onClick={() => void refresh()}><RefreshCw aria-hidden="true" /> {loading ? '새로고침 중' : '새로고침'}</Button></div></div>
       <div className="filter-bar" aria-label="Folders 필터">{folderFilters.map((item) => <button type="button" key={item.id} className={filter === item.id ? 'filter-button filter-button-active' : 'filter-button'} aria-pressed={filter === item.id} onClick={() => { setFilter(item.id); void refresh(item.id) }}>{item.label}</button>)}</div>
       <div className="folders-layout"><Card className="data-table-card"><div className="data-table-scroll"><table className="data-table folders-table"><caption className="visually-hidden">전사 폴더 파일 목록</caption><thead><tr><th>파일명</th><th>유형</th><th>상태</th><th>수정일</th></tr></thead><tbody>
         {files.map((file) => <tr key={file.id} className={selectedId === file.id ? 'data-row-selected' : undefined}><td><button type="button" className="table-file-button" title={file.filename} onClick={() => void selectItem(file)}>{file.filename}</button></td><td>{file.kind}</td><td><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge></td><td className="text-numeric">{new Date(file.modified_at).toLocaleString('ko-KR')}</td></tr>)}

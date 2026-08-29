@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { AppShell } from './components/layout/AppShell'
 import type { NavigationId } from './components/layout/AppShell'
+import { useCloseBehaviorSync } from './hooks/useCloseBehaviorSync'
+import { useDesktopNotifications } from './hooks/useDesktopNotifications'
 import { FoldersPage } from './pages/FoldersPage'
 import { LogPage } from './pages/LogPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -29,6 +31,8 @@ function pageFromPath(pathname: string): NavigationId {
 
 function App() {
   const [activePage, setActivePage] = useState<NavigationId>(() => pageFromPath(window.location.pathname))
+  useDesktopNotifications()
+  useCloseBehaviorSync()
 
   useEffect(() => {
     const handlePopState = () => setActivePage(pageFromPath(window.location.pathname))

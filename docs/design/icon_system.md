@@ -32,6 +32,20 @@
 
 ## 5. 브랜드 심볼
 
-- Lucide icon은 Sorigul의 Brand logo/symbol 대체 용도로 사용하지 않는다.
-- 승인된 별도 Brand symbol asset이 없으면 Brand 영역은 text brand만 사용한다.
-- Brand symbol은 별도 승인된 asset이 제공된 뒤에만 추가한다.
+- Lucide icon은 Navigation, Action, Status 등 UI 기능 아이콘에만 사용하며 Sorigul의
+  Native App Brand Icon을 대체하지 않는다.
+- Sorigul Native App Brand Icon의 canonical master asset은
+  `docs/design/reference/app-icon-v1.png`이다.
+- canonical master의 색상·심볼은 변경하지 않는다. Windows 투명 배경 생성에는
+  `docs/design/reference/app-icon-v1-transparent-runtime.png` 파생본을 사용한다.
+- 128px 이상 및 EXE large-icon 표면은 canonical 파형 → 텍스트 모티프의 투명 파생본을
+  사용한다.
+- 16–64px Window title bar, Taskbar, Tray, EXE/Properties 표면은 같은 브랜드 계약을
+  5개의 오디오 파형 막대 → 3개의 텍스트 선으로 pixel-native하게 단순화한다.
+- small-surface 심볼은 Quiet Teal `#3E6874` 본체와 1px Primary Soft `#DCE9E9`
+  언더레이를 사용한다. 언더레이는 어두운 Windows chrome에서 대비를 확보하기 위한
+  브랜드 팔레트 처리이며 배경 타일이 아니다. 나머지 캔버스는 완전 투명하다.
+- canonical master와 위 파생 규칙은 Window title bar, Windows Taskbar, Alt+Tab, EXE,
+  Tray와 향후 Installer branding의 단일 원본 체계다.
+- Native App Brand Icon 적용은 React UI의 Brand 영역에 심볼을 추가한다는 뜻이 아니다.
+  UI Freeze에 따라 현재 text brand 구조는 변경하지 않는다.

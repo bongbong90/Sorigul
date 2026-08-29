@@ -1,0 +1,10 @@
+# Release packaging-only dependencies. Not part of the application runtime
+# (backend/requirements*.txt) -- these tools build the standalone backend
+# executable and stage the bundled ffmpeg; they are never imported by the
+# running Sorigul backend itself.
+#
+# Versions pinned to what was actually installed and verified against this
+# project's Python 3.13 backend (see docs/runtime/
+# INSTALLER_INSTALLED_RUNTIME_VALIDATION.md -> Backend Packaging / FFmpeg).
+pyinstaller==6.22.2
+imageio-ffmpeg==0.6.0

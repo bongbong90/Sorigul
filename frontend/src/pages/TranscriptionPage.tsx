@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Cloud, FilePenLine, RefreshCw, WifiOff } from 'lucide-react'
 import { api, getSavedFolder, getUserMessage, saveFolder, type JobModel, type NormalizationPreview, type ScannedFile } from '../api/client'
+import { pickFolder } from '../lib/native'
 import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transcription/CurrentTaskSection'
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
@@ -96,7 +97,7 @@ export function TranscriptionPage() {
   const runState: CurrentTaskStatus = job ? (job.status as CurrentTaskStatus) : 'IDLE'
 
   async function changeFolder() {
-    const value = window.prompt('전사 폴더 경로를 입력하세요.', folder)?.trim()
+    const value = await pickFolder(folder)
     if (!value) return
     saveFolder(value); setFolder(value); setSelectedIds([]); setJob(undefined); setNormalization(undefined)
   }
