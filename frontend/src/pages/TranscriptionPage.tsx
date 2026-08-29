@@ -98,6 +98,7 @@ export function TranscriptionPage() {
   const [editingOverride, setEditingOverride] = useState(false)
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
+  const isPreflighting = attempt !== null || resolvingId !== null
 
   const knownStage = knownStageFor(subject)
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
@@ -378,7 +379,7 @@ export function TranscriptionPage() {
 
     setAttempt(null)
     setAdoptedClassification(null)
-    await finalizeJob(ids, seed.force, seed.scope, resolutions, forceDriveOff ? false : uploadToDrive, courseCheck.value, subjectCheck.value)
+    await finalizeJob(ids, seed.force, 'selected', resolutions, forceDriveOff ? false : uploadToDrive, courseCheck.value, subjectCheck.value)
   }
 
   async function finalizeJob(
@@ -517,6 +518,15 @@ export function TranscriptionPage() {
     onCourseChange(newCourse)
     onSubjectChange(newSubject)
 
+    const nextKnownStage = knownStageFor(newSubject)
+    const nextOverrideStage = overrideStageFor(newSubject, settings?.subject_stage_overrides ?? {})
+    if (!nextKnownStage && !nextOverrideStage) {
+      setMessage('이 과목의 1차/2차를 선택한 뒤 다시 전사를 시작해 주세요.')
+      setEditingOverride(true)
+      resetPreflight()
+      return
+    }
+
     const nextAdopted: AdoptedClassification = { course: newCourse, subject: newSubject, fromFileId: resolvingId }
     const nextResolutions = new Map<string, FileResolution>([[resolvingId, 'USE_FILE_CLASSIFICATION']])
 
@@ -528,30 +538,30 @@ export function TranscriptionPage() {
   return (
     <div className="transcription-page">
       <RuntimeBanner status={backendStatus} message={message} onReconnect={() => void reconnect()} />
-      <FolderSection folderPath={folder || '선택된 폴더 없음'} onChangeFolder={() => void changeFolder()} />
+      <FolderSection folderPath={folder || '선택된 폴더 없음'} onChangeFolder={() => { if (!isPreflighting) void changeFolder() }} />
       <ClassificationSection
         course={course}
         subject={subject}
         courseError={courseError}
         subjectError={subjectError}
-        onCourseChange={onCourseChange}
-        onSubjectChange={onSubjectChange}
+        onCourseChange={(v) => { if (!isPreflighting) onCourseChange(v) }}
+        onSubjectChange={(v) => { if (!isPreflighting) onSubjectChange(v) }}
         knownStage={knownStage}
         overrideStage={overrideStage}
         needsStagePrompt={needsStagePrompt}
-        onPickStage={(stage) => void onPickStage(stage)}
-        onEditOverride={() => setEditingOverride(true)}
-        disabled={isProcessing}
+        onPickStage={(stage) => { if (!isPreflighting) void onPickStage(stage) }}
+        onEditOverride={() => { if (!isPreflighting) setEditingOverride(true) }}
+        disabled={isProcessing || isPreflighting}
       />
-      {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" onClick={() => void action('retry')}>다시 시도</Button></div> : null}
-      <TranscriptionActions completedCount={completedCount} selectedCount={selectedIds.length} totalCount={rows.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing} canStop={canControl} canCancel={canControl} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => void action('retry')} />
+      {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" onClick={() => { if (!isPreflighting) void action('retry') }}>다시 시도</Button></div> : null}
+      <TranscriptionActions completedCount={completedCount} selectedCount={selectedIds.length} totalCount={rows.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting} canStop={canControl} canCancel={canControl} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
       <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} />
-      <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={toggle} onToggleAll={() => setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id))} onRetry={() => void action('retry')} onRetranscribe={(id) => { setPendingIds([id]); setDialog('retranscribe') }} />
+      <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
-        <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p><label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>MP3/TXT/JSON/SRT 정확히 4개</small></span><input type="checkbox" checked={uploadToDrive} onChange={(event) => setUploadToDrive(event.target.checked)} /></label><div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED')} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
+        <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p><label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>MP3/TXT/JSON/SRT 정확히 4개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label><div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
       </div></section>
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
         {dialog === 'start-all' ? <><h2 className="text-card-title" id="dialog-title">전체 파일을 전사할까요?</h2><p className="dialog-summary">전체 <strong>{rows.length}개</strong> 중 완료 <strong>{completedCount}개</strong>를 제외한 <strong>{pendingIds.length}개</strong> 파일을 전사합니다.</p><div className="dialog-actions"><Button variant="secondary" onClick={() => setDialog(null)}>취소</Button><Button onClick={() => void startAttempt(pendingIds, false, 'all_incomplete')}>실행</Button></div></> : null}

@@ -88,10 +88,6 @@ def test_job_creation_records_normalized_name_only_when_already_standard(tmp_pat
     folder.mkdir()
     # Already standard and matching typed course/subject -> normalized_name set.
     (folder / "개념완성_민법_1주차_1강.mp3").touch()
-    # Not yet normalized (raw lecture title) -> normalized_name stays None,
-    # even though week/lesson are still recorded.
-    (folder / "1강_[2주차]_원본파일.mp3").touch()
-
     jm = JobManager(str(tmp_path / "jobs.json"))
     src.api.routes.job_manager = jm
     # Isolate from the real %LOCALAPPDATA%\Sorigul\settings.json -- create_job
@@ -104,15 +100,10 @@ def test_job_creation_records_normalized_name_only_when_already_standard(tmp_pat
     job = create_job(req)
 
     standard_id = "개념완성_민법_1주차_1강"
-    raw_id = "1강_[2주차]_원본파일"
 
     assert job.file_metadata[standard_id].normalized_name == standard_id
     assert job.file_metadata[standard_id].week == "1"
     assert job.file_metadata[standard_id].lesson == "1"
-
-    assert job.file_metadata[raw_id].normalized_name is None
-    assert job.file_metadata[raw_id].week == "2"
-    assert job.file_metadata[raw_id].lesson == "1"
 
 
 def test_job_creation_rejects_unknown_subject_without_stage_or_override(tmp_path):
@@ -308,3 +299,32 @@ def test_job_creation_allows_explicit_continue_original_resolution(tmp_path):
     job = create_job(req)
 
     assert job.file_metadata["기본이론_민법_1주차_1강"].normalized_name is None
+
+
+def test_job_creation_rejects_normalized_without_rename(tmp_path):
+    from fastapi import HTTPException
+    from src.api.routes import CreateJobRequest, create_job
+    import src.api.routes
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    (folder / "1강_[1주차]_원본.mp3").touch()
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
+
+    # A: reject direct create_job
+    req = CreateJobRequest(
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+    )
+    with pytest.raises(HTTPException, match="파일명 정규화를 먼저 적용해 주세요"):
+        create_job(req)
+
+    # C: reject even with CONTINUE_ORIGINAL
+    req_c = CreateJobRequest(
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        file_resolutions={"1강_[1주차]_원본": "CONTINUE_ORIGINAL"}
+    )
+    with pytest.raises(HTTPException, match="파일명 정규화를 먼저 적용해 주세요"):
+        create_job(req_c)

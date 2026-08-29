@@ -342,6 +342,11 @@ def create_job(req: CreateJobRequest):
             continue
         existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
         preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        if preview.result_type == "NORMALIZED":
+            raise HTTPException(
+                status_code=400,
+                detail="파일명 정규화를 먼저 적용해 주세요.",
+            )
         if (
             preview.result_type in {"MISMATCH", "INVALID_TARGET", "CONFLICT"}
             and req.file_resolutions.get(fid) != "CONTINUE_ORIGINAL"
