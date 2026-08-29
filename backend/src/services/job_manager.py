@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 from pydantic import ValidationError
-from src.domain.models import JobModel, FileStatus, JobEvent
+from src.domain.models import FileMetadata, JobModel, FileStatus, JobEvent
 
 class JobManager:
     def __init__(self, storage_path: str):
@@ -103,6 +103,10 @@ class JobManager:
         engine_config: Optional[dict] = None,
         force_retranscribe: bool = False,
         upload_to_drive: bool = False,
+        course: Optional[str] = None,
+        subject: Optional[str] = None,
+        stage: Optional[str] = None,
+        file_metadata: Optional[Dict[str, FileMetadata]] = None,
     ) -> JobModel:
         job_id = str(uuid.uuid4())
         job = JobModel(
@@ -116,7 +120,11 @@ class JobManager:
             total_files=len(file_ids),
             done_files=0,
             failed_files=0,
-            files={fid: FileStatus.WAITING for fid in file_ids}
+            files={fid: FileStatus.WAITING for fid in file_ids},
+            course=course,
+            subject=subject,
+            stage=stage,
+            file_metadata=file_metadata or {},
         )
         job.events.append(JobEvent(
             level="info", category="Job", message=f"작업 생성됨 ({len(file_ids)}개 파일)"

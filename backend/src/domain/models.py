@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Literal, Optional, Dict, Any
 from datetime import datetime
 
 class FileStatus(str, Enum):
@@ -64,6 +64,19 @@ class DriveFileState(BaseModel):
     remote_file_ids: Dict[str, str] = Field(default_factory=dict)
     updated_at: datetime = Field(default_factory=datetime.now)
 
+
+class FileMetadata(BaseModel):
+    week: Optional[str] = None
+    lesson: Optional[str] = None
+    # Only set when, at the time this metadata was recorded, the file's
+    # on-disk name was already the exact valid standard name for the
+    # course/subject typed for this Job. None whenever normalization is
+    # unresolved (mismatch, missing week/lesson, or the user chose to
+    # continue with the original filename) -- see CORE_WORKFLOW_REFINEMENT_PLAN.md
+    # Section 12/28.
+    normalized_name: Optional[str] = None
+
+
 class JobModel(BaseModel):
     job_id: str
     created_at: datetime = Field(default_factory=datetime.now)
@@ -84,6 +97,13 @@ class JobModel(BaseModel):
     events: List[JobEvent] = Field(default_factory=list)
     drive: Dict[str, DriveFileState] = Field(default_factory=dict)
     error: Optional[str] = None
+    # Job-level classification metadata (CORE_WORKFLOW_REFINEMENT_PLAN.md D12/D15/D16).
+    # Optional so a Job persisted before this field existed still loads --
+    # only newly-created Jobs are guaranteed to have these populated.
+    course: Optional[str] = None
+    subject: Optional[str] = None
+    stage: Optional[Literal["1차", "2차"]] = None
+    file_metadata: Dict[str, FileMetadata] = Field(default_factory=dict)
     # True only once the file-processing loop has run to its natural end
     # (every WAITING file reached a terminal state). Defaults to False: a
     # freshly created Job, a Job whose completion is not yet confirmed, and
