@@ -13,6 +13,11 @@ use sidecar::{HttpHealthProbe, SidecarManager, SidecarStatus, SpawnSpec};
 
 const BACKEND_PORT: u16 = 8000;
 
+#[cfg(target_os = "windows")]
+const PATH_LIST_SEPARATOR: &str = ";";
+#[cfg(not(target_os = "windows"))]
+const PATH_LIST_SEPARATOR: &str = ":";
+
 struct AppState {
     sidecar: Arc<SidecarManager>,
     shutdown_gate: ShutdownGate,
@@ -188,6 +193,10 @@ fn dev_python_executable() -> String {
 /// Development launch: run the backend straight from source through the
 /// project's own (or system) Python, exactly like the documented manual
 /// `uvicorn` invocation, so dev and packaged runs hit the same product API.
+/// The dev child inherits this process's own PATH untouched -- bundled
+/// ffmpeg is a packaged-release concept only; dev relies on whatever
+/// ffmpeg the developer already has on PATH, same as before this work
+/// package.
 fn dev_spawn_spec() -> SpawnSpec {
     SpawnSpec {
         program: dev_python_executable(),
@@ -201,33 +210,75 @@ fn dev_spawn_spec() -> SpawnSpec {
             BACKEND_PORT.to_string(),
         ],
         current_dir: Some(repo_root().join("backend")),
+        env: vec![],
     }
 }
 
-/// Packaged launch: a pre-built standalone backend binary, resolved from
-/// the bundle's resource directory. The binary itself is not produced by
-/// this work package -- see docs/runtime: PACKAGING DECISION REQUIRED.
+/// Packaged launch: a pre-built standalone backend binary and a bundled
+/// ffmpeg, both resolved from the bundle's resource directory
+/// (`resource_dir/binaries/`). Every failure mode here is a distinct,
+/// explicit error -- this function never falls back to `dev_spawn_spec()`.
+/// A release build that can't find its own packaged resources must fail
+/// loudly, not silently start hunting for a system Python/venv that might
+/// happen to exist on the install machine and mask the real problem.
 fn packaged_spawn_spec(app: &AppHandle) -> Result<SpawnSpec, String> {
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|err| format!("RESOURCE_DIR_UNAVAILABLE: {err}"))?;
-    let exe = resource_dir.join("binaries").join("sorigul-backend.exe");
+    packaged_spawn_spec_from_resource_dir(&resource_dir)
+}
+
+/// Tauri-independent core of `packaged_spawn_spec`, split out so the
+/// missing-backend / missing-ffmpeg / present-and-wired failure and
+/// success paths are unit-testable without a running `AppHandle`.
+fn packaged_spawn_spec_from_resource_dir(
+    resource_dir: &std::path::Path,
+) -> Result<SpawnSpec, String> {
+    let binaries_dir = resource_dir.join("binaries");
+
+    let exe = binaries_dir.join("sorigul-backend.exe");
+    if !exe.is_file() {
+        return Err(format!("PACKAGED_BACKEND_MISSING: {}", exe.display()));
+    }
+
+    let ffmpeg = binaries_dir.join("ffmpeg.exe");
+    if !ffmpeg.is_file() {
+        return Err(format!("PACKAGED_FFMPEG_MISSING: {}", ffmpeg.display()));
+    }
+
+    // Prepend (never replace) the bundled binaries directory onto PATH for
+    // the child only -- the app's own process-wide environment is never
+    // touched. This lets the packaged backend resolve `ffmpeg` without
+    // requiring one on the installing machine's system PATH.
+    let existing_path = std::env::var("PATH").unwrap_or_default();
+    let child_path = if existing_path.is_empty() {
+        binaries_dir.to_string_lossy().into_owned()
+    } else {
+        format!(
+            "{}{PATH_LIST_SEPARATOR}{existing_path}",
+            binaries_dir.display()
+        )
+    };
+
     Ok(SpawnSpec {
         program: exe.to_string_lossy().into_owned(),
         args: vec!["--port".into(), BACKEND_PORT.to_string()],
         current_dir: None,
+        env: vec![("PATH".into(), child_path)],
     })
 }
 
-fn spawn_spec_for_current_build(app: &AppHandle) -> SpawnSpec {
+/// Selects the spawn path for this build. Debug builds always use the dev
+/// spawn spec; release builds always use the packaged spawn spec -- with
+/// no fallback in either direction. A release build's resource resolution
+/// failure surfaces as `SidecarStatus::StartupFailed` (see `start_backend`),
+/// never as a silent switch to `dev_spawn_spec()`.
+fn spawn_spec_for_current_build(app: &AppHandle) -> Result<SpawnSpec, String> {
     if cfg!(debug_assertions) {
-        dev_spawn_spec()
+        Ok(dev_spawn_spec())
     } else {
-        match packaged_spawn_spec(app) {
-            Ok(spec) => spec,
-            Err(_) => dev_spawn_spec(),
-        }
+        packaged_spawn_spec(app)
     }
 }
 
@@ -237,15 +288,16 @@ fn start_backend(app: AppHandle, sidecar: Arc<SidecarManager>) {
             url: health_url(),
             timeout: Duration::from_millis(800),
         };
-        let spec = spawn_spec_for_current_build(&app);
-        let status = sidecar.start(&probe, spec);
-        let resolved = match status {
-            SidecarStatus::Starting => sidecar.wait_until_healthy(
-                &probe,
-                Duration::from_secs(20),
-                Duration::from_millis(400),
-            ),
-            other => other,
+        let resolved = match spawn_spec_for_current_build(&app) {
+            Ok(spec) => match sidecar.start(&probe, spec) {
+                SidecarStatus::Starting => sidecar.wait_until_healthy(
+                    &probe,
+                    Duration::from_secs(20),
+                    Duration::from_millis(400),
+                ),
+                other => other,
+            },
+            Err(reason) => SidecarStatus::StartupFailed(reason),
         };
         let _ = app.emit("sorigul://sidecar-status", format!("{resolved:?}"));
     });
@@ -344,7 +396,85 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_json_string;
+    use super::{extract_json_string, packaged_spawn_spec_from_resource_dir};
+
+    /// A fresh, empty scratch directory under the OS temp dir, cleaned up
+    /// when dropped. Avoids pulling in a `tempfile` dependency for three
+    /// tests.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sorigul-packaged-spawn-spec-test-{label}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn packaged_spawn_spec_fails_explicitly_when_backend_exe_is_missing() {
+        let scratch = ScratchDir::new("missing-backend");
+
+        let result = packaged_spawn_spec_from_resource_dir(&scratch.0);
+
+        let err = result.expect_err("must fail without a backend exe present");
+        assert!(
+            err.starts_with("PACKAGED_BACKEND_MISSING"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn packaged_spawn_spec_fails_explicitly_when_ffmpeg_is_missing() {
+        let scratch = ScratchDir::new("missing-ffmpeg");
+        let binaries = scratch.0.join("binaries");
+        std::fs::create_dir_all(&binaries).unwrap();
+        std::fs::write(binaries.join("sorigul-backend.exe"), b"stub").unwrap();
+
+        let result = packaged_spawn_spec_from_resource_dir(&scratch.0);
+
+        let err = result.expect_err("must fail without ffmpeg present");
+        assert!(
+            err.starts_with("PACKAGED_FFMPEG_MISSING"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn packaged_spawn_spec_succeeds_and_prepends_binaries_dir_to_child_path_when_both_present() {
+        let scratch = ScratchDir::new("both-present");
+        let binaries = scratch.0.join("binaries");
+        std::fs::create_dir_all(&binaries).unwrap();
+        std::fs::write(binaries.join("sorigul-backend.exe"), b"stub").unwrap();
+        std::fs::write(binaries.join("ffmpeg.exe"), b"stub").unwrap();
+
+        let spec =
+            packaged_spawn_spec_from_resource_dir(&scratch.0).expect("both resources present");
+
+        assert_eq!(
+            spec.program,
+            binaries.join("sorigul-backend.exe").to_string_lossy()
+        );
+        assert_eq!(spec.args, vec!["--port".to_string(), "8000".to_string()]);
+        assert!(spec.current_dir.is_none());
+        assert_eq!(spec.env.len(), 1);
+        let (key, value) = &spec.env[0];
+        assert_eq!(key, "PATH");
+        assert!(
+            value.starts_with(&binaries.to_string_lossy().into_owned()),
+            "child PATH must be prepended with the bundled binaries dir: {value}"
+        );
+    }
 
     fn make_intent(folder: &str, item_filename: Option<&str>) -> String {
         let item_part = match item_filename {

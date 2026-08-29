@@ -68,10 +68,17 @@ pub enum SidecarStatus {
     StartupFailed(String),
 }
 
+#[derive(Debug)]
 pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
     pub current_dir: Option<std::path::PathBuf>,
+    /// Extra environment variables applied to the spawned child only --
+    /// never the app's own process-wide environment. Used by the packaged
+    /// launch to prepend the bundle's `binaries/` resource directory to the
+    /// child's `PATH` so the bundled ffmpeg is found ahead of (or instead
+    /// of) anything a user happens to have on their system PATH.
+    pub env: Vec<(String, String)>,
 }
 
 /// Owns at most one backend child process. Never touches a process it did
@@ -138,6 +145,9 @@ impl SidecarManager {
         command.args(&spec.args);
         if let Some(dir) = &spec.current_dir {
             command.current_dir(dir);
+        }
+        for (key, value) in &spec.env {
+            command.env(key, value);
         }
         command
             .stdin(Stdio::null())
@@ -271,6 +281,7 @@ mod tests {
                 "Start-Sleep -Seconds 5".into(),
             ],
             current_dir: None,
+            env: vec![],
         }
     }
 

@@ -6,7 +6,6 @@ import { isTauri, openInBrowser } from '../lib/native'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
-import { Input } from '../components/ui/Input'
 
 const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
@@ -24,8 +23,8 @@ export function SettingsPage() {
   const [settings, setSettings] = useState<RuntimeSettings>(defaults)
   const [shutdown, setShutdown] = useState<ShutdownState>()
   const [driveAuth, setDriveAuth] = useState<DriveAuthState>()
-  const [driveCode, setDriveCode] = useState('')
   const [driveMessage, setDriveMessage] = useState<string>()
+  const drivePolling = useRef(false)
   const [backend, setBackend] = useState<'STARTING' | 'CONNECTED' | 'OFFLINE'>('STARTING')
   const [message, setMessage] = useState('설정을 불러오는 중입니다.')
   const shutdownTriggered = useRef(false)
@@ -94,20 +93,37 @@ export function SettingsPage() {
       const result = await api.startDriveAuth()
       if (isTauri()) {
         await openInBrowser(result.authorization_url)
-        setDriveMessage('브라우저에서 Google 인증을 완료한 뒤, 주소창의 code 값을 아래에 붙여넣어 주세요.')
+        setDriveMessage('브라우저에서 Google 인증을 완료해 주세요. 완료되면 자동으로 연결됩니다.')
+        void pollDriveStatus()
       } else {
         setDriveMessage(`인증 URL: ${result.authorization_url}`)
       }
     } catch (cause) { setDriveMessage(getUserMessage(cause)) }
   }
 
-  async function completeDrive() {
-    const code = driveCode.trim()
-    if (!code) return
+  // The backend now completes the OAuth handoff itself via a loopback
+  // callback listener (dynamic 127.0.0.1 port) once the system browser
+  // redirects back -- no code is ever pasted into the UI. This polls the
+  // existing status endpoint until that happens, times out, or fails.
+  async function pollDriveStatus() {
+    if (drivePolling.current) return
+    drivePolling.current = true
     try {
-      const result = await api.completeDriveAuth(code)
-      setDriveAuth(result.auth_state); setDriveCode(''); setDriveMessage('Google Drive 연결이 완료되었습니다.')
-    } catch (cause) { setDriveMessage(getUserMessage(cause)) }
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        try {
+          const drive = await api.driveStatus()
+          setDriveAuth(drive.auth_state)
+          if (drive.auth_state === 'CONNECTED') { setDriveMessage('Google Drive 연결이 완료되었습니다.'); return }
+          if (drive.auth_state === 'REAUTH_REQUIRED' || drive.auth_state === 'REFRESH_FAILED') {
+            setDriveMessage('Google Drive 연결에 실패했습니다. 다시 시도해 주세요.'); return
+          }
+        } catch { /* transient backend hiccup during polling; keep trying */ }
+      }
+      setDriveMessage('Google Drive 인증 대기 시간이 초과되었습니다. 다시 시도해 주세요.')
+    } finally {
+      drivePolling.current = false
+    }
   }
 
   const countdownVisible = shutdown?.phase === 'counting_down' || shutdown?.phase === 'ready_to_shutdown'
@@ -131,8 +147,6 @@ export function SettingsPage() {
         <Card className="settings-card settings-card-wide"><div className="settings-card-heading"><Cloud aria-hidden="true" /><div><h3>Google Drive</h3><p>OAuth 인증 상태와 Desktop 브라우저 연결입니다.</p></div></div>
           <div className="runtime-state-grid"><div><Badge tone={driveAuth === 'CONNECTED' ? 'done' : driveAuth === 'AUTHORIZING' ? 'preparing' : driveAuth === 'REFRESH_FAILED' || driveAuth === 'REAUTH_REQUIRED' ? 'failed' : 'waiting'}>{driveAuth ? driveAuthLabel[driveAuth] : '확인 중'}</Badge><span>Scope: https://www.googleapis.com/auth/drive</span></div></div>
           <div className="inline-actions"><Button variant="secondary" disabled={!isTauri()} onClick={() => void connectDrive()}>Google Drive 연결</Button></div>
-          {isTauri() ? <label className="setting-row"><span><strong>인증 코드 입력</strong><small>브라우저 주소창의 code 값을 붙여넣으세요</small></span><Input value={driveCode} onChange={(event) => setDriveCode(event.target.value)} placeholder="code" /></label> : null}
-          {isTauri() && driveCode ? <div className="inline-actions"><Button onClick={() => void completeDrive()}>인증 완료</Button></div> : null}
           {driveMessage ? <div className="setting-note"><span>{driveMessage}</span></div> : null}
           {!isTauri() ? <div className="setting-note"><span>웹 개발 모드에서는 브라우저 handoff를 수행하지 않습니다.</span></div> : null}
         </Card>

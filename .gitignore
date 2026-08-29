@@ -39,3 +39,4 @@ token*.json
 # Packaging
 *.exe
 *.msi
+*.wixpdb
