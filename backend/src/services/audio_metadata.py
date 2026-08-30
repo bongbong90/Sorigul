@@ -6,7 +6,7 @@ class AudioMetadataService:
     def duration_seconds(self, path: Path) -> Optional[float]:
         if not path.exists() or not path.is_file():
             return None
-            
+
         try:
             from mutagen.mp3 import MP3
             audio = MP3(path)

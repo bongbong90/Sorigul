@@ -60,7 +60,7 @@ class FFmpegAudioSplitter:
             )
         from src.services.audio_metadata import AudioMetadataService
         duration = AudioMetadataService().duration_seconds(source_path)
-        
+
         self._temp_dir = Path(tempfile.mkdtemp(prefix="sorigul-colab-"))
         if duration is not None:
             return self._split_with_duration(source_path, chunk_seconds, ffmpeg, duration)
@@ -142,21 +142,21 @@ class FFmpegAudioSplitter:
                     "Colab 전사를 위한 오디오 준비에 실패했습니다.",
                     technical_detail=completed.stderr.decode("utf-8", errors="replace"),
                 )
-            
+
             for path in sorted(self._temp_dir.glob("chunk-*.mp3")):
                 if path.stat().st_size < 2048:
                     path.unlink(missing_ok=True)
                     continue
-                
+
                 stem = path.stem
                 try:
                     index = int(stem.split("-")[-1])
                 except ValueError:
                     continue
-                
+
                 start = float(index * chunk_seconds)
                 chunks.append(AudioChunk(index, path, start, float(chunk_seconds)))
-                
+
             if not chunks:
                 raise EngineError(
                     "AUDIO_EMPTY",
