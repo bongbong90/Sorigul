@@ -28,6 +28,7 @@ from src.domain.models import (
     JobModel,
     ScannedFile,
 )
+from src.services.colab_rendezvous import ColabRendezvousService, RendezvousState
 from src.services.desktop_state import ApplicationEvent, ApplicationEventStore, DesktopCoordinator
 from src.services.drive import DriveError, DriveUploadService, GoogleOAuthService, DRIVE_SCOPE
 from src.services.results import FolderScanResult, OpenFolderIntent, ResultsService, TextContent
@@ -53,6 +54,7 @@ drive_auth = GoogleOAuthService(
     app_data_dir / "auth" / "google_drive_token.json",
 )
 drive_service = DriveUploadService(job_manager, drive_auth, settings_manager)
+colab_rendezvous_service = ColabRendezvousService(drive_auth)
 engine_resolver = DefaultEngineResolver()
 
 
@@ -366,7 +368,15 @@ def create_job(req: CreateJobRequest):
             normalized_name=normalized_name,
         )
 
-    engine_config = {"base_url": req.colab_url} if req.colab_url else {}
+    engine_config = {}
+    if req.engine == 'direct_colab':
+        if not req.colab_url:
+            raise HTTPException(status_code=400, detail="Colab URL is required for direct_colab engine.")
+        from src.services.colab_url import normalize_colab_base_url, ColabUrlError
+        try:
+            engine_config['base_url'] = normalize_colab_base_url(req.colab_url)
+        except ColabUrlError:
+            raise HTTPException(status_code=400, detail="Invalid Colab URL.")
     job = job_manager.create_job(
         req.folder,
         target_ids,
@@ -502,3 +512,18 @@ def retry_drive(job_id: str, file_id: str):
         raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
     except DriveError as exc:
         raise HTTPException(status_code=400, detail=exc.user_message)
+
+@router.post('/colab/rendezvous/start', response_model=RendezvousState)
+def start_colab_rendezvous():
+    return colab_rendezvous_service.start()
+
+@router.get('/colab/rendezvous/{request_id}', response_model=RendezvousState)
+def poll_colab_rendezvous(request_id: str):
+    return colab_rendezvous_service.poll(request_id)
+
+class ColabVerifyRequest(BaseModel):
+    url: str
+
+@router.post('/colab/verify', response_model=RendezvousState)
+def verify_colab_url(req: ColabVerifyRequest):
+    return colab_rendezvous_service.verify_url(req.url)
