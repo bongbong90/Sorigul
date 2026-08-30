@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { AlertTriangle, CheckCircle2, Cloud, FilePenLine, RefreshCw, WifiOff } from 'lucide-react'
 import {
   api,
@@ -98,7 +98,9 @@ export function TranscriptionPage() {
   const [editingOverride, setEditingOverride] = useState(false)
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
-  const isPreflighting = attempt !== null || resolvingId !== null
+  const preflightLockRef = useRef(false)
+  const [preflightActive, setPreflightActive] = useState(false)
+  const isPreflighting = preflightActive
 
   const knownStage = knownStageFor(subject)
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
@@ -235,7 +237,13 @@ export function TranscriptionPage() {
     setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
   }
 
+  function releasePreflight() {
+    preflightLockRef.current = false
+    setPreflightActive(false)
+  }
+
   function resetPreflight() {
+    releasePreflight()
     setFileResolutions(new Map())
     setResolvingId(null)
     setAttempt(null)
@@ -274,6 +282,10 @@ export function TranscriptionPage() {
   }
 
   function startAttempt(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
+    if (preflightLockRef.current) return
+    preflightLockRef.current = true
+    setPreflightActive(true)
+
     return runPreflight(
       { ids, filenames: filenamesFor(ids), force, scope },
       new Map(),
@@ -299,10 +311,10 @@ export function TranscriptionPage() {
     courseValue: string,
     subjectValue: string,
   ) {
-    if (!folder) return
+    if (!folder) { resetPreflight(); return }
     const courseCheck = validateClassificationText(courseValue, '과정명')
     const subjectCheck = validateClassificationText(subjectValue, '과목명')
-    if (courseCheck.error || subjectCheck.error) { setDialog(null); setMessage('과정명/과목명을 확인해 주세요.'); return }
+    if (courseCheck.error || subjectCheck.error) { setDialog(null); setMessage('과정명/과목명을 확인해 주세요.'); resetPreflight(); return }
 
     let ids = [...seed.ids]
     const filenames: Record<string, string> = { ...seed.filenames }
@@ -318,7 +330,7 @@ export function TranscriptionPage() {
     let previews: NormalizationPreview[]
     try {
       previews = await api.normalizeBatch(folder, orderedFilenames as string[], courseCheck.value, subjectCheck.value)
-    } catch (cause) { setMessage(getUserMessage(cause)); return }
+    } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
 
     let renamedAny = false
 
@@ -342,7 +354,7 @@ export function TranscriptionPage() {
           resolutions = remapResolutionKey(resolutions, response.old_file_id, response.new_file_id)
           resolutions.set(response.new_file_id, 'AUTO_RENAME')
           setSelectedIds((current) => remapId(current, response.old_file_id, response.new_file_id))
-        } catch (cause) { setMessage(getUserMessage(cause)); return }
+        } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
         continue
       }
 
@@ -364,7 +376,7 @@ export function TranscriptionPage() {
     setNormalization(undefined)
 
     if (renamedAny) {
-      try { await loadFolder() } catch (cause) { setMessage(getUserMessage(cause)); return }
+      try { await loadFolder() } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
     }
 
     // The current Drive classifier is still filename-based (Phase 2 not
@@ -391,7 +403,7 @@ export function TranscriptionPage() {
     courseValue: string,
     subjectValue: string,
   ) {
-    if (!folder) return
+    if (!folder) { releasePreflight(); return }
     try {
       const created = await api.createJob({
         folder, file_ids: ids, scope, force_retranscribe: force, upload_to_drive: uploadToDriveForRun,
@@ -406,7 +418,8 @@ export function TranscriptionPage() {
         try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue })) }
         catch { /* best-effort */ }
       }
-    } catch (cause) { setMessage(getUserMessage(cause)); setDialog(null) }
+      releasePreflight()
+    } catch (cause) { setMessage(getUserMessage(cause)); setDialog(null); releasePreflight() }
   }
 
   async function action(actionName: 'stop' | 'cancel' | 'retry') {
@@ -465,7 +478,7 @@ export function TranscriptionPage() {
       nextResolutions.set(response.new_file_id, 'RENAME_TO_TYPED')
       setSelectedIds((current) => remapId(current, response.old_file_id, response.new_file_id))
       await runPreflight({ ...attempt, ids: nextIds, filenames: nextFilenames }, nextResolutions, adoptedClassification, course, subject)
-    } catch (cause) { setMessage(getUserMessage(cause)) }
+    } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight() }
   }
 
   // D24 mismatch option B: keep the typed course/subject and rename this one
@@ -489,7 +502,7 @@ export function TranscriptionPage() {
       nextResolutions.set(response.new_file_id, 'RENAME_TO_TYPED')
       setSelectedIds((current) => remapId(current, response.old_file_id, response.new_file_id))
       await runPreflight({ ...attempt, ids: nextIds, filenames: nextFilenames }, nextResolutions, adoptedClassification, courseCheck.value, subjectCheck.value)
-    } catch (cause) { setMessage(getUserMessage(cause)) }
+    } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight() }
   }
 
   // D24 mismatch option A: adopt the file's own embedded classification as
