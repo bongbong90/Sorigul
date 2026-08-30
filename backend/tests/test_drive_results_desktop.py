@@ -136,19 +136,75 @@ def test_drive_failure_does_not_change_local_done_and_can_retry(tmp_path):
     assert service.retry(job.job_id, stem).status == DriveStatus.DONE
 
 
-def test_drive_classification_standard_alias_and_failure(tmp_path):
+from src.domain.models import FileMetadata
+
+def test_drive_new_job_metadata_source_of_truth(tmp_path):
     classifier = DriveClassifier()
     manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
-    job1 = manager.create_job("folder", ["개념완성_민법_8주차_4강"])
-    job2 = manager.create_job("folder", ["기본이론_공인중개사법_3주차_5강"])
+    job = manager.create_job("folder", ["개념완성_민법_8주차_4강"])
+    job.course = "사용자과정"
+    job.subject = "사용자과목"
+    job.stage = "2차"
+    job.file_metadata["개념완성_민법_8주차_4강"] = FileMetadata(
+        week="3", lesson="7", normalized_name="사용자과정_사용자과목_3주차_7강.mp3"
+    )
+    classification = classifier.classify(job, "개념완성_민법_8주차_4강", "2026 테스트루트")
+    assert classification.course == "사용자과정"
+    assert classification.subject == "사용자과목"
+    assert classification.week == 3
+    assert classification.lesson == 7
+    assert classification.folders == (
+        "2026 테스트루트",
+        "전사자료",
+        "사용자과정",
+        "[2차] 사용자과목",
+        "사용자과정_사용자과목_3주차",
+    )
 
-    standard = classifier.classify(job1, "개념완성_민법_8주차_4강", "2026")
-    alias = classifier.classify(job2, "기본이론_공인중개사법_3주차_5강", "2026")
-    assert standard.folders[-2:] == ("[1차] 민법", "개념완성_민법_8주차")
-    assert alias.subject == "공인중개사법"
-    assert alias.folders[-1] == "기본이론_중개사법_3주차"
-    with pytest.raises(DriveError):
-        classifier.classify(job1, "원래 이름", "2026")
+
+def test_drive_arbitrary_freetext_new_job(tmp_path):
+    classifier = DriveClassifier()
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job("folder", ["test.mp3"])
+    job.course = "NewCourse"
+    job.subject = "NewSubject"
+    job.stage = "1차"
+    job.file_metadata["test.mp3"] = FileMetadata(
+        week="1", lesson="1", normalized_name="NewCourse_NewSubject_1주차_1강.mp3"
+    )
+    classification = classifier.classify(job, "test.mp3", "2026")
+    assert classification.course == "NewCourse"
+    assert classification.subject == "NewSubject"
+    assert classification.folders[-1] == "NewCourse_NewSubject_1주차"
+
+
+def test_drive_partial_metadata_guard(tmp_path):
+    classifier = DriveClassifier()
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job("folder", ["개념완성_민법_8주차_4강"])
+    job.course = "과정만있음"
+    # missing subject, stage, file_metadata
+    with pytest.raises(DriveError, match="일부 메타데이터만 있는 Job은"):
+        classifier.classify(job, "개념완성_민법_8주차_4강", "2026")
+
+
+def test_drive_true_legacy_fallback(tmp_path):
+    classifier = DriveClassifier()
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    # No metadata at all. True legacy job.
+    job = manager.create_job("folder", ["기본이론_공인중개사법_3주차_5강"])
+    classification = classifier.classify(job, "기본이론_공인중개사법_3주차_5강", "2026")
+    assert classification.course == "기본이론"
+    assert classification.subject == "공인중개사법"
+    assert classification.folders[-1] == "기본이론_중개사법_3주차"
+
+
+def test_drive_legacy_non_standard_failure(tmp_path):
+    classifier = DriveClassifier()
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job("folder", ["원래 이름"])
+    with pytest.raises(DriveError, match="표준 파일명에서"):
+        classifier.classify(job, "원래 이름", "2026")
 
 
 @pytest.mark.parametrize(
@@ -355,3 +411,82 @@ def test_legacy_persisted_job_without_batch_completed_field_defaults_to_false(tm
 
     assert "batch_completed" not in legacy_payload["legacy-job"]
     assert loaded.batch_completed is False
+def test_drive_mp3_less_upload_and_retry(tmp_path):
+    folder, manager, job = make_done_job(tmp_path)
+    stem = next(iter(job.files))
+    (folder / f"{stem}.mp3").unlink()
+    client = FakeDriveClient()
+    settings = SettingsManager(tmp_path / "settings.json")
+    service = DriveUploadService(manager, FakeAuth(client), settings)
+
+    first = service.upload(job.job_id, stem)
+    assert first.status == DriveStatus.DONE
+
+    second = service.retry(job.job_id, stem)
+    assert second.status == DriveStatus.DONE
+
+    assert sorted(client.created) == sorted([
+        f"{stem}.txt",
+        f"{stem}.json",
+        f"{stem}.srt",
+    ])
+    assert f"{stem}.mp3" not in client.created
+    assert f"{stem}.mp3" not in client.updated
+
+def test_drive_exam_root_roundtrip_and_usage(tmp_path):
+    settings_manager = SettingsManager(tmp_path / "settings.json")
+    assert settings_manager.get().drive_exam_root == "2026 제37회 공인중개사 자격시험"
+
+    settings_manager.update(SettingsPatch(drive_exam_root="Custom Root"))
+    assert settings_manager.get().drive_exam_root == "Custom Root"
+
+    classifier = DriveClassifier()
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job("folder", ["기본이론_민법_1주차_1강"])
+    classification = classifier.classify(job, "기본이론_민법_1주차_1강", settings_manager.get().drive_exam_root)
+    assert classification.folders[0] == "Custom Root"
+
+def test_drive_auto_upload_persistence_absence(tmp_path):
+    settings_manager = SettingsManager(tmp_path / "settings.json")
+    dumped = settings_manager.get().model_dump()
+    assert "drive_auto_upload" not in dumped
+
+def test_drive_old_remote_state_compatibility(tmp_path):
+    folder, manager, job = make_done_job(tmp_path)
+    stem = next(iter(job.files))
+    job.drive[stem] = DriveFileState(
+        status=DriveStatus.DONE,
+        remote_file_ids={
+            f"{stem}.mp3": "old_mp3_id",
+            f"{stem}.txt": "old_txt_id"
+        }
+    )
+    manager.update_job(job)
+
+    loaded_manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    loaded_job = loaded_manager.get_job(job.job_id)
+    assert loaded_job.drive[stem].remote_file_ids[f"{stem}.mp3"] == "old_mp3_id"
+
+    client = FakeDriveClient()
+    client.files[("root", f"{stem}.txt")] = "old_txt_id"
+    settings = SettingsManager(tmp_path / "settings.json")
+    service = DriveUploadService(loaded_manager, FakeAuth(client), settings)
+
+    result = service.upload(loaded_job.job_id, stem)
+    assert result.status == DriveStatus.DONE
+
+def test_drive_output_invalid_isolation(tmp_path):
+    folder, manager, job = make_done_job(tmp_path)
+    stem = next(iter(job.files))
+    (folder / f"{stem}.txt").write_bytes(b"")
+
+    client = FakeDriveClient()
+    settings = SettingsManager(tmp_path / "settings.json")
+    service = DriveUploadService(manager, FakeAuth(client), settings)
+
+    result = service.upload(job.job_id, stem)
+    assert result.status == DriveStatus.FAILED
+
+    persisted = manager.get_job(job.job_id)
+    assert persisted.status == FileStatus.DONE
+    assert persisted.files[stem] == FileStatus.DONE
