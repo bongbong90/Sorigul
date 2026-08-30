@@ -410,3 +410,108 @@ def test_invalid_response_fails_current_file_and_continues_batch(
     assert len(calls) == 2
     assert finished.files == {"A": FileStatus.FAILED, "B": FileStatus.DONE}
     assert finished.status == FileStatus.FAILED
+
+def test_colab_url_normalization():
+    from src.services.colab_url import normalize_colab_base_url, ColabUrlError
+    
+    assert normalize_colab_base_url('https://example.test') == 'https://example.test'
+    assert normalize_colab_base_url('https://example.test/') == 'https://example.test'
+    assert normalize_colab_base_url('https://example.test/health') == 'https://example.test'
+    assert normalize_colab_base_url('https://example.test/transcribe') == 'https://example.test'
+    assert normalize_colab_base_url('  http://local:8080/health  ') == 'http://local:8080'
+
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('ftp://example.test')
+    
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('https://')
+
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('https://example.test/?a=1')
+
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('https://example.test/#hash')
+
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('https://user:pass@example.test')
+        
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('https://example.test/otherpath')
+
+def test_http_client_url_construction(monkeypatch):
+    calls = []
+    def mock_urlopen(req, **kwargs):
+        calls.append(req.full_url)
+        return FakeHttpResponse()
+        
+    monkeypatch.setattr('urllib.request.urlopen', mock_urlopen)
+    
+    client = DirectColabHttpClient('https://example.test/health')
+    assert client.base_url == 'https://example.test'
+    
+    client.check_health()
+    assert calls[-1] == 'https://example.test/health'
+    
+    import tempfile
+    import os
+    fd, path_str = tempfile.mkstemp(suffix='.mp3')
+    os.close(fd)
+    path = Path(path_str)
+    path.write_bytes(b'dummy')
+    try:
+        with pytest.raises(EngineError):
+            client.transcribe(path)
+        assert calls[-1] == 'https://example.test/transcribe'
+    finally:
+        path.unlink(missing_ok=True)
+
+def test_ffmpeg_splitter_fallback_on_duration_none(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    from src.engines.colab import FFmpegAudioSplitter
+    
+    source = tmp_path / 'source.mp3'
+    source.write_bytes(b'source')
+    
+    class FakeAudioMetadataService:
+        def duration_seconds(self, path):
+            return None
+    monkeypatch.setattr('src.services.audio_metadata.AudioMetadataService', FakeAudioMetadataService)
+    
+    monkeypatch.setattr('src.utils.ffmpeg_runtime.resolve_ffmpeg_path', lambda: Path('dummy_ffmpeg'))
+    
+    commands = []
+    def mock_run(cmd, **kwargs):
+        commands.append(cmd)
+        class Completed:
+            returncode = 0
+            stdout = b''
+            stderr = b''
+        temp_dir = Path(cmd[-1]).parent
+        (temp_dir / 'chunk-00000.mp3').write_bytes(b'x' * 2048)
+        (temp_dir / 'chunk-00001.mp3').write_bytes(b'x' * 2048)
+        return Completed()
+        
+    monkeypatch.setattr(subprocess, 'run', mock_run)
+    
+    splitter = FFmpegAudioSplitter()
+    chunks = splitter.split(source, 300)
+    
+    assert len(chunks) == 2
+    assert chunks[0].index == 0
+    assert chunks[0].start_seconds == 0.0
+    assert chunks[1].index == 1
+    assert chunks[1].start_seconds == 300.0
+    
+    assert '-f' in commands[0]
+    assert 'segment' in commands[0]
+    assert '-segment_time' in commands[0]
+
+def test_ffmpeg_splitter_missing_ffmpeg(tmp_path, monkeypatch):
+    from src.engines.colab import FFmpegAudioSplitter
+    source = tmp_path / 'source.mp3'
+    monkeypatch.setattr('src.utils.ffmpeg_runtime.resolve_ffmpeg_path', lambda: None)
+    
+    with pytest.raises(EngineError, match='ffmpeg를 찾을 수 없습니다'):
+        FFmpegAudioSplitter().split(source, 300)
+

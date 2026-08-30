@@ -49,15 +49,25 @@ class FFmpegAudioSplitter:
         self._temp_dir: Optional[Path] = None
 
     def split(self, source_path: Path, chunk_seconds: int) -> List[AudioChunk]:
-        if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        from src.utils.ffmpeg_runtime import resolve_ffmpeg_path
+        ffmpeg = resolve_ffmpeg_path()
+        if ffmpeg is None:
             raise EngineError(
                 "FFMPEG_UNAVAILABLE",
                 ErrorCategory.RUNTIME,
-                "Colab 전사에 필요한 ffmpeg/ffprobe를 사용할 수 없습니다.",
+                "Colab 전사에 필요한 ffmpeg를 찾을 수 없습니다.",
                 fatal=True,
             )
-        duration = self._probe_duration(source_path)
+        from src.services.audio_metadata import AudioMetadataService
+        duration = AudioMetadataService().duration_seconds(source_path)
+        
         self._temp_dir = Path(tempfile.mkdtemp(prefix="sorigul-colab-"))
+        if duration is not None:
+            return self._split_with_duration(source_path, chunk_seconds, ffmpeg, duration)
+        else:
+            return self._split_fallback(source_path, chunk_seconds, ffmpeg)
+
+    def _split_with_duration(self, source_path: Path, chunk_seconds: int, ffmpeg: Path, duration: float) -> List[AudioChunk]:
         chunks = []
         try:
             total = max(1, math.ceil(duration / chunk_seconds))
@@ -68,7 +78,7 @@ class FFmpegAudioSplitter:
                     continue
                 path = self._temp_dir / f"chunk-{index:05d}.mp3"
                 command = [
-                    "ffmpeg",
+                    str(ffmpeg),
                     "-hide_banner",
                     "-loglevel",
                     "error",
@@ -107,42 +117,56 @@ class FFmpegAudioSplitter:
             self.cleanup()
             raise
 
-    @staticmethod
-    def _probe_duration(source_path: Path) -> float:
-        command = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(source_path),
-        ]
-        completed = subprocess.run(command, capture_output=True, check=False)
-        if completed.returncode != 0:
-            raise EngineError(
-                "AUDIO_PROBE_FAILED",
-                ErrorCategory.INPUT,
-                "오디오 길이를 확인할 수 없습니다.",
-                technical_detail=completed.stderr.decode("utf-8", errors="replace"),
-            )
+    def _split_fallback(self, source_path: Path, chunk_seconds: int, ffmpeg: Path) -> List[AudioChunk]:
+        chunks = []
         try:
-            duration = float(completed.stdout.decode("ascii").strip())
-        except ValueError as exc:
-            raise EngineError(
-                "AUDIO_PROBE_FAILED",
-                ErrorCategory.INPUT,
-                "오디오 길이를 확인할 수 없습니다.",
-                technical_detail=str(exc),
-            ) from exc
-        if not math.isfinite(duration) or duration <= 0:
-            raise EngineError(
-                "AUDIO_PROBE_FAILED",
-                ErrorCategory.INPUT,
-                "오디오 길이가 올바르지 않습니다.",
-            )
-        return duration
+            pattern = str(self._temp_dir / "chunk-%05d.mp3")
+            command = [
+                str(ffmpeg),
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i", str(source_path),
+                "-vn",
+                "-codec:a", "libmp3lame",
+                "-f", "segment",
+                "-segment_time", str(chunk_seconds),
+                "-reset_timestamps", "1",
+                pattern,
+            ]
+            completed = subprocess.run(command, capture_output=True, check=False)
+            if completed.returncode != 0:
+                raise EngineError(
+                    "AUDIO_SPLIT_FAILED",
+                    ErrorCategory.INPUT,
+                    "Colab 전사를 위한 오디오 준비에 실패했습니다.",
+                    technical_detail=completed.stderr.decode("utf-8", errors="replace"),
+                )
+            
+            for path in sorted(self._temp_dir.glob("chunk-*.mp3")):
+                if path.stat().st_size < 2048:
+                    path.unlink(missing_ok=True)
+                    continue
+                
+                stem = path.stem
+                try:
+                    index = int(stem.split("-")[-1])
+                except ValueError:
+                    continue
+                
+                start = float(index * chunk_seconds)
+                chunks.append(AudioChunk(index, path, start, float(chunk_seconds)))
+                
+            if not chunks:
+                raise EngineError(
+                    "AUDIO_EMPTY",
+                    ErrorCategory.INPUT,
+                    "전사할 수 있는 오디오 구간이 없습니다.",
+                )
+            return chunks
+        except Exception:
+            self.cleanup()
+            raise
 
     def cleanup(self):
         if self._temp_dir is not None:
@@ -162,10 +186,10 @@ class ColabClient(Protocol):
 
 class DirectColabHttpClient:
     def __init__(self, base_url: str, timeout_seconds: int = 600):
-        normalized = base_url.strip().rstrip("/")
-        if normalized.endswith("/transcribe"):
-            normalized = normalized[: -len("/transcribe")]
-        if not normalized.startswith(("http://", "https://")):
+        from src.services.colab_url import normalize_colab_base_url, ColabUrlError
+        try:
+            normalized = normalize_colab_base_url(base_url)
+        except ColabUrlError:
             raise EngineError(
                 "COLAB_URL_INVALID",
                 ErrorCategory.CONFIGURATION,
