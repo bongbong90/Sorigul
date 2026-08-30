@@ -142,6 +142,7 @@ export interface RuntimeSettings {
   // Drive auto-upload is intentionally NOT part of this shape -- it is a
   // per-run CreateJobRequest field, never a persisted setting (D23A).
   subject_stage_overrides: Record<string, '1차' | '2차'>
+  drive_exam_root: string
 }
 
 export interface ShutdownState {
