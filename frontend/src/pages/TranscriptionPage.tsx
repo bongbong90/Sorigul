@@ -24,6 +24,8 @@ import { ClassificationSection } from '../components/transcription/Classificatio
 import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transcription/CurrentTaskSection'
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
+import { EngineSection } from '../components/transcription/EngineSection'
+
 import { TranscriptionActions } from '../components/transcription/TranscriptionActions'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -72,6 +74,11 @@ export function TranscriptionPage() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('STARTING')
   const [driveAuth, setDriveAuth] = useState('UNAUTHENTICATED')
   const [dialog, setDialog] = useState<DialogKind>(null)
+
+  const [engine, setEngine] = useState<'local_whisper' | 'direct_colab'>('local_whisper')
+  const [connectedBaseUrl, setConnectedBaseUrl] = useState<string | null>(null)
+
+
   const [pendingIds, setPendingIds] = useState<string[]>([])
   const [message, setMessage] = useState('Backend 연결 상태를 확인하고 있습니다.')
   const [normalization, setNormalization] = useState<NormalizationPreview>()
@@ -415,7 +422,7 @@ export function TranscriptionPage() {
       setJob(await api.startJob(created.job_id))
       // Only remember a course/subject that actually produced a valid Job.
       if (settings) {
-        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue })) }
+        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: engine })) }
         catch { /* best-effort */ }
       }
       releasePreflight()
@@ -573,6 +580,7 @@ export function TranscriptionPage() {
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
+        <EngineSection engine={engine} onChangeEngine={setEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || (job != null && ['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
         <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
           <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>
