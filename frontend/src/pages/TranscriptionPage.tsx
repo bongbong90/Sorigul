@@ -70,6 +70,16 @@ function formatDuration(seconds: number | null | undefined): string {
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
+function latestRunStartMs(events: JobModel['events']): number | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.category !== 'Job' || event.message !== '전사 시작') continue
+    const timestamp = Date.parse(event.timestamp)
+    return Number.isFinite(timestamp) ? timestamp : null
+  }
+  return null
+}
+
 function rowsFrom(files: ScannedFile[], job?: JobModel): QueueRow[] {
   return files.map((file) => {
     const local = job?.files[file.id] ?? (file.completion_status === 'DONE' ? 'DONE' : 'WAITING')
@@ -84,6 +94,7 @@ export function TranscriptionPage() {
   const [folder, setFolder] = useState(getSavedFolder)
   const [files, setFiles] = useState<ScannedFile[]>([])
   const [job, setJob] = useState<JobModel>()
+  const [nowMs, setNowMs] = useState(Date.now)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('STARTING')
   const [driveAuth, setDriveAuth] = useState('UNAUTHENTICATED')
@@ -222,6 +233,22 @@ export function TranscriptionPage() {
     }, 1500)
     return () => { active = false; window.clearInterval(timer) }
   }, [activeJobId, activeJobStatus, loadFolder])
+
+  const runStartMs = latestRunStartMs(job?.events ?? [])
+  const isLocalTranscribing = job?.engine === 'local_whisper' && job.status === 'TRANSCRIBING'
+  useEffect(() => {
+    if (!isLocalTranscribing) return
+    setNowMs(Date.now())
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [isLocalTranscribing, runStartMs])
+
+  const elapsedSeconds = isLocalTranscribing && runStartMs !== null
+    ? Math.floor((nowMs - runStartMs) / 1000)
+    : null
+  const validElapsedSeconds = elapsedSeconds !== null && Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0
+    ? elapsedSeconds
+    : null
 
   const rows = useMemo(() => rowsFrom(files, job), [files, job])
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
@@ -609,7 +636,7 @@ export function TranscriptionPage() {
       {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" onClick={() => { if (!isPreflighting) void action('retry') }}>다시 시도</Button></div> : null}
       <TranscriptionActions completedCount={completedCount} selectedCount={selectedIds.length} totalCount={rows.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting} canStop={canControl} canCancel={canControl} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
-      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} />
+      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">

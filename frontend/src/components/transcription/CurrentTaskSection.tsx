@@ -21,6 +21,9 @@ interface CurrentTaskSectionProps {
   filename?: string
   progress: number | null
   status: CurrentTaskStatus
+  engine?: string
+  elapsedSeconds?: number | null
+  etaSeconds?: number | null
 }
 
 const statusPresentation = {
@@ -30,7 +33,7 @@ const statusPresentation = {
   TRANSCRIBING: {
     label: '전사 중',
     tone: 'transcribing' as const,
-    detail: '예상 남은 시간 12분',
+    detail: '전사 진행 중',
   },
   VERIFYING: { label: '검증 중', tone: 'verifying' as const, detail: '결과 파일 확인 중' },
   SAVING: { label: '저장 중', tone: 'preparing' as const, detail: '결과 파일 저장 중' },
@@ -47,9 +50,34 @@ const statusPresentation = {
   },
 }
 
-export function CurrentTaskSection({ filename, progress, status }: CurrentTaskSectionProps) {
+function formatRuntimeSeconds(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—'
+
+  const totalSeconds = Math.round(seconds)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const remainingSeconds = totalSeconds % 60
+
+  if (hours >= 1) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+  }
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
+}
+
+export function CurrentTaskSection({
+  filename,
+  progress,
+  status,
+  engine,
+  elapsedSeconds,
+  etaSeconds,
+}: CurrentTaskSectionProps) {
   const presentation = statusPresentation[status]
   const displayFilename = filename ?? '현재 작업 없음'
+  const hasObservedEta = etaSeconds != null && Number.isFinite(etaSeconds) && etaSeconds > 0
+  const detail = status === 'TRANSCRIBING' && engine === 'local_whisper'
+    ? `경과 ${formatRuntimeSeconds(elapsedSeconds)} · ${hasObservedEta ? `ETA 약 ${formatRuntimeSeconds(etaSeconds)}` : 'ETA 계산 중'}`
+    : presentation.detail
   const progressValue = ['PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING', 'RETRYING'].includes(status)
     ? progress
     : (progress ?? 0)
@@ -75,7 +103,7 @@ export function CurrentTaskSection({ filename, progress, status }: CurrentTaskSe
 
         <div className="current-task-progress">
           <strong className="progress-value text-numeric">{progress === null ? '—' : `${progress}%`}</strong>
-          <span className="text-caption text-numeric">{presentation.detail}</span>
+          <span className="text-caption text-numeric">{detail}</span>
         </div>
       </div>
 

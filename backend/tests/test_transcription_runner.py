@@ -1,6 +1,8 @@
 import threading
 from pathlib import Path
 
+import pytest
+
 from src.domain.models import FileStatus
 from src.domain.transcription import (
     CancellationToken,
@@ -9,6 +11,7 @@ from src.domain.transcription import (
     TranscriptionResult,
 )
 from src.services.job_manager import JobManager
+from src.services.output_bundle import OutputBundleWriter
 from src.services.transcription_runner import BackgroundExecutionService, TranscriptionRunner
 
 
@@ -39,6 +42,39 @@ class PerFileEngine:
                 "파일 전사 실패",
             )
         return successful_result(source_path.stem)
+
+
+class MonotonicClock:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def monotonic(self):
+        return next(self.values)
+
+
+class EtaInspectingEngine(PerFileEngine):
+    def __init__(self, manager, job_id, expected_eta):
+        super().__init__()
+        self.manager = manager
+        self.job_id = job_id
+        self.expected_eta = expected_eta
+
+    def transcribe(self, source_path, token, event_callback, progress_callback):
+        if source_path.stem in self.expected_eta:
+            actual = self.manager.get_job(self.job_id).eta_seconds
+            expected = self.expected_eta[source_path.stem]
+            if expected is None:
+                assert actual is None
+            else:
+                assert actual == pytest.approx(expected)
+        return super().transcribe(source_path, token, event_callback, progress_callback)
+
+
+def patch_audio_durations(monkeypatch, durations):
+    monkeypatch.setattr(
+        "src.services.audio_metadata.AudioMetadataService.duration_seconds",
+        lambda self, path: durations[path.stem],
+    )
 
 
 def make_sources(tmp_path, names):
@@ -84,6 +120,81 @@ def test_runner_full_success_marks_batch_completed_true(tmp_path):
     finished = manager.get_job(job.job_id)
     assert finished.status == FileStatus.DONE
     assert finished.batch_completed is True
+    assert finished.eta_seconds is None
+
+
+def test_runner_clears_stale_eta_before_first_local_transcribe(tmp_path):
+    folder = make_sources(tmp_path, ["A"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A"])
+    job.eta_seconds = 999
+    manager.update_job(job)
+    engine = EtaInspectingEngine(manager, job.job_id, {"A": None})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_uses_observed_local_speed_for_next_file_eta(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"A": None, "B": 100.0})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_omits_eta_when_remaining_duration_is_unknown(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": None})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"B": None})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_excludes_failed_file_from_speed_observations(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B", "C"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B", "C"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 100.0, "C": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 160.0, 170.0, 180.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"B": 150.0, "C": 100.0})
+    output_writer = OutputBundleWriter()
+
+    class FailOnBWriter:
+        def commit(self, source_path, result, verification_callback=None):
+            if source_path.stem == "B":
+                raise RuntimeError("output failed")
+            return output_writer.commit(source_path, result, verification_callback)
+
+    TranscriptionRunner(
+        manager,
+        lambda _job: engine,
+        output_writer=FailOnBWriter(),
+    ).run(job.job_id, CancellationToken())
+
+    finished = manager.get_job(job.job_id)
+    assert finished.files["B"] == FileStatus.FAILED
+    assert finished.eta_seconds is None
 
 
 def test_runner_fatal_error_mid_batch_stops_early_and_marks_batch_incomplete(tmp_path):
@@ -161,6 +272,7 @@ def test_runner_stop_does_not_commit_result_or_start_next_file(tmp_path):
     assert finished.files["B"] == FileStatus.WAITING
     assert finished.status == FileStatus.STOPPED
     assert finished.batch_completed is False
+    assert finished.eta_seconds is None
     assert not (folder / "A.txt").exists()
 
 
@@ -179,6 +291,7 @@ def test_runner_cancel_acknowledges_cancelled_not_failed(tmp_path):
     assert finished.files["B"] == FileStatus.CANCELLED
     assert FileStatus.FAILED not in finished.files.values()
     assert finished.batch_completed is False
+    assert finished.eta_seconds is None
     assert not (folder / "A.txt").exists()
 
 

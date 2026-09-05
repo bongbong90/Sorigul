@@ -1,10 +1,12 @@
 import logging
+import math
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from src.domain.models import BundleStatus, FileStatus, JobEvent, JobModel
+from src.domain.models import BundleStatus, FileStatus, JobEvent, JobModel, ScannedFile
 from src.domain.transcription import (
     CancellationToken,
     CancelRequested,
@@ -84,6 +86,9 @@ class TranscriptionRunner:
         job = self.job_manager.get_job(job_id)
         if job is None:
             return
+        self._clear_eta(job_id)
+        local_observations: list[tuple[float, float]] = []
+        observes_local_speed = job.engine == "local_whisper"
         try:
             engine = self.engine_resolver(job)
         except EngineError as exc:
@@ -127,17 +132,22 @@ class TranscriptionRunner:
                         "원본 MP3 파일을 찾을 수 없습니다.",
                     ),
                 )
+                if observes_local_speed:
+                    self._update_local_eta(job_id, local_observations, scanned)
                 continue
 
             if not job.force_retranscribe and item.completion_status == BundleStatus.DONE:
                 self._set_file_state(job_id, file_id, FileStatus.DONE, item.filename)
                 self._event(job_id, "info", "File", "정상 결과가 있어 전사를 건너뜁니다.", file_id, item.filename)
+                if observes_local_speed:
+                    self._update_local_eta(job_id, local_observations, scanned)
                 continue
 
             source_path = Path(item.source_path)
             try:
                 self._set_file_state(job_id, file_id, FileStatus.PREPARING, item.filename)
                 self._set_file_state(job_id, file_id, FileStatus.TRANSCRIBING, item.filename)
+                transcribe_started = time.monotonic()
                 result = engine.transcribe(
                     source_path,
                     token,
@@ -146,6 +156,7 @@ class TranscriptionRunner:
                     ),
                     lambda progress: self._set_progress(job_id, progress),
                 )
+                transcribe_elapsed = time.monotonic() - transcribe_started
                 token.raise_if_requested()
                 self._set_file_state(job_id, file_id, FileStatus.SAVING, item.filename)
 
@@ -163,6 +174,17 @@ class TranscriptionRunner:
                 self._event(job_id, "info", "File", "파일 전사 완료", file_id, item.filename)
                 if self.file_completed_callback is not None:
                     self.file_completed_callback(job_id, file_id, item.filename)
+                if observes_local_speed:
+                    duration = item.duration_seconds
+                    if (
+                        duration is not None
+                        and math.isfinite(duration)
+                        and duration > 0
+                        and math.isfinite(transcribe_elapsed)
+                        and transcribe_elapsed > 0
+                    ):
+                        local_observations.append((transcribe_elapsed, duration))
+                    self._update_local_eta(job_id, local_observations, scanned)
             except StopRequested:
                 self._set_file_state(job_id, file_id, FileStatus.STOPPED, item.filename)
                 self._event(job_id, "warning", "Stop", "사용자가 전사를 중지함", file_id, item.filename)
@@ -175,6 +197,8 @@ class TranscriptionRunner:
                 if exc.fatal:
                     fatal_error = True
                     break
+                if observes_local_speed:
+                    self._update_local_eta(job_id, local_observations, scanned)
             except Exception as exc:
                 logger.exception("Unexpected transcription error for %s", source_path)
                 normalized = EngineError(
@@ -184,8 +208,59 @@ class TranscriptionRunner:
                     technical_detail=str(exc),
                 )
                 self._file_failed(job_id, file_id, item.filename, normalized)
+                if observes_local_speed:
+                    self._update_local_eta(job_id, local_observations, scanned)
 
         self._finalize(job_id, token, fatal_error)
+
+    def _clear_eta(self, job_id: str):
+        self.job_manager.mutate_job(job_id, lambda job: setattr(job, "eta_seconds", None))
+
+    def _update_local_eta(
+        self,
+        job_id: str,
+        observations: list[tuple[float, float]],
+        scanned: Dict[str, ScannedFile],
+    ):
+        def mutation(job: JobModel):
+            if job.engine != "local_whisper" or not observations:
+                job.eta_seconds = None
+                return
+
+            observed_processing_seconds = sum(processing for processing, _ in observations)
+            observed_audio_seconds = sum(duration for _, duration in observations)
+            if (
+                not math.isfinite(observed_processing_seconds)
+                or observed_processing_seconds <= 0
+                or not math.isfinite(observed_audio_seconds)
+                or observed_audio_seconds <= 0
+            ):
+                job.eta_seconds = None
+                return
+
+            remaining_audio_seconds = 0.0
+            for file_id, state in job.files.items():
+                if state != FileStatus.WAITING:
+                    continue
+                item = scanned.get(file_id)
+                duration = item.duration_seconds if item is not None else None
+                if duration is None or not math.isfinite(duration) or duration <= 0:
+                    job.eta_seconds = None
+                    return
+                remaining_audio_seconds += duration
+
+            if remaining_audio_seconds <= 0:
+                job.eta_seconds = None
+                return
+
+            eta_seconds = (
+                observed_processing_seconds
+                / observed_audio_seconds
+                * remaining_audio_seconds
+            )
+            job.eta_seconds = eta_seconds if math.isfinite(eta_seconds) and eta_seconds > 0 else None
+
+        self.job_manager.mutate_job(job_id, mutation)
 
     def _set_file_state(self, job_id: str, file_id: str, state: FileStatus, filename: str):
         def mutation(job: JobModel):
@@ -272,6 +347,7 @@ class TranscriptionRunner:
         def mutation(job: JobModel):
             job.status = FileStatus.FAILED
             job.batch_completed = False
+            job.eta_seconds = None
             first_waiting = next(
                 (file_id for file_id, state in job.files.items() if state == FileStatus.WAITING),
                 None,
@@ -295,6 +371,7 @@ class TranscriptionRunner:
             job.status = FileStatus.CANCELLED
             job.current_file = None
             job.current_progress = None
+            job.eta_seconds = None
             job.events.append(
                 JobEvent(
                     level="warning",
@@ -331,6 +408,7 @@ class TranscriptionRunner:
                 job.batch_completed = True
             job.current_file = None
             job.current_progress = None
+            job.eta_seconds = None
             self._update_counts(job)
             job.events.append(JobEvent(level="info", category="Job", message="Job 완료"))
 

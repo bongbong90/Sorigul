@@ -88,6 +88,7 @@ export interface JobModel {
   failed_files: number
   current_file: string | null
   current_progress: number | null
+  eta_seconds: number | null
   files: Record<string, FileStatus>
   events: JobEvent[]
   drive: Record<string, DriveFileState>
