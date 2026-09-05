@@ -1,5 +1,4 @@
-whisper
+openai-whisper==20250625
 fastapi
 uvicorn
-pydantic
 python-multipart

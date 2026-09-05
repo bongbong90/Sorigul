@@ -1,7 +1,7 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uuid
 import json
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Optional, Literal
 
 from src.services.drive import DriveAuth
@@ -24,10 +24,37 @@ class ColabConnectionMetadata(BaseModel):
     updated_at: datetime
     expires_at: datetime
 
+    @field_validator("updated_at", "expires_at")
+    @classmethod
+    def ensure_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None or v.utcoffset() is None:
+            raise ValueError("datetime must be timezone-aware")
+        return v
+
 class RendezvousState(BaseModel):
     state: Literal["WAITING", "FOUND", "CONNECTED", "FAILED", "EXPIRED", "AUTH_REQUIRED"]
     base_url: Optional[str] = None
     request_id: Optional[str] = None
+
+def _validate_metadata_freshness(metadata: ColabConnectionMetadata, now: datetime) -> Literal["VALID", "EXPIRED", "INVALID"]:
+    lifetime = (metadata.expires_at - metadata.updated_at).total_seconds()
+    if metadata.status == "REQUESTED":
+        if not (0 < lifetime <= COLAB_REQUEST_TTL_SECONDS):
+            return "INVALID"
+    elif metadata.status == "READY":
+        if not (0 < lifetime <= COLAB_READY_TTL_SECONDS):
+            return "INVALID"
+    elif metadata.status == "FAILED":
+        if lifetime <= 0 or lifetime > COLAB_READY_TTL_SECONDS:
+            return "INVALID"
+
+    if metadata.expires_at <= now:
+        return "EXPIRED"
+
+    if metadata.updated_at > now + timedelta(seconds=60):
+        return "INVALID"
+
+    return "VALID"
 
 class ColabRendezvousService:
     def __init__(self, auth: DriveAuth):
@@ -95,11 +122,11 @@ class ColabRendezvousService:
             return RendezvousState(state="WAITING", request_id=request_id)
             
         now = datetime.now(timezone.utc)
-        
-        # Check if expires_at is unreasonably far in the future
-        ttl_seconds = (metadata.expires_at - now).total_seconds()
-        if ttl_seconds < 0 or ttl_seconds > COLAB_READY_TTL_SECONDS * 2:
+        freshness = _validate_metadata_freshness(metadata, now)
+        if freshness == "EXPIRED":
             return RendezvousState(state="EXPIRED", request_id=request_id)
+        elif freshness == "INVALID":
+            return RendezvousState(state="WAITING", request_id=request_id)
             
         if metadata.status == "FAILED":
             return RendezvousState(state="FAILED", request_id=request_id)

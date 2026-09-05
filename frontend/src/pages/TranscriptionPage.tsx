@@ -106,12 +106,20 @@ export function TranscriptionPage() {
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
   const preflightLockRef = useRef(false)
+  const engineHydratedRef = useRef(false)
   const [preflightActive, setPreflightActive] = useState(false)
   const isPreflighting = preflightActive
 
   const knownStage = knownStageFor(subject)
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
   const needsStagePrompt = Boolean(subject.trim()) && !knownStage && (!overrideStage || editingOverride)
+
+  function changeEngine(nextEngine: 'local_whisper' | 'direct_colab') {
+    setEngine(nextEngine)
+    if (nextEngine === 'local_whisper') {
+      setConnectedBaseUrl(null)
+    }
+  }
 
   // Loaded once at startup: the backend transcription_folder setting is the
   // source of truth going forward, but a pre-existing localStorage folder
@@ -141,6 +149,10 @@ export function TranscriptionPage() {
       if (effectiveFolder && effectiveFolder !== folder) setFolder(effectiveFolder)
       setCourse((current) => current || loaded.last_course || '')
       setSubject((current) => current || loaded.last_subject || '')
+      if (!engineHydratedRef.current) {
+        setEngine(loaded.last_engine === 'direct_colab' ? 'direct_colab' : 'local_whisper')
+        engineHydratedRef.current = true
+      }
     } catch {
       // Backend offline at startup: fall back to whatever localStorage has;
       // the health/reconnect flow will retry settings once connected.
@@ -289,6 +301,11 @@ export function TranscriptionPage() {
   }
 
   function startAttempt(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
+    if (engine === 'direct_colab' && !connectedBaseUrl) {
+      setMessage('Colab 연결을 먼저 완료해 주세요.')
+      setDialog(null)
+      return
+    }
     if (preflightLockRef.current) return
     preflightLockRef.current = true
     setPreflightActive(true)
@@ -386,8 +403,8 @@ export function TranscriptionPage() {
       try { await loadFolder() } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
     }
 
-    // The current Drive classifier is still filename-based (Phase 2 not
-    // done); a CONTINUE_ORIGINAL target's classification was never actually
+    // The Drive classifier now uses Job/file metadata (Phase 2 done), but
+    // a CONTINUE_ORIGINAL target's classification was never actually
     // confirmed, so this run's upload is forced off entirely -- never a
     // partial/opt-in upload, never an "upload anyway" override (Section 8,
     // per explicit correction).
@@ -416,6 +433,8 @@ export function TranscriptionPage() {
         folder, file_ids: ids, scope, force_retranscribe: force, upload_to_drive: uploadToDriveForRun,
         course: courseValue, subject: subjectValue, stage: resolveStageFor(subjectValue),
         file_resolutions: toFileResolutionsPayload(resolutions),
+        engine,
+        colab_url: engine === 'direct_colab' ? (connectedBaseUrl ?? undefined) : undefined,
       })
       setJob(created); setDialog(null); setPendingIds([]); setFileResolutions(new Map())
       setMessage('Job을 생성했습니다. 전사를 시작합니다.')
@@ -580,7 +599,7 @@ export function TranscriptionPage() {
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
-        <EngineSection engine={engine} onChangeEngine={setEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || (job != null && ['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
+        <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || (job != null && ['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
         <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
           <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>

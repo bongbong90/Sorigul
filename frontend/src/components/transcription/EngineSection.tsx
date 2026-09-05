@@ -20,6 +20,15 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const [errorMsg, setErrorMsg] = useState('')
 
   useEffect(() => {
+    if (engine === 'local_whisper') {
+      setRequestId(null)
+      setColabState('WAITING')
+      setVerifying(false)
+      setErrorMsg('')
+    }
+  }, [engine])
+
+  useEffect(() => {
     let timer: number
     if (engine === 'direct_colab' && requestId && (colabState === 'WAITING' || colabState === 'FOUND')) {
       timer = window.setInterval(async () => {
