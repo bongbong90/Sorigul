@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.requirements import Requirement
 
 from src import sidecar_main
 
@@ -57,6 +58,19 @@ def test_cuda_release_checks_reject_unusable_runtime(torch):
         sidecar_main._cuda_available_detail(torch)
 
 
+def test_cuda_requirement_locks_local_version_variant():
+    repo_root = Path(__file__).resolve().parents[2]
+    requirement_lines = (
+        repo_root / "tools/requirements-torch-cuda.txt"
+    ).read_text(encoding="utf-8").splitlines()
+    torch_requirement = next(line for line in requirement_lines if line.startswith("torch=="))
+    parsed = Requirement(torch_requirement)
+
+    assert torch_requirement == "torch==2.13.0+cu130"
+    assert parsed.specifier.contains("2.13.0+cu130")
+    assert not parsed.specifier.contains("2.13.0+cpu")
+
+
 def test_cuda_contract_files_are_explicit():
     repo_root = Path(__file__).resolve().parents[2]
     requirement = (repo_root / "tools/requirements-torch-cuda.txt").read_text(encoding="utf-8")
@@ -64,9 +78,23 @@ def test_cuda_contract_files_are_explicit():
     spec = (repo_root / "backend/packaging/sorigul_backend.spec").read_text(encoding="utf-8")
 
     assert "https://download.pytorch.org/whl/cu130" in requirement
-    assert "torch==2.13.0" in requirement
-    assert build_script.index("requirements-torch-cuda.txt") < build_script.index("requirements-whisper.txt")
+    assert "torch==2.13.0+cu130" in requirement.splitlines()
+    install_order = [
+        build_script.index(path)
+        for path in (
+            "requirements-torch-cuda.txt",
+            "backend\\requirements.txt",
+            "requirements-whisper.txt",
+            "requirements-packaging.txt",
+        )
+    ]
+    assert install_order == sorted(install_order)
+    pyinstaller_position = build_script.index("Running PyInstaller")
+    assert build_script.index('EXPECTED_TORCH = "2.13.0+cu130"') < pyinstaller_position
+    assert build_script.index('EXPECTED_CUDA = "13.0"') < pyinstaller_position
+    assert build_script.index("CUDA_RELEASE_VARIANT_MISMATCH") < pyinstaller_position
     assert "CUDA_RELEASE_RUNTIME_UNAVAILABLE" in build_script
+    assert build_script.index("CUDA_RELEASE_RUNTIME_UNAVAILABLE") < pyinstaller_position
     assert "torch.version.cuda" in build_script
     assert "torch.cuda.is_available" in build_script
     assert "torch.cuda.device_count" in build_script

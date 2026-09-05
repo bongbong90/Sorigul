@@ -62,6 +62,9 @@ Write-Step "Validating CUDA release runtime before PyInstaller"
 $CudaPreflight = @'
 import torch
 
+EXPECTED_TORCH = "2.13.0+cu130"
+EXPECTED_CUDA = "13.0"
+
 print("torch.__version__ =", torch.__version__)
 print("torch.version.cuda =", torch.version.cuda)
 print("torch.cuda.is_available =", torch.cuda.is_available())
@@ -69,13 +72,25 @@ print("torch.cuda.device_count =", torch.cuda.device_count())
 if torch.cuda.is_available() and torch.cuda.device_count() > 0:
     print("torch.cuda.get_device_name(0) =", torch.cuda.get_device_name(0))
 
+if torch.__version__ != EXPECTED_TORCH or torch.version.cuda != EXPECTED_CUDA:
+    raise SystemExit(41)
+
 if torch.version.cuda is None or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
-    raise SystemExit("CUDA_RELEASE_RUNTIME_UNAVAILABLE")
+    raise SystemExit(42)
 '@
 & $VenvPython -c $CudaPreflight
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "CUDA_RELEASE_RUNTIME_UNAVAILABLE"
-    exit $LASTEXITCODE
+$CudaPreflightExit = $LASTEXITCODE
+if ($CudaPreflightExit -eq 41) {
+    Write-Error "CUDA_RELEASE_VARIANT_MISMATCH" -ErrorAction Continue
+    exit $CudaPreflightExit
+}
+if ($CudaPreflightExit -eq 42) {
+    Write-Error "CUDA_RELEASE_RUNTIME_UNAVAILABLE" -ErrorAction Continue
+    exit $CudaPreflightExit
+}
+if ($CudaPreflightExit -ne 0) {
+    Write-Error "CUDA_RELEASE_PREFLIGHT_FAILED" -ErrorAction Continue
+    exit $CudaPreflightExit
 }
 
 $Uid = [guid]::NewGuid().ToString().Substring(0,8)
