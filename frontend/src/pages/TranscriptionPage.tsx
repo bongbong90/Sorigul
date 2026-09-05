@@ -56,13 +56,27 @@ function queueStatus(value: string): QueueStatus {
   return value as QueueStatus
 }
 
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '—'
+
+  const totalSeconds = Math.round(seconds)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const remainingSeconds = totalSeconds % 60
+
+  if (hours >= 1) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+  }
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
+}
+
 function rowsFrom(files: ScannedFile[], job?: JobModel): QueueRow[] {
   return files.map((file) => {
     const local = job?.files[file.id] ?? (file.completion_status === 'DONE' ? 'DONE' : 'WAITING')
     const drive = job?.drive[file.id]
     const localDetail = file.completion_status === 'INVALID_RESULT' ? '기존 결과 bundle 검증 실패' : file.completion_status === 'DONE' ? '정상 TXT/JSON/SRT bundle' : undefined
     const driveDetail = drive && drive.status !== 'DISABLED' ? `${drivePresentation[drive.status]?.label ?? drive.status}${drive.error ? ` · ${drive.error}` : ''}` : undefined
-    return { id: file.id, filename: file.filename, duration: '—', status: queueStatus(local), detail: [localDetail, driveDetail].filter(Boolean).join(' · ') || undefined }
+    return { id: file.id, filename: file.filename, duration: formatDuration(file.duration_seconds), status: queueStatus(local), detail: [localDetail, driveDetail].filter(Boolean).join(' · ') || undefined }
   })
 }
 

@@ -41,6 +41,7 @@ export interface ScannedFile {
   size: number
   modified_at: string
   completion_status: 'DONE' | 'INCOMPLETE' | 'INVALID_RESULT'
+  duration_seconds: number | null
   needs_rename: boolean | null
 }
 
