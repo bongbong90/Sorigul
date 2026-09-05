@@ -49,12 +49,34 @@ if (-not (Test-Path $VenvPython)) {
 }
 
 Write-Step "Installing/verifying backend + packaging requirements"
+& $VenvPython -m pip install --no-cache-dir -r "tools\requirements-torch-cuda.txt"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "backend\requirements.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "backend\requirements-whisper.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "tools\requirements-packaging.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Step "Validating CUDA release runtime before PyInstaller"
+$CudaPreflight = @'
+import torch
+
+print("torch.__version__ =", torch.__version__)
+print("torch.version.cuda =", torch.version.cuda)
+print("torch.cuda.is_available =", torch.cuda.is_available())
+print("torch.cuda.device_count =", torch.cuda.device_count())
+if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+    print("torch.cuda.get_device_name(0) =", torch.cuda.get_device_name(0))
+
+if torch.version.cuda is None or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+    raise SystemExit("CUDA_RELEASE_RUNTIME_UNAVAILABLE")
+'@
+& $VenvPython -c $CudaPreflight
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "CUDA_RELEASE_RUNTIME_UNAVAILABLE"
+    exit $LASTEXITCODE
+}
 
 $Uid = [guid]::NewGuid().ToString().Substring(0,8)
 $TempRoot = Join-Path $env:TEMP "Sorigul_PyInstaller_$Uid"

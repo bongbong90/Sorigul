@@ -22,7 +22,7 @@ dev-mode contract (see docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 BACKEND_ROOT = Path(SPECPATH).resolve().parent  # backend/packaging -> backend
 
@@ -48,11 +48,12 @@ hidden_imports = [
 ]
 
 datas = collect_data_files("whisper") + collect_data_files("tiktoken_ext")
+torch_binaries = collect_dynamic_libs("torch")
 
 a = Analysis(
     [str(BACKEND_ROOT / "src" / "sidecar_main.py")],
     pathex=[str(BACKEND_ROOT)],
-    binaries=[],
+    binaries=torch_binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
