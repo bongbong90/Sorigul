@@ -336,16 +336,16 @@ def test_create_job_direct_colab_normalization(tmp_path):
     import src.api.routes
 
     jm = JobManager(str(tmp_path / "jobs.json"))
-    sm = SettingsManager(tmp_path)
+    sm = SettingsManager(tmp_path / "settings.json")
     src.api.routes.job_manager = jm
     src.api.routes.settings_manager = sm
 
-    test_mp3 = tmp_path / "test.mp3"
-    import os; os.makedirs(str(tmp_path), exist_ok=True); open(str(test_mp3), "wb").write(b"dummy")
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
 
     req = CreateJobRequest(
         folder=str(tmp_path),
-        file_ids=["test"],
+        file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
         engine="direct_colab", file_resolutions={"test": "CONTINUE_ORIGINAL"},
@@ -366,27 +366,27 @@ def test_create_job_invalid_colab_url(tmp_path):
     import src.api.routes
 
     jm = JobManager(str(tmp_path / "jobs.json"))
-    sm = SettingsManager(tmp_path)
+    sm = SettingsManager(tmp_path / "settings.json")
     src.api.routes.job_manager = jm
     src.api.routes.settings_manager = sm
 
-    test_mp3 = tmp_path / "test.mp3"
-    import os; os.makedirs(str(tmp_path), exist_ok=True); open(str(test_mp3), "wb").write(b"dummy")
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
 
     req = CreateJobRequest(
         folder=str(tmp_path),
-        file_ids=["test"],
+        file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
         engine="direct_colab", file_resolutions={"test": "CONTINUE_ORIGINAL"},
         colab_url="https://example.test/other"
     )
 
-    try:
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as excinfo:
         create_job(req)
-        assert False, "Should have raised HTTPException"
-    except HTTPException as e:
-        assert e.status_code == 400
+    assert excinfo.value.status_code == 400
 
 def test_create_job_local_engine(tmp_path):
     from src.api.routes import create_job, CreateJobRequest
@@ -395,16 +395,16 @@ def test_create_job_local_engine(tmp_path):
     import src.api.routes
 
     jm = JobManager(str(tmp_path / "jobs.json"))
-    sm = SettingsManager(tmp_path)
+    sm = SettingsManager(tmp_path / "settings.json")
     src.api.routes.job_manager = jm
     src.api.routes.settings_manager = sm
 
-    test_mp3 = tmp_path / "test.mp3"
-    import os; os.makedirs(str(tmp_path), exist_ok=True); open(str(test_mp3), "wb").write(b"dummy")
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
 
     req = CreateJobRequest(
         folder=str(tmp_path),
-        file_ids=["test"],
+        file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
         engine="local_whisper", file_resolutions={"test": "CONTINUE_ORIGINAL"},

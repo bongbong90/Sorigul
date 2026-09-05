@@ -384,11 +384,12 @@ def test_runtime_settings_default_last_engine():
 
 def test_last_engine_persistence_roundtrip(tmp_path):
     from src.services.settings import SettingsManager, SettingsPatch
-    manager = SettingsManager(tmp_path)
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(settings_path)
     patch = SettingsPatch(last_engine="direct_colab")
     manager.update(patch)
 
-    manager2 = SettingsManager(tmp_path)
+    manager2 = SettingsManager(settings_path)
     assert manager2.get().last_engine == "direct_colab"
 
 def test_legacy_settings_missing_last_engine(tmp_path):
@@ -398,7 +399,8 @@ def test_legacy_settings_missing_last_engine(tmp_path):
     with open(settings_file, "w", encoding="utf-8") as f:
         json.dump({}, f)
 
-    manager = SettingsManager(tmp_path)
+    settings_path = tmp_path / "settings.json"
+    manager = SettingsManager(settings_path)
     assert manager.get().last_engine == "local_whisper"
 
 def test_runtime_settings_dump_fields():

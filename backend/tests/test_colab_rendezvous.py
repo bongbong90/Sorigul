@@ -6,18 +6,26 @@ from src.services.colab_rendezvous import ColabRendezvousService, COLAB_RUNTIME_
 class FakeDriveClient:
     def __init__(self):
         self.files = {}
+        self.folder_calls = []
+        self.find_file_calls = []
+        self.create_file_calls = []
+        self.update_file_calls = []
 
     def find_or_create_folder(self, parent_id, name):
+        self.folder_calls.append((parent_id, name))
         return f"folder_{name}"
 
     def find_file(self, parent_id, name):
+        self.find_file_calls.append((parent_id, name))
         return "fake_file_id" if "fake_file_id" in self.files else None
 
     def create_text_file(self, parent_id, name, content):
+        self.create_file_calls.append((parent_id, name))
         self.files["fake_file_id"] = content
         return "fake_file_id"
 
     def update_text_file(self, file_id, name, content):
+        self.update_file_calls.append((file_id, name))
         self.files[file_id] = content
         return file_id
 
@@ -356,11 +364,11 @@ def test_start_contract_lock():
     auth = FakeAuth(client)
     service = ColabRendezvousService(auth)
 
-    # We should intercept the client creation to check parent and folder names.
-    # FakeDriveClient already receives parent_id="root", name=COLAB_RUNTIME_FOLDER in find_or_create_folder
-    # We will verify this behavior indirectly.
-
     res = service.start()
+
+    assert client.folder_calls == [("root", COLAB_RUNTIME_FOLDER)]
+    assert client.find_file_calls == [("folder_" + COLAB_RUNTIME_FOLDER, COLAB_CONNECTION_FILENAME)]
+    assert client.create_file_calls == [("folder_" + COLAB_RUNTIME_FOLDER, COLAB_CONNECTION_FILENAME)]
     assert res.state == "WAITING"
 
     content = client.files.get("fake_file_id")
