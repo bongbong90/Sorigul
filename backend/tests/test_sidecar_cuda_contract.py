@@ -71,6 +71,31 @@ def test_cuda_requirement_locks_local_version_variant():
     assert not parsed.specifier.contains("2.13.0+cpu")
 
 
+def test_cuda_preflight_uses_unique_temp_python_file_with_finally_cleanup():
+    repo_root = Path(__file__).resolve().parents[2]
+    build_script = (repo_root / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+
+    assert "-c $CudaPreflight" not in build_script
+    assert '$CudaPreflightId = [guid]::NewGuid().ToString("N")' in build_script
+    assert '"Sorigul_CudaPreflight_$CudaPreflightId.py"' in build_script
+    write_position = build_script.index("[System.IO.File]::WriteAllText(")
+    execute_position = build_script.index("& $VenvPython $CudaPreflightPath")
+    finally_position = build_script.index("} finally {", execute_position)
+    cleanup_guard_position = build_script.index(
+        "Test-Path -LiteralPath $CudaPreflightPath", finally_position
+    )
+    cleanup_position = build_script.index(
+        "Remove-Item -LiteralPath $CudaPreflightPath -Force", finally_position
+    )
+
+    assert write_position < execute_position < finally_position
+    assert finally_position < cleanup_guard_position < cleanup_position
+    assert 'EXPECTED_TORCH = "2.13.0+cu130"' in build_script
+    assert 'EXPECTED_CUDA = "13.0"' in build_script
+    assert "$CudaPreflightExit -eq 41" in build_script
+    assert "$CudaPreflightExit -eq 42" in build_script
+
+
 def test_cuda_contract_files_are_explicit():
     repo_root = Path(__file__).resolve().parents[2]
     requirement = (repo_root / "tools/requirements-torch-cuda.txt").read_text(encoding="utf-8")

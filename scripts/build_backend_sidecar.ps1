@@ -78,8 +78,24 @@ if torch.__version__ != EXPECTED_TORCH or torch.version.cuda != EXPECTED_CUDA:
 if torch.version.cuda is None or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
     raise SystemExit(42)
 '@
-& $VenvPython -c $CudaPreflight
-$CudaPreflightExit = $LASTEXITCODE
+$CudaPreflightId = [guid]::NewGuid().ToString("N")
+$CudaPreflightPath = Join-Path `
+    $env:TEMP `
+    "Sorigul_CudaPreflight_$CudaPreflightId.py"
+$CudaPreflightExit = $null
+try {
+    [System.IO.File]::WriteAllText(
+        $CudaPreflightPath,
+        $CudaPreflight,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    & $VenvPython $CudaPreflightPath
+    $CudaPreflightExit = $LASTEXITCODE
+} finally {
+    if (Test-Path -LiteralPath $CudaPreflightPath) {
+        Remove-Item -LiteralPath $CudaPreflightPath -Force
+    }
+}
 if ($CudaPreflightExit -eq 41) {
     Write-Error "CUDA_RELEASE_VARIANT_MISMATCH" -ErrorAction Continue
     exit $CudaPreflightExit
