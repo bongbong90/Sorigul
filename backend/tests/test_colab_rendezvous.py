@@ -350,3 +350,198 @@ def test_artifact_pure_helper_future_updated_at():
 
     ready_data = build_ready_metadata(request_data, "https://example.trycloudflare.com", now=now)
     assert ready_data is None
+
+def test_start_contract_lock():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    # We should intercept the client creation to check parent and folder names.
+    # FakeDriveClient already receives parent_id="root", name=COLAB_RUNTIME_FOLDER in find_or_create_folder
+    # We will verify this behavior indirectly.
+
+    res = service.start()
+    assert res.state == "WAITING"
+
+    content = client.files.get("fake_file_id")
+    assert content is not None
+
+    data = json.loads(content)
+    assert set(data.keys()) == {"schema_version", "request_id", "url", "status", "updated_at", "expires_at"}
+    assert data["schema_version"] == 1
+    assert data["request_id"] == res.request_id
+    assert data["url"] == ""
+    assert data["status"] == "REQUESTED"
+
+    updated_at = datetime.fromisoformat(data["updated_at"])
+    expires_at = datetime.fromisoformat(data["expires_at"])
+
+    assert updated_at.tzinfo is not None
+    assert expires_at.tzinfo is not None
+
+    diff = (expires_at - updated_at).total_seconds()
+    assert abs(diff - 600) < 1.0
+
+
+def test_naive_updated_at_aware_expires_at():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now() # naive
+    expires = datetime.now(timezone.utc) + timedelta(seconds=600) # aware
+
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "https://example.trycloudflare.com",
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": expires.isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "WAITING"
+
+def test_aware_updated_at_naive_expires_at():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc) # aware
+    expires = datetime.now() + timedelta(seconds=600) # naive
+
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "https://example.trycloudflare.com",
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": expires.isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "WAITING"
+
+
+def test_oversized_requested():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "",
+        "status": "REQUESTED",
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=601)).isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "WAITING"
+
+def test_oversized_ready():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "https://example.test",
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=3601)).isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "WAITING"
+
+def test_valid_ready_boundary():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "https://example.test",
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=3600)).isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "FOUND"
+    assert res.base_url == "https://example.test"
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.test",
+    "https://example.test/",
+    "https://example.test/health",
+    "https://example.test/transcribe"
+])
+def test_poll_ready_url_suffix_normalization(url):
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": url,
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=3600)).isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "FOUND"
+    assert res.base_url == "https://example.test"
+
+def test_poll_ready_arbitrary_url_rejected():
+    client = FakeDriveClient()
+    auth = FakeAuth(client)
+    service = ColabRendezvousService(auth)
+
+    now = datetime.now(timezone.utc)
+    data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "https://example.test/other",
+        "status": "READY",
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=3600)).isoformat()
+    }
+    client.files["fake_file_id"] = json.dumps(data)
+    res = service.poll("test_req")
+    assert res.state == "WAITING"
+
+
+def test_artifact_expired_request_contract():
+    import sys
+    import os
+    sys.path.insert(0, os.path.abspath(".."))
+    from colab.sorigul_colab_bootstrap import build_ready_metadata
+
+    now = datetime.now(timezone.utc)
+    updated_at = now - timedelta(seconds=1000)
+    expires_at = now - timedelta(seconds=400)
+
+    request_data = {
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": "test_req",
+        "url": "",
+        "status": "REQUESTED",
+        "updated_at": updated_at.isoformat(),
+        "expires_at": expires_at.isoformat()
+    }
+
+    ready_data = build_ready_metadata(request_data, "https://example.test", now=now)
+    assert ready_data is None

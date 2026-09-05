@@ -376,3 +376,35 @@ def test_stop_cancel_consistency(tmp_path):
     assert job.files["f2"] == FileStatus.CANCEL_REQUESTED
     assert job.files["f3"] == FileStatus.CANCELLED
     assert job.files["f4"] == FileStatus.CANCELLED
+
+def test_runtime_settings_default_last_engine():
+    from src.services.settings import RuntimeSettings
+    settings = RuntimeSettings()
+    assert settings.last_engine == "local_whisper"
+
+def test_last_engine_persistence_roundtrip(tmp_path):
+    from src.services.settings import SettingsManager, SettingsPatch
+    manager = SettingsManager(tmp_path)
+    patch = SettingsPatch(last_engine="direct_colab")
+    manager.update(patch)
+
+    manager2 = SettingsManager(tmp_path)
+    assert manager2.get().last_engine == "direct_colab"
+
+def test_legacy_settings_missing_last_engine(tmp_path):
+    from src.services.settings import SettingsManager
+    import json
+    settings_file = tmp_path / "settings.json"
+    with open(settings_file, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+
+    manager = SettingsManager(tmp_path)
+    assert manager.get().last_engine == "local_whisper"
+
+def test_runtime_settings_dump_fields():
+    from src.services.settings import RuntimeSettings
+    settings = RuntimeSettings()
+    dumped = settings.model_dump()
+    assert "colab_url" not in dumped
+    assert "colab_request_id" not in dumped
+    assert "drive_auto_upload" not in dumped
