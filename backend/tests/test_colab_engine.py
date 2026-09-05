@@ -116,6 +116,8 @@ def test_colab_uses_fixed_300_seconds_and_merges_offsets(tmp_path):
     assert merged.text == "첫째\n둘째"
     assert [(segment.start, segment.end) for segment in merged.segments] == [(10, 15), (310, 315)]
     assert progress == [0.5, 1.0]
+    assert merged.metadata["colab_recovery_cache_used"] is False
+    assert "colab_recovery_cache_used" not in merged.output_payload()
     assert splitter.cleaned
 
 
@@ -177,6 +179,8 @@ def test_failed_retry_reuses_completed_chunks(tmp_path):
     assert first_client.calls == 4
     assert retry_client.calls == 1
     assert merged.text == "zero\none\ntwo"
+    assert merged.metadata["colab_recovery_cache_used"] is True
+    assert "colab_recovery_cache_used" not in merged.output_payload()
 
 
 def test_source_change_invalidates_failed_cache(tmp_path):

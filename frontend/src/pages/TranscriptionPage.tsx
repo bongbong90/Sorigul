@@ -235,15 +235,16 @@ export function TranscriptionPage() {
   }, [activeJobId, activeJobStatus, loadFolder])
 
   const runStartMs = latestRunStartMs(job?.events ?? [])
-  const isLocalTranscribing = job?.engine === 'local_whisper' && job.status === 'TRANSCRIBING'
+  const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab')
+    && job.status === 'TRANSCRIBING'
   useEffect(() => {
-    if (!isLocalTranscribing) return
+    if (!isTranscribingWithRuntime) return
     setNowMs(Date.now())
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [isLocalTranscribing, runStartMs])
+  }, [isTranscribingWithRuntime, runStartMs])
 
-  const elapsedSeconds = isLocalTranscribing && runStartMs !== null
+  const elapsedSeconds = isTranscribingWithRuntime && runStartMs !== null
     ? Math.floor((nowMs - runStartMs) / 1000)
     : null
   const validElapsedSeconds = elapsedSeconds !== null && Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0
