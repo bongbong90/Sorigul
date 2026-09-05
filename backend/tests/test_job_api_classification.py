@@ -348,7 +348,7 @@ def test_create_job_direct_colab_normalization(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
-        engine="direct_colab", file_resolutions={"test": "CONTINUE_ORIGINAL"},
+        engine="direct_colab",
         colab_url="https://example.test/health"
     )
 
@@ -378,7 +378,7 @@ def test_create_job_invalid_colab_url(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
-        engine="direct_colab", file_resolutions={"test": "CONTINUE_ORIGINAL"},
+        engine="direct_colab",
         colab_url="https://example.test/other"
     )
 
@@ -407,8 +407,7 @@ def test_create_job_local_engine(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
-        engine="local_whisper", file_resolutions={"test": "CONTINUE_ORIGINAL"},
-        colab_url="https://example.test"
+        engine="local_whisper"
     )
 
     res = create_job(req)

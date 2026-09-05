@@ -364,6 +364,9 @@ def test_start_contract_lock():
     auth = FakeAuth(client)
     service = ColabRendezvousService(auth)
 
+    assert COLAB_RUNTIME_FOLDER == "Sorigul Runtime"
+    assert COLAB_CONNECTION_FILENAME == "colab_connection.json"
+
     res = service.start()
 
     assert client.folder_calls == [("root", COLAB_RUNTIME_FOLDER)]
