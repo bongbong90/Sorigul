@@ -30,7 +30,13 @@ from src.domain.models import (
 )
 from src.services.colab_rendezvous import ColabRendezvousService, RendezvousState
 from src.services.desktop_state import ApplicationEvent, ApplicationEventStore, DesktopCoordinator
-from src.services.drive import DriveError, DriveUploadService, GoogleOAuthService, DRIVE_SCOPE
+from src.services.drive import (
+    DRIVE_SCOPE,
+    DriveError,
+    DriveExecutionService,
+    DriveUploadService,
+    GoogleOAuthService,
+)
 from src.services.results import FolderScanResult, OpenFolderIntent, ResultsService, TextContent
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
@@ -58,18 +64,31 @@ colab_rendezvous_service = ColabRendezvousService(drive_auth)
 engine_resolver = DefaultEngineResolver()
 
 
+drive_execution_service = DriveExecutionService(drive_service)
+
+
 def handle_file_completed(job_id: str, file_id: str, filename: str):
     desktop_coordinator.file_completed(job_id, file_id, filename)
     completed_job = job_manager.get_job(job_id)
     if completed_job is not None and completed_job.upload_to_drive:
-        drive_service.upload(job_id, file_id)
+        # Scheduled, never awaited: Drive network I/O must not hold the
+        # transcription worker. Drive status stays independent of Local DONE.
+        drive_execution_service.submit(job_id, file_id)
+
+
+def handle_job_finished(job: JobModel):
+    # Runs after this Job's already-scheduled Drive uploads so the shutdown
+    # countdown still never starts while one of them is mid-transfer.
+    drive_execution_service.after_pending_uploads(
+        job.job_id, lambda: desktop_coordinator.job_finished(job)
+    )
 
 
 transcription_runner = TranscriptionRunner(
     job_manager,
     engine_resolver,
     file_completed_callback=handle_file_completed,
-    job_finished_callback=desktop_coordinator.job_finished,
+    job_finished_callback=handle_job_finished,
 )
 execution_service = BackgroundExecutionService(transcription_runner)
 
@@ -405,51 +424,124 @@ def get_job(job_id: str):
 class JobActionRequest(BaseModel):
     action: str # retry, stop, cancel
 
+ACTIVE_JOB_STATES = frozenset(
+    {FileStatus.PREPARING, FileStatus.TRANSCRIBING, FileStatus.SAVING, FileStatus.VERIFYING}
+)
+STOP_REQUESTED_MESSAGE = "중지 요청됨"
+CANCEL_REQUESTED_MESSAGE = "작업 취소 요청됨"
+
+
+def _append_event_once(job: JobModel, event: JobEvent):
+    last = job.events[-1] if job.events else None
+    if last is not None and last.category == event.category and last.message == event.message:
+        return
+    job.events.append(event)
+
+
+def _request_not_acknowledged(job_id: str, action_label: str):
+    """A Stop/Cancel the execution service did not acknowledge: nothing was
+    mutated, and the Job keeps whatever truth it currently has."""
+    latest = job_manager.get_job(job_id)
+    if latest is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if latest.status in ACTIVE_JOB_STATES or latest.status == FileStatus.CANCEL_REQUESTED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"실행 중인 전사를 찾지 못해 {action_label} 요청을 전달하지 못했습니다.",
+        )
+    raise HTTPException(status_code=409, detail="작업이 이미 종료되었거나 실행 중이 아닙니다.")
+
+
 @router.post("/jobs/{job_id}/action")
 def job_action(job_id: str, req: JobActionRequest):
-    active_states = {FileStatus.PREPARING, FileStatus.TRANSCRIBING, FileStatus.SAVING, FileStatus.VERIFYING}
-
     if req.action == "stop":
-        execution_service.request_stop(job_id)
+        current = job_manager.get_job(job_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if current.status == FileStatus.CANCEL_REQUESTED:
+            raise HTTPException(status_code=409, detail="이미 작업 취소가 요청되었습니다.")
+        if current.status not in ACTIVE_JOB_STATES and not execution_service.is_active(job_id):
+            raise HTTPException(status_code=400, detail="Cannot stop this job.")
 
-        def stop_mutation(job):
-            if job.status not in active_states:
-                raise HTTPException(status_code=400, detail="Cannot stop this job.")
-            job.status = FileStatus.STOPPED
-            for fid, fstatus in job.files.items():
-                if fstatus in active_states:
-                    job.files[fid] = FileStatus.STOPPED
-            job.events.append(JobEvent(level="warning", category="Stop", message="사용자가 전사를 중지함"))
+        # Only a request is recorded here. STOPPED is persisted by the runner
+        # once it actually observes the request (never faked by this route).
+        def record_stop_request(job: JobModel):
+            _append_event_once(
+                job, JobEvent(level="warning", category="Stop", message=STOP_REQUESTED_MESSAGE)
+            )
 
-        updated = job_manager.mutate_job(job_id, stop_mutation)
+        if not execution_service.request_stop(job_id, on_accepted=record_stop_request):
+            _request_not_acknowledged(job_id, "중지")
+        updated = job_manager.get_job(job_id)
 
     elif req.action == "cancel":
-        execution_service.request_cancel(job_id)
+        current = job_manager.get_job(job_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if current.status == FileStatus.CANCEL_REQUESTED:
+            return current  # idempotent: already requested and acknowledged
 
-        def cancel_mutation(job):
-            is_active = job.status in active_states
-            if job.status not in {FileStatus.WAITING, *active_states}:
+        # CASE A: a WAITING Job whose execution never started is cancelled
+        # immediately -- atomically with respect to start().
+        def cancel_waiting(job: JobModel):
+            if job.status != FileStatus.WAITING:
                 raise HTTPException(status_code=400, detail="Cannot cancel this job.")
-            job.status = FileStatus.CANCEL_REQUESTED if is_active else FileStatus.CANCELLED
             for fid, fstatus in job.files.items():
-                if fstatus in active_states:
-                    job.files[fid] = FileStatus.CANCEL_REQUESTED
-                elif fstatus == FileStatus.WAITING:
+                if fstatus == FileStatus.WAITING:
                     job.files[fid] = FileStatus.CANCELLED
-            message = "작업 취소 요청됨" if is_active else "작업 취소됨"
-            job.events.append(JobEvent(level="warning", category="Cancel", message=message))
+            job.status = FileStatus.CANCELLED
+            job.batch_completed = False
+            job.events.append(JobEvent(level="warning", category="Cancel", message="작업 취소됨"))
+            job.events.append(JobEvent(level="warning", category="Job", message="Job 취소됨"))
 
-        updated = job_manager.mutate_job(job_id, cancel_mutation)
+        if current.status == FileStatus.WAITING:
+            applied, cancelled = execution_service.run_if_not_started(job_id, cancel_waiting)
+            if applied:
+                if cancelled is None:
+                    raise HTTPException(status_code=404, detail="Job not found")
+                return cancelled
+        elif current.status not in ACTIVE_JOB_STATES and not execution_service.is_active(job_id):
+            raise HTTPException(status_code=400, detail="Cannot cancel this job.")
+
+        # CASE B: an active run. CANCEL_REQUESTED is recorded only together
+        # with an acknowledged request; CANCELLED is the runner's to persist.
+        def record_cancel_request(job: JobModel):
+            job.status = FileStatus.CANCEL_REQUESTED
+            for fid, fstatus in job.files.items():
+                if fstatus in ACTIVE_JOB_STATES:
+                    job.files[fid] = FileStatus.CANCEL_REQUESTED
+            _append_event_once(
+                job, JobEvent(level="warning", category="Cancel", message=CANCEL_REQUESTED_MESSAGE)
+            )
+
+        if not execution_service.request_cancel(job_id, on_accepted=record_cancel_request):
+            _request_not_acknowledged(job_id, "취소")
+        updated = job_manager.get_job(job_id)
 
     elif req.action == "retry":
         # Reset failed/stopped/cancelled/crashed to waiting, checking filesystem truth
         current = job_manager.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job not found")
+        # Retry opens only once the previous run persisted its terminal
+        # state; a Stop/Cancel that is merely requested keeps it closed.
+        if execution_service.is_active(job_id) or current.status in {
+            *ACTIVE_JOB_STATES,
+            FileStatus.CANCEL_REQUESTED,
+        }:
+            raise HTTPException(
+                status_code=409,
+                detail="이전 실행이 아직 종료되지 않았습니다. 종료된 뒤 다시 시도해 주세요.",
+            )
         scanner = FileScanner(current.folder)
         scanned_files = {f.id: f.completion_status for f in scanner.scan()}
 
         def retry_mutation(job):
+            if job.status in ACTIVE_JOB_STATES or job.status == FileStatus.CANCEL_REQUESTED:
+                raise HTTPException(
+                    status_code=409,
+                    detail="이전 실행이 아직 종료되지 않았습니다. 종료된 뒤 다시 시도해 주세요.",
+                )
             retried_any = False
             for fid, fstatus in job.files.items():
                 if fstatus in {FileStatus.FAILED, FileStatus.STOPPED, FileStatus.CANCELLED, FileStatus.CRASHED}:
@@ -498,7 +590,11 @@ def upload_drive(job_id: str, file_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
     except DriveError as exc:
-        raise HTTPException(status_code=400, detail=exc.user_message)
+        raise HTTPException(status_code=_drive_error_status(exc), detail=exc.user_message)
+
+
+def _drive_error_status(exc: DriveError) -> int:
+    return 409 if exc.code == "DRIVE_UPLOAD_IN_PROGRESS" else 400
 
 
 @router.post(
@@ -511,7 +607,7 @@ def retry_drive(job_id: str, file_id: str):
     except KeyError:
         raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
     except DriveError as exc:
-        raise HTTPException(status_code=400, detail=exc.user_message)
+        raise HTTPException(status_code=_drive_error_status(exc), detail=exc.user_message)
 
 @router.post('/colab/rendezvous/start', response_model=RendezvousState)
 def start_colab_rendezvous():

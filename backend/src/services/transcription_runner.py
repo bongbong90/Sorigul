@@ -30,6 +30,19 @@ from src.utils.paths import get_app_data_dir
 
 logger = logging.getLogger(__name__)
 
+IN_PROGRESS_STATES = frozenset(
+    {FileStatus.PREPARING, FileStatus.TRANSCRIBING, FileStatus.SAVING, FileStatus.VERIFYING}
+)
+
+# Terminal Job event per terminal Job status; the event always matches the
+# state the run actually persisted.
+TERMINAL_JOB_EVENTS = {
+    FileStatus.DONE: ("info", "Job 완료"),
+    FileStatus.STOPPED: ("warning", "Job 중지됨"),
+    FileStatus.CANCELLED: ("warning", "Job 취소됨"),
+    FileStatus.FAILED: ("error", "Job 실패"),
+}
+
 
 class DefaultEngineResolver:
     def __init__(self, cache_root: Optional[Path] = None):
@@ -94,7 +107,7 @@ class TranscriptionRunner:
         try:
             engine = self.engine_resolver(job)
         except EngineError as exc:
-            self._finish_fatal(job_id, exc)
+            self._finish_fatal(job_id, token, exc)
             return
 
         try:
@@ -102,6 +115,7 @@ class TranscriptionRunner:
         except OSError as exc:
             self._finish_fatal(
                 job_id,
+                token,
                 EngineError(
                     "SOURCE_FOLDER_UNREADABLE",
                     ErrorCategory.INPUT,
@@ -166,6 +180,15 @@ class TranscriptionRunner:
                             current_progress=progress,
                         )
 
+                # Engines that cannot be interrupted mid-call (OpenAI Whisper's
+                # model.transcribe has no safe cancellation hook) return here
+                # only once the call ends. A Stop/Cancel requested meanwhile
+                # stays a *request* -- the Job keeps its active state -- and is
+                # acknowledged here or, at the latest, at the pre-promotion
+                # gate below, so the requested run never commits output. A
+                # truly hung native/GPU call is recovered only at process
+                # level (owned backend cleanup / app exit, enforced by the
+                # desktop shell's kill-on-close Job Object).
                 result = engine.transcribe(
                     source_path,
                     token,
@@ -182,16 +205,25 @@ class TranscriptionRunner:
                     token.raise_if_requested()
                     self._set_file_state(job_id, file_id, FileStatus.VERIFYING, item.filename)
 
+                def before_promotion():
+                    # Last point a Stop/Cancel can prevent this commit. Past
+                    # this, promotion runs to completion (or rollback).
+                    token.raise_if_requested()
+
                 self.output_writer.commit(
                     source_path,
                     result,
                     verification_callback=before_verify,
+                    before_promotion=before_promotion,
                 )
-                token.raise_if_requested()
+                # The bundle is committed on disk: record that truth first.
+                # A Stop/Cancel that arrived during/after promotion ends the
+                # Job after this file; it never relabels a committed file.
                 self._set_file_state(job_id, file_id, FileStatus.DONE, item.filename)
                 self._event(job_id, "info", "File", "파일 전사 완료", file_id, item.filename)
-                if self.file_completed_callback is not None:
-                    self.file_completed_callback(job_id, file_id, item.filename)
+                request_pending = token.is_stop_requested or token.is_cancel_requested
+                if not request_pending:
+                    self._notify_file_completed(job_id, file_id, item.filename)
                 if observes_local_speed:
                     duration = item.duration_seconds
                     if (
@@ -215,6 +247,8 @@ class TranscriptionRunner:
                     ):
                         colab_observations.append((transcribe_elapsed, duration))
                     self._update_colab_eta(job_id, colab_observations, scanned)
+                if request_pending:
+                    break
             except StopRequested:
                 self._set_file_state(job_id, file_id, FileStatus.STOPPED, item.filename)
                 self._event(job_id, "warning", "Stop", "사용자가 전사를 중지함", file_id, item.filename)
@@ -364,8 +398,24 @@ class TranscriptionRunner:
 
         self.job_manager.mutate_job(job_id, mutation)
 
+    def _notify_file_completed(self, job_id: str, file_id: str, filename: str):
+        # A completion side effect (notification, Drive scheduling) must
+        # never turn an already-committed DONE file into a failure.
+        if self.file_completed_callback is None:
+            return
+        try:
+            self.file_completed_callback(job_id, file_id, filename)
+        except Exception:
+            logger.exception("file_completed callback failed for %s/%s", job_id, file_id)
+
     def _set_file_state(self, job_id: str, file_id: str, state: FileStatus, filename: str):
         def mutation(job: JobModel):
+            if state in IN_PROGRESS_STATES and job.status == FileStatus.CANCEL_REQUESTED:
+                # A cancel was already acknowledged; keep reporting it until
+                # this runner acknowledges the cancel itself.
+                job.files[file_id] = FileStatus.CANCEL_REQUESTED
+                job.current_file = filename
+                return
             job.status = state
             job.files[file_id] = state
             job.current_file = filename if state not in {FileStatus.DONE, FileStatus.FAILED} else None
@@ -437,7 +487,15 @@ class TranscriptionRunner:
 
         self.job_manager.mutate_job(job_id, mutation)
 
-    def _finish_fatal(self, job_id: str, error: EngineError):
+    @staticmethod
+    def _append_terminal_event(job: JobModel):
+        level, message = TERMINAL_JOB_EVENTS.get(job.status, ("info", "Job 종료"))
+        last = job.events[-1] if job.events else None
+        if last is not None and last.category == "Job" and last.message == message:
+            return
+        job.events.append(JobEvent(level=level, category="Job", message=message))
+
+    def _finish_fatal(self, job_id: str, token: CancellationToken, error: EngineError):
         if error.technical_detail:
             logger.error(
                 "Fatal engine error %s (%s): %s",
@@ -461,6 +519,8 @@ class TranscriptionRunner:
                 JobEvent(level="error", category=error.category.value, message=error.user_message)
             )
             self._update_counts(job)
+            self._append_terminal_event(job)
+            token.mark_finished()
 
         self.job_manager.mutate_job(job_id, mutation)
 
@@ -512,7 +572,10 @@ class TranscriptionRunner:
             job.current_progress = None
             job.eta_seconds = None
             self._update_counts(job)
-            job.events.append(JobEvent(level="info", category="Job", message="Job 완료"))
+            self._append_terminal_event(job)
+            # Persisted together with the terminal state (same lock): from
+            # here on no new Stop/Cancel can be acknowledged by this run.
+            token.mark_finished()
 
         self.job_manager.mutate_job(job_id, mutation)
         finished = self.job_manager.get_job(job_id)
@@ -526,6 +589,15 @@ class TranscriptionRunner:
 
 
 class BackgroundExecutionService:
+    """Owns the running execution (token + future) per Job.
+
+    Lock order is always service lock -> JobManager lock; the runner itself
+    only ever takes the JobManager lock. A Stop/Cancel is *acknowledged*
+    only if it reached a run that has not yet persisted its terminal state
+    (the runner marks the token finished inside that same mutation), so an
+    acknowledgement always means "this run will observe the request".
+    """
+
     def __init__(
         self,
         runner: TranscriptionRunner,
@@ -538,10 +610,10 @@ class BackgroundExecutionService:
         self._lock = threading.Lock()
 
     def start(self, job_id: str) -> bool:
-        job = self.runner.job_manager.get_job(job_id)
-        if job is None or job.status != FileStatus.WAITING:
-            return False
         with self._lock:
+            job = self.runner.job_manager.get_job(job_id)
+            if job is None or job.status != FileStatus.WAITING:
+                return False
             existing = self._futures.get(job_id)
             if existing is not None and not existing.done():
                 return False
@@ -549,26 +621,76 @@ class BackgroundExecutionService:
             self._tokens[job_id] = token
             future = self._executor.submit(self.runner.run, job_id, token)
             self._futures[job_id] = future
-        future.add_done_callback(lambda _: self._cleanup(job_id))
+        future.add_done_callback(lambda done: self._cleanup(job_id, done))
         return True
 
-    def request_stop(self, job_id: str) -> bool:
+    def is_active(self, job_id: str) -> bool:
+        """True while a run for this Job has not yet persisted its terminal state."""
         with self._lock:
             token = self._tokens.get(job_id)
-            if token is None:
-                return False
-            token.request_stop()
-            return True
+            return token is not None and not token.is_finished
 
-    def request_cancel(self, job_id: str) -> bool:
+    def request_stop(
+        self,
+        job_id: str,
+        on_accepted: Optional[Callable[[JobModel], None]] = None,
+    ) -> bool:
+        return self._request(job_id, CancellationToken.request_stop, on_accepted)
+
+    def request_cancel(
+        self,
+        job_id: str,
+        on_accepted: Optional[Callable[[JobModel], None]] = None,
+    ) -> bool:
+        return self._request(job_id, CancellationToken.request_cancel, on_accepted)
+
+    def _request(
+        self,
+        job_id: str,
+        signal: Callable[[CancellationToken], None],
+        on_accepted: Optional[Callable[[JobModel], None]],
+    ) -> bool:
         with self._lock:
             token = self._tokens.get(job_id)
-            if token is None:
+            if token is None or token.is_finished:
                 return False
-            token.request_cancel()
-            return True
+            accepted = False
 
-    def _cleanup(self, job_id: str):
+            def mutation(job: JobModel):
+                nonlocal accepted
+                # Checked under the JobManager lock, the same lock the
+                # runner's terminal mutation holds while finishing the token.
+                if token.is_finished:
+                    return
+                signal(token)
+                accepted = True
+                if on_accepted is not None:
+                    on_accepted(job)
+
+            self.runner.job_manager.mutate_job(job_id, mutation)
+            return accepted
+
+    def run_if_not_started(
+        self,
+        job_id: str,
+        mutation: Callable[[JobModel], None],
+    ) -> tuple[bool, Optional[JobModel]]:
+        """Applies ``mutation`` only if no run is active for this Job, holding
+        the start lock so ``start`` cannot race it. Returns (applied, job)."""
         with self._lock:
-            self._tokens.pop(job_id, None)
-            self._futures.pop(job_id, None)
+            token = self._tokens.get(job_id)
+            if token is not None and not token.is_finished:
+                return False, None
+            return True, self.runner.job_manager.mutate_job(job_id, mutation)
+
+    def _cleanup(self, job_id: str, future: Future):
+        if not future.cancelled() and future.exception() is not None:
+            logger.error(
+                "Transcription run for job %s ended with an unhandled error",
+                job_id,
+                exc_info=future.exception(),
+            )
+        with self._lock:
+            if self._futures.get(job_id) is future:
+                self._tokens.pop(job_id, None)
+                self._futures.pop(job_id, None)

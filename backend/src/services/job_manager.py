@@ -8,6 +8,18 @@ from typing import Dict, List, Optional
 from pydantic import ValidationError
 from src.domain.models import FileMetadata, JobModel, FileStatus, JobEvent
 
+
+class JobStorageError(RuntimeError):
+    """jobs.json could not be read, quarantined or written. Raised instead of
+    silently resetting or silently dropping Job state; the existing file is
+    left in place untouched."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
 class JobManager:
     def __init__(self, storage_path: str):
         self.storage_path = Path(storage_path)
@@ -19,34 +31,51 @@ class JobManager:
         if not self.storage_path.exists():
             return
 
+        # An OS-level read failure (permissions, I/O) says nothing about the
+        # file's content: never quarantine or reset on it.
         try:
-            with open(self.storage_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            raw = self.storage_path.read_bytes()
+        except OSError as exc:
+            raise JobStorageError(
+                "JOB_STORAGE_READ_FAILED", f"작업 기록을 읽을 수 없습니다: {exc}"
+            ) from exc
 
+        try:
+            data = json.loads(raw.decode('utf-8'))
             if not isinstance(data, dict):
                 raise TypeError("Data root is not a dictionary")
-
+            loaded: Dict[str, JobModel] = {}
             needs_save = False
             for k, v in data.items():
                 job = JobModel(**v)
                 recovered_job, was_recovered = self._recover_job(job)
-                self.jobs[k] = recovered_job
+                loaded[k] = recovered_job
                 if was_recovered:
                     needs_save = True
-
-            if needs_save:
-                self.save_jobs()
-
-        except (json.JSONDecodeError, ValidationError, TypeError, AttributeError) as e:
-            # Quarantine corrupt file (rename instead of copy to clear it)
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            quarantine_path = self.storage_path.with_name(f"jobs.corrupt.{timestamp}.json")
-            # If for some reason quarantine path exists, append to avoid crash
-            if quarantine_path.exists():
-                quarantine_path = self.storage_path.with_name(f"jobs.corrupt.{timestamp}_{uuid.uuid4().hex[:4]}.json")
-            self.storage_path.rename(quarantine_path)
-            # Reset jobs
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, TypeError, AttributeError):
+            self._quarantine_corrupt_file()
             self.jobs = {}
+            return
+
+        self.jobs = loaded
+        if needs_save:
+            self.save_jobs()
+
+    def _quarantine_corrupt_file(self):
+        # Quarantine corrupt file (rename instead of copy to clear it)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        quarantine_path = self.storage_path.with_name(f"jobs.corrupt.{timestamp}.json")
+        # If for some reason quarantine path exists, append to avoid crash
+        if quarantine_path.exists():
+            quarantine_path = self.storage_path.with_name(f"jobs.corrupt.{timestamp}_{uuid.uuid4().hex[:4]}.json")
+        try:
+            self.storage_path.rename(quarantine_path)
+        except OSError as exc:
+            # The corrupt file stays exactly where it was; starting over with
+            # an empty Job list on top of it would be a silent reset.
+            raise JobStorageError(
+                "JOB_STORAGE_QUARANTINE_FAILED", f"손상된 작업 기록을 격리하지 못했습니다: {exc}"
+            ) from exc
 
     def _recover_job(self, job: JobModel) -> tuple[JobModel, bool]:
         # Convert active states to CRASHED on load
@@ -85,15 +114,23 @@ class JobManager:
             self._save_jobs_unlocked()
 
     def _save_jobs_unlocked(self):
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.storage_path.with_suffix('.tmp')
         data = {k: v.model_dump(mode='json') for k, v in self.jobs.items()}
-
-        with open(temp_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-        # Atomic replace
-        temp_path.replace(self.storage_path)
+        # Unique per invocation, so a failed save only ever cleans up its own temp.
+        temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            # Atomic replace: the previous jobs.json stays intact on failure.
+            temp_path.replace(self.storage_path)
+        except OSError as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise JobStorageError(
+                "JOB_STORAGE_WRITE_FAILED", f"작업 기록을 저장하지 못했습니다: {exc}"
+            ) from exc
 
     def create_job(
         self,
@@ -132,7 +169,11 @@ class JobManager:
 
         with self._lock:
             self.jobs[job_id] = job
-            self._save_jobs_unlocked()
+            try:
+                self._save_jobs_unlocked()
+            except JobStorageError:
+                del self.jobs[job_id]
+                raise
             return job
 
     def get_job(self, job_id: str) -> Optional[JobModel]:
@@ -146,17 +187,35 @@ class JobManager:
 
     def update_job(self, job: JobModel):
         with self._lock:
+            previous = self.jobs.get(job.job_id)
             job.updated_at = datetime.now()
             self.jobs[job.job_id] = job
-            self._save_jobs_unlocked()
+            try:
+                self._save_jobs_unlocked()
+            except JobStorageError:
+                if previous is None:
+                    del self.jobs[job.job_id]
+                else:
+                    self.jobs[job.job_id] = previous
+                raise
 
     def mutate_job(self, job_id: str, mutation) -> Optional[JobModel]:
-        """Apply a mutation and persist it while holding the process lock."""
+        """Apply a mutation and persist it while holding the process lock.
+
+        If the mutation raises or persisting fails, the in-memory Job is
+        restored, so memory never claims a state jobs.json does not hold; the
+        error (e.g. JobStorageError) propagates.
+        """
         with self._lock:
             job = self.jobs.get(job_id)
             if job is None:
                 return None
-            mutation(job)
-            job.updated_at = datetime.now()
-            self._save_jobs_unlocked()
+            snapshot = job.model_copy(deep=True)
+            try:
+                mutation(job)
+                job.updated_at = datetime.now()
+                self._save_jobs_unlocked()
+            except BaseException:
+                self.jobs[job_id] = snapshot
+                raise
             return job.model_copy(deep=True)

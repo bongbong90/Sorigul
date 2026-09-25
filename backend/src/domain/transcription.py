@@ -127,12 +127,19 @@ class CancellationToken:
     def __init__(self):
         self._stop = threading.Event()
         self._cancel = threading.Event()
+        self._finished = threading.Event()
 
     def request_stop(self):
         self._stop.set()
 
     def request_cancel(self):
         self._cancel.set()
+
+    def mark_finished(self):
+        """Called by the runner inside the mutation that persists the run's
+        terminal Job state. After this, a new Stop/Cancel request can no
+        longer be acknowledged by this run."""
+        self._finished.set()
 
     @property
     def is_stop_requested(self) -> bool:
@@ -141,6 +148,10 @@ class CancellationToken:
     @property
     def is_cancel_requested(self) -> bool:
         return self._cancel.is_set()
+
+    @property
+    def is_finished(self) -> bool:
+        return self._finished.is_set()
 
     def raise_if_requested(self):
         if self.is_cancel_requested:

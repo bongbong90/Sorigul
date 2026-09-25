@@ -221,10 +221,10 @@ def test_runner_excludes_failed_file_from_speed_observations(tmp_path, monkeypat
     output_writer = OutputBundleWriter()
 
     class FailOnBWriter:
-        def commit(self, source_path, result, verification_callback=None):
+        def commit(self, source_path, result, **kwargs):
             if source_path.stem == "B":
                 raise RuntimeError("output failed")
-            return output_writer.commit(source_path, result, verification_callback)
+            return output_writer.commit(source_path, result, **kwargs)
 
     TranscriptionRunner(
         manager,

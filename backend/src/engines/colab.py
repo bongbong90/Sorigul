@@ -26,6 +26,106 @@ from src.domain.transcription import (
 
 CHUNK_SECONDS = 300
 FATAL_TRANSCRIBE_HTTP_STATUSES = frozenset({401, 403, 404, 405})
+# Hard ceiling for a single ffmpeg invocation while preparing Colab audio.
+FFMPEG_SPLIT_TIMEOUT_SECONDS = 300
+FFMPEG_POLL_INTERVAL_SECONDS = 0.2
+# How long to wait for an ffmpeg child to be reaped after terminate/kill.
+FFMPEG_REAP_TIMEOUT_SECONDS = 10
+# Only the tail of ffmpeg's stderr is kept for diagnosis.
+FFMPEG_STDERR_LIMIT_BYTES = 16 * 1024
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _audio_split_timeout_error(detail: str) -> EngineError:
+    # Not fatal: a pathological source fails its own file and the batch
+    # moves on; the split itself is never retried automatically.
+    return EngineError(
+        "AUDIO_SPLIT_TIMEOUT",
+        ErrorCategory.RUNTIME,
+        "Colab 전사를 위한 오디오 준비 시간이 초과되었습니다.",
+        technical_detail=detail,
+    )
+
+
+def _reap(process) -> None:
+    """Terminates this exact child (never anything found by name) and waits
+    for it, escalating to kill if terminate is not enough."""
+    for stop in (process.terminate, process.kill):
+        try:
+            stop()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=FFMPEG_REAP_TIMEOUT_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_ffmpeg(
+    command: List[str],
+    token: Optional[CancellationToken],
+    *,
+    timeout_seconds: float = FFMPEG_SPLIT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = FFMPEG_POLL_INTERVAL_SECONDS,
+    popen=None,
+    clock=time.monotonic,
+) -> int:
+    """Runs one ffmpeg invocation with a hard deadline, honouring Stop/Cancel
+    while it runs. On timeout or Stop/Cancel the exact child is terminated
+    and reaped before AUDIO_SPLIT_TIMEOUT / StopRequested / CancelRequested
+    propagates. Returns the exit code; raises AUDIO_SPLIT_FAILED on nonzero.
+    """
+    popen = popen or subprocess.Popen
+    with tempfile.TemporaryFile() as stderr_file:
+        process = popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_file,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+        deadline = clock() + timeout_seconds
+        finished = False
+        try:
+            while True:
+                try:
+                    returncode = process.wait(timeout=poll_interval_seconds)
+                    finished = True
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if token is not None and (token.is_cancel_requested or token.is_stop_requested):
+                    _reap(process)
+                    finished = True
+                    token.raise_if_requested()
+                if clock() >= deadline:
+                    _reap(process)
+                    finished = True
+                    raise _audio_split_timeout_error(
+                        f"ffmpeg exceeded {timeout_seconds}s: {_stderr_tail(stderr_file)}"
+                    )
+        finally:
+            if not finished:
+                _reap(process)
+        if returncode != 0:
+            raise EngineError(
+                "AUDIO_SPLIT_FAILED",
+                ErrorCategory.INPUT,
+                "Colab 전사를 위한 오디오 준비에 실패했습니다.",
+                technical_detail=_stderr_tail(stderr_file),
+            )
+        return returncode
+
+
+def _stderr_tail(stderr_file) -> str:
+    try:
+        stderr_file.flush()
+        size = stderr_file.seek(0, 2)
+        stderr_file.seek(max(0, size - FFMPEG_STDERR_LIMIT_BYTES))
+        return stderr_file.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
 
 
 @dataclass(frozen=True)
@@ -37,7 +137,12 @@ class AudioChunk:
 
 
 class AudioSplitter(Protocol):
-    def split(self, source_path: Path, chunk_seconds: int) -> List[AudioChunk]:
+    def split(
+        self,
+        source_path: Path,
+        chunk_seconds: int,
+        token: Optional[CancellationToken] = None,
+    ) -> List[AudioChunk]:
         ...
 
     def cleanup(self):
@@ -45,10 +150,36 @@ class AudioSplitter(Protocol):
 
 
 class FFmpegAudioSplitter:
-    def __init__(self):
+    def __init__(
+        self,
+        timeout_seconds: float = FFMPEG_SPLIT_TIMEOUT_SECONDS,
+        popen=None,
+        clock=time.monotonic,
+        poll_interval_seconds: float = FFMPEG_POLL_INTERVAL_SECONDS,
+    ):
         self._temp_dir: Optional[Path] = None
+        self.timeout_seconds = timeout_seconds
+        self._popen = popen
+        self._clock = clock
+        self._poll_interval_seconds = poll_interval_seconds
 
-    def split(self, source_path: Path, chunk_seconds: int) -> List[AudioChunk]:
+    def _run(self, command: List[str], token: Optional[CancellationToken]):
+        # Both split paths share this one bounded, token-aware policy.
+        run_ffmpeg(
+            command,
+            token,
+            timeout_seconds=self.timeout_seconds,
+            poll_interval_seconds=self._poll_interval_seconds,
+            popen=self._popen,
+            clock=self._clock,
+        )
+
+    def split(
+        self,
+        source_path: Path,
+        chunk_seconds: int,
+        token: Optional[CancellationToken] = None,
+    ) -> List[AudioChunk]:
         from src.utils.ffmpeg_runtime import resolve_ffmpeg_path
         ffmpeg = resolve_ffmpeg_path()
         if ffmpeg is None:
@@ -63,15 +194,24 @@ class FFmpegAudioSplitter:
 
         self._temp_dir = Path(tempfile.mkdtemp(prefix="sorigul-colab-"))
         if duration is not None:
-            return self._split_with_duration(source_path, chunk_seconds, ffmpeg, duration)
+            return self._split_with_duration(source_path, chunk_seconds, ffmpeg, duration, token)
         else:
-            return self._split_fallback(source_path, chunk_seconds, ffmpeg)
+            return self._split_fallback(source_path, chunk_seconds, ffmpeg, token)
 
-    def _split_with_duration(self, source_path: Path, chunk_seconds: int, ffmpeg: Path, duration: float) -> List[AudioChunk]:
+    def _split_with_duration(
+        self,
+        source_path: Path,
+        chunk_seconds: int,
+        ffmpeg: Path,
+        duration: float,
+        token: Optional[CancellationToken] = None,
+    ) -> List[AudioChunk]:
         chunks = []
         try:
             total = max(1, math.ceil(duration / chunk_seconds))
             for index in range(total):
+                if token is not None:
+                    token.raise_if_requested()
                 start = index * chunk_seconds
                 chunk_duration = min(chunk_seconds, max(0.0, duration - start))
                 if chunk_duration < 1.0:
@@ -94,14 +234,7 @@ class FFmpegAudioSplitter:
                     "libmp3lame",
                     str(path),
                 ]
-                completed = subprocess.run(command, capture_output=True, check=False)
-                if completed.returncode != 0:
-                    raise EngineError(
-                        "AUDIO_SPLIT_FAILED",
-                        ErrorCategory.INPUT,
-                        "Colab 전사를 위한 오디오 준비에 실패했습니다.",
-                        technical_detail=completed.stderr.decode("utf-8", errors="replace"),
-                    )
+                self._run(command, token)
                 if path.stat().st_size < 2048:
                     path.unlink(missing_ok=True)
                     continue
@@ -117,7 +250,13 @@ class FFmpegAudioSplitter:
             self.cleanup()
             raise
 
-    def _split_fallback(self, source_path: Path, chunk_seconds: int, ffmpeg: Path) -> List[AudioChunk]:
+    def _split_fallback(
+        self,
+        source_path: Path,
+        chunk_seconds: int,
+        ffmpeg: Path,
+        token: Optional[CancellationToken] = None,
+    ) -> List[AudioChunk]:
         chunks = []
         try:
             pattern = str(self._temp_dir / "chunk-%05d.mp3")
@@ -134,14 +273,7 @@ class FFmpegAudioSplitter:
                 "-reset_timestamps", "1",
                 pattern,
             ]
-            completed = subprocess.run(command, capture_output=True, check=False)
-            if completed.returncode != 0:
-                raise EngineError(
-                    "AUDIO_SPLIT_FAILED",
-                    ErrorCategory.INPUT,
-                    "Colab 전사를 위한 오디오 준비에 실패했습니다.",
-                    technical_detail=completed.stderr.decode("utf-8", errors="replace"),
-                )
+            self._run(command, token)
 
             for path in sorted(self._temp_dir.glob("chunk-*.mp3")):
                 if path.stat().st_size < 2048:
@@ -385,7 +517,7 @@ class DirectColabEngine:
             self._ensure_health(event_callback)
             token.raise_if_requested()
             completed = self.cache.load(source_path, self.client.signature)
-            chunks = self.splitter.split(source_path, CHUNK_SECONDS)
+            chunks = self.splitter.split(source_path, CHUNK_SECONDS, token)
             valid_indices = {chunk.index for chunk in chunks}
             completed = {index: result for index, result in completed.items() if index in valid_indices}
             recovery_cache_used = bool(completed)
