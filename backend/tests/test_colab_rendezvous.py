@@ -2,6 +2,7 @@ import pytest
 import json
 from datetime import datetime, timezone, timedelta
 from src.services.colab_rendezvous import ColabRendezvousService, COLAB_RUNTIME_FOLDER, COLAB_CONNECTION_FILENAME, COLAB_SCHEMA_VERSION
+from src.services.colab_security import PairingRegistry
 
 class FakeDriveClient:
     def __init__(self):
@@ -213,7 +214,8 @@ def test_health_verify(monkeypatch):
     service = ColabRendezvousService(auth)
 
     monkeypatch.setattr('src.engines.colab.DirectColabHttpClient.check_health', lambda self: None)
-    res = service.verify_url("https://example.trycloudflare.com")
+    request_id = service.registry.create().request_id
+    res = service.verify_url("https://example.trycloudflare.com", request_id)
     assert res.state == "CONNECTED"
     assert res.base_url == "https://example.trycloudflare.com"
 
@@ -224,7 +226,8 @@ def test_health_verify_failure(monkeypatch):
 
     def fail(self): raise Exception('failed')
     monkeypatch.setattr('src.engines.colab.DirectColabHttpClient.check_health', fail)
-    res = service.verify_url("https://example.trycloudflare.com")
+    request_id = service.registry.create().request_id
+    res = service.verify_url("https://example.trycloudflare.com", request_id)
     assert res.state == "FAILED"
 
 def test_naive_timestamp():
@@ -289,7 +292,8 @@ def test_real_health_verifier(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
-    res = service.verify_url("https://example.trycloudflare.com/health")
+    request_id = service.registry.create().request_id
+    res = service.verify_url("https://example.trycloudflare.com/health", request_id)
     assert res.state == "CONNECTED"
     assert res.base_url == "https://example.trycloudflare.com"
     assert called_url == "https://example.trycloudflare.com/health"
@@ -301,7 +305,7 @@ def test_artifact_roundtrip():
     sys.path.insert(0, os.path.abspath(".."))
     from colab.sorigul_colab_bootstrap import build_ready_metadata
 
-    req_id = "test_req"
+    req_id = PairingRegistry().create().request_id
     now = datetime.now(timezone.utc)
     request_data = {
         "schema_version": COLAB_SCHEMA_VERSION,

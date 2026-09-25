@@ -22,6 +22,7 @@ from src.domain.transcription import (
     TranscriptionResult,
     TranscriptionSegment,
 )
+from src.services.colab_security import EMPTY_SHA256, PairingSession
 
 
 CHUNK_SECONDS = 300
@@ -339,7 +340,12 @@ class ColabClient(Protocol):
 
 
 class DirectColabHttpClient:
-    def __init__(self, base_url: str, timeout_seconds: int = 600):
+    def __init__(
+        self,
+        base_url: str,
+        auth_context: Optional[PairingSession] = None,
+        timeout_seconds: int = 600,
+    ):
         from src.services.colab_url import normalize_colab_base_url, ColabUrlError
         try:
             normalized = normalize_colab_base_url(base_url)
@@ -351,11 +357,23 @@ class DirectColabHttpClient:
                 fatal=True,
             )
         self.base_url = normalized
+        if auth_context is None or auth_context.verified_base_url not in (None, normalized):
+            raise EngineError(
+                "COLAB_PAIRING_REQUIRED",
+                ErrorCategory.AUTHENTICATION,
+                "Colab에 다시 연결해 주세요.",
+                fatal=True,
+            )
+        self.auth_context = auth_context
         self.timeout_seconds = timeout_seconds
-        self.signature = f"direct-colab:{self.base_url}:v1"
+        self.signature = f"direct-colab:{self.base_url}:{auth_context.fingerprint}:v2"
 
     def check_health(self):
-        request = urllib.request.Request(f"{self.base_url}/health", method="GET")
+        request = urllib.request.Request(
+            f"{self.base_url}/health",
+            headers=self.auth_context.signed_headers("GET", "/health", EMPTY_SHA256),
+            method="GET",
+        )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 if not 200 <= response.status < 300:
@@ -373,15 +391,21 @@ class DirectColabHttpClient:
     def transcribe(self, chunk_path: Path) -> TranscriptionResult:
         boundary = f"----Sorigul{uuid.uuid4().hex}"
         filename = chunk_path.name.encode("utf-8").decode("latin-1")
+        audio_bytes = chunk_path.read_bytes()
+        content_sha256 = hashlib.sha256(audio_bytes).hexdigest()
         body = (
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
             "Content-Type: audio/mpeg\r\n\r\n"
-        ).encode("latin-1") + chunk_path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("ascii")
+        ).encode("latin-1") + audio_bytes + f"\r\n--{boundary}--\r\n".encode("ascii")
+        headers = self.auth_context.signed_headers(
+            "POST", "/transcribe", content_sha256
+        )
+        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
         request = urllib.request.Request(
             f"{self.base_url}/transcribe",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers=headers,
             method="POST",
         )
         try:

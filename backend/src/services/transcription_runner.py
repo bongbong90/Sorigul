@@ -24,6 +24,7 @@ from src.engines.colab import (
 )
 from src.engines.local_whisper import LocalWhisperEngine
 from src.services.job_manager import JobManager
+from src.services.colab_security import PairingRegistry, pairing_registry
 from src.services.output_bundle import OutputBundleWriter
 from src.services.scanner import FileScanner
 from src.utils.paths import get_app_data_dir
@@ -46,11 +47,16 @@ TERMINAL_JOB_EVENTS = {
 
 
 class DefaultEngineResolver:
-    def __init__(self, cache_root: Optional[Path] = None):
+    def __init__(
+        self,
+        cache_root: Optional[Path] = None,
+        registry: PairingRegistry = pairing_registry,
+    ):
         self._local = LocalWhisperEngine()
         self._colab: Dict[str, DirectColabEngine] = {}
         self._lock = threading.Lock()
         self._cache_root = cache_root or (get_app_data_dir() / "cache" / "colab")
+        self._registry = registry
 
     def __call__(self, job: JobModel) -> TranscriptionEngine:
         if job.engine == "local_whisper":
@@ -64,14 +70,23 @@ class DefaultEngineResolver:
                     "Colab 주소가 설정되지 않았습니다.",
                     fatal=True,
                 )
+            session = self._registry.lookup_verified_base_url(endpoint)
+            if session is None:
+                raise EngineError(
+                    "COLAB_PAIRING_REQUIRED",
+                    ErrorCategory.AUTHENTICATION,
+                    "Colab에 다시 연결해 주세요.",
+                    fatal=True,
+                )
+            cache_key = f"{endpoint}:{session.fingerprint}"
             with self._lock:
-                if endpoint not in self._colab:
-                    self._colab[endpoint] = DirectColabEngine(
-                        client=DirectColabHttpClient(endpoint),
+                if cache_key not in self._colab:
+                    self._colab[cache_key] = DirectColabEngine(
+                        client=DirectColabHttpClient(endpoint, session),
                         splitter=FFmpegAudioSplitter(),
                         cache=ColabRecoveryCache(self._cache_root),
                     )
-                return self._colab[endpoint]
+                return self._colab[cache_key]
         raise EngineError(
             "ENGINE_UNSUPPORTED",
             ErrorCategory.CONFIGURATION,

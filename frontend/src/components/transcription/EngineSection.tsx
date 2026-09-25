@@ -39,7 +39,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
             setVerifying(true)
             clearInterval(timer)
             try {
-              const verifyRes = await api.verifyColabUrl(res.base_url)
+              const verifyRes = await api.verifyColabUrl(res.base_url, requestId)
               if (verifyRes.state === 'CONNECTED' && verifyRes.base_url) {
                 setColabState('CONNECTED')
                 onBaseUrlChange(verifyRes.base_url)
@@ -94,7 +94,22 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       setVerifying(true)
       setErrorMsg('')
       onBaseUrlChange(null)
-      const res = await api.verifyColabUrl(manualUrl)
+      let pairingRequestId = requestId
+      if (!pairingRequestId) {
+        const started = await api.startColabRendezvous()
+        if (started.state !== 'WAITING' || !started.request_id) {
+          setColabState(started.state)
+          setErrorMsg(
+            started.state === 'AUTH_REQUIRED'
+              ? 'Google Drive 인증이 필요합니다.'
+              : '보안 연결 시작에 실패했습니다.',
+          )
+          return
+        }
+        pairingRequestId = started.request_id
+        setRequestId(pairingRequestId)
+      }
+      const res = await api.verifyColabUrl(manualUrl, pairingRequestId)
       if (res.state === 'CONNECTED' && res.base_url) {
         setColabState('CONNECTED')
         onBaseUrlChange(res.base_url)
@@ -192,6 +207,9 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
           )}
 
           <div className="pt-2 border-t border-gray-200">
+            <p className="mb-3 text-xs text-gray-500">
+              사용자가 직접 시작한 Colab 런타임에만 연결합니다. 유료 크레딧 소비가 전혀 없어야 하면 Local 엔진을 사용하세요.
+            </p>
             {!showManual ? (
               <button
                 type="button"

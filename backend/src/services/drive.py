@@ -1,9 +1,12 @@
 import http.server
+import csv
 import json
 import logging
+import os
 import re
 import secrets
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -426,12 +429,88 @@ class LoopbackCallbackServer:
             pass
 
 
+@dataclass
+class OAuthAttempt:
+    attempt_id: str
+    expected_state: str
+    flow: object
+    callback_server: LoopbackCallbackServer
+    completing: bool = False
+    consumed: bool = False
+
+
+def _resolve_current_windows_sid(run=None) -> str:
+    runner = run or subprocess.run
+    result = runner(
+        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        check=True,
+        shell=False,
+    )
+    rows = list(csv.reader(result.stdout.splitlines()))
+    if len(rows) != 1 or len(rows[0]) < 2 or not rows[0][1].startswith("S-"):
+        raise OSError("Could not resolve the current Windows user SID")
+    return rows[0][1]
+
+
+def write_private_file(
+    path: Path,
+    payload: str,
+    *,
+    platform_name: Optional[str] = None,
+    run=None,
+) -> None:
+    """Durably publishes UTF-8 data only after private permissions succeed."""
+    platform_name = os.name if platform_name is None else platform_name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd: Optional[int] = None
+    try:
+        fd = os.open(str(temp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            fd = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if platform_name == "nt":
+            runner = run or subprocess.run
+            sid = _resolve_current_windows_sid(runner)
+            runner(
+                [
+                    "icacls.exe",
+                    str(temp_path),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"*{sid}:(F)",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=False,
+            )
+        else:
+            os.chmod(temp_path, 0o600)
+
+        os.replace(temp_path, path)
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 class GoogleOAuthService:
     def __init__(self, credential_path: Path, token_path: Path):
         self.credential_path = credential_path
         self.token_path = token_path
         self._state = DriveAuthState.UNAUTHENTICATED
-        self._flow = None
+        self._attempt: Optional[OAuthAttempt] = None
+        self._attempt_lock = threading.RLock()
 
     @property
     def state(self) -> DriveAuthState:
@@ -483,65 +562,107 @@ class GoogleOAuthService:
             )
         try:
             from google_auth_oauthlib.flow import Flow
-
-            expected_state = secrets.token_urlsafe(24)
-            callback_server = LoopbackCallbackServer(expected_state)
-
-            self._flow = Flow.from_client_secrets_file(
-                str(self.credential_path),
-                scopes=[DRIVE_SCOPE],
-                redirect_uri=callback_server.redirect_uri,
-            )
-            authorization_url, state = self._flow.authorization_url(
-                access_type="offline",
-                include_granted_scopes="true",
-                prompt="consent",
-                state=expected_state,
-            )
-            self._state = DriveAuthState.AUTHORIZING
-            callback_server.start()
-            threading.Thread(
-                target=self._await_callback,
-                args=(callback_server,),
-                daemon=True,
-            ).start()
-            return {"state": state, "authorization_url": authorization_url, "scope": DRIVE_SCOPE}
         except ImportError as exc:
             raise DriveError("DRIVE_LIBRARY_MISSING", "Google Drive runtime dependency가 설치되지 않았습니다.") from exc
 
-    def _await_callback(self, callback_server: LoopbackCallbackServer) -> None:
+        with self._attempt_lock:
+            if self._attempt is not None and not self._attempt.consumed:
+                raise DriveError(
+                    "DRIVE_AUTH_IN_PROGRESS", "Google Drive 인증이 이미 진행 중입니다."
+                )
+            expected_state = secrets.token_urlsafe(24)
+            callback_server = LoopbackCallbackServer(expected_state)
+            try:
+                flow = Flow.from_client_secrets_file(
+                    str(self.credential_path),
+                    scopes=[DRIVE_SCOPE],
+                    redirect_uri=callback_server.redirect_uri,
+                )
+                authorization_url, state = flow.authorization_url(
+                    access_type="offline",
+                    include_granted_scopes="true",
+                    prompt="consent",
+                    state=expected_state,
+                )
+                if state != expected_state:
+                    raise DriveError(
+                        "DRIVE_AUTH_STATE_INVALID", "Google Drive 인증 상태를 만들지 못했습니다."
+                    )
+                attempt = OAuthAttempt(
+                    attempt_id=uuid.uuid4().hex,
+                    expected_state=expected_state,
+                    flow=flow,
+                    callback_server=callback_server,
+                )
+                self._attempt = attempt
+                self._state = DriveAuthState.AUTHORIZING
+            except Exception:
+                callback_server.shutdown()
+                raise
+
+        callback_server.start()
+        threading.Thread(
+            target=self._await_callback,
+            args=(attempt,),
+            daemon=True,
+        ).start()
+        return {"state": state, "authorization_url": authorization_url, "scope": DRIVE_SCOPE}
+
+    def _await_callback(self, attempt: OAuthAttempt) -> None:
         """Runs on a background thread started by `start()`. Waits for the
         system-browser redirect to hit the loopback listener, then
         completes the flow automatically -- the user never pastes a code.
         """
-        code = callback_server.wait_for_code()
+        code = attempt.callback_server.wait_for_code()
         if code is None:
-            if self._state == DriveAuthState.AUTHORIZING:
-                self._state = DriveAuthState.REAUTH_REQUIRED
+            with self._attempt_lock:
+                if self._attempt is attempt and not attempt.completing and not attempt.consumed:
+                    attempt.consumed = True
+                    self._attempt = None
+                    self._state = DriveAuthState.REAUTH_REQUIRED
             return
         try:
-            self.complete(code)
+            self._complete_attempt(attempt, code)
         except DriveError:
             pass  # complete() already updated self._state on failure
 
     def complete(self, code: str) -> DriveAuthState:
-        if self._flow is None or not code:
+        with self._attempt_lock:
+            attempt = self._attempt
+        if attempt is None or not code:
             raise DriveError("DRIVE_AUTH_FLOW_MISSING", "진행 중인 Google Drive 인증이 없습니다.")
+        return self._complete_attempt(attempt, code)
+
+    def _complete_attempt(self, attempt: OAuthAttempt, code: str) -> DriveAuthState:
+        with self._attempt_lock:
+            if (
+                self._attempt is not attempt
+                or attempt.completing
+                or attempt.consumed
+                or not code
+            ):
+                raise DriveError("DRIVE_AUTH_FLOW_MISSING", "진행 중인 Google Drive 인증이 없습니다.")
+            attempt.completing = True
         try:
-            self._flow.fetch_token(code=code)
-            self._write_token(self._flow.credentials.to_json())
-            self._flow = None
+            attempt.flow.fetch_token(code=code)
+            self._write_token(attempt.flow.credentials.to_json())
+        except Exception as exc:
+            with self._attempt_lock:
+                attempt.consumed = True
+                if self._attempt is attempt:
+                    self._attempt = None
+                    self._state = DriveAuthState.REAUTH_REQUIRED
+            raise DriveError("DRIVE_AUTH_COMPLETE_FAILED", "Google Drive 인증을 완료하지 못했습니다.") from exc
+        with self._attempt_lock:
+            attempt.consumed = True
+            if self._attempt is not attempt:
+                raise DriveError("DRIVE_AUTH_FLOW_MISSING", "진행 중인 Google Drive 인증이 없습니다.")
+            self._attempt = None
             self._state = DriveAuthState.CONNECTED
             return self._state
-        except Exception as exc:
-            self._state = DriveAuthState.REAUTH_REQUIRED
-            raise DriveError("DRIVE_AUTH_COMPLETE_FAILED", "Google Drive 인증을 완료하지 못했습니다.") from exc
 
     def _write_token(self, payload: str):
-        self.token_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.token_path.with_name(f".{self.token_path.name}.{uuid.uuid4().hex}.tmp")
-        temp_path.write_text(payload, encoding="utf-8")
-        temp_path.replace(self.token_path)
+        write_private_file(self.token_path, payload)
 
 
 class DriveUploadService:

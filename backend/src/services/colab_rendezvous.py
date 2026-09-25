@@ -1,11 +1,11 @@
 from datetime import datetime, timezone, timedelta
-import uuid
 import json
 from pydantic import BaseModel, ConfigDict, field_validator
 from typing import Optional, Literal
 
 from src.services.drive import DriveAuth
 from src.services.colab_url import normalize_colab_base_url, ColabUrlError
+from src.services.colab_security import PairingRegistry, pairing_registry
 from src.engines.colab import DirectColabHttpClient, EngineError
 
 COLAB_RUNTIME_FOLDER = "Sorigul Runtime"
@@ -32,7 +32,10 @@ class ColabConnectionMetadata(BaseModel):
         return v
 
 class RendezvousState(BaseModel):
-    state: Literal["WAITING", "FOUND", "CONNECTED", "FAILED", "EXPIRED", "AUTH_REQUIRED"]
+    state: Literal[
+        "WAITING", "FOUND", "CONNECTED", "FAILED", "EXPIRED", "AUTH_REQUIRED",
+        "PAIRING_REQUIRED",
+    ]
     base_url: Optional[str] = None
     request_id: Optional[str] = None
 
@@ -57,8 +60,9 @@ def _validate_metadata_freshness(metadata: ColabConnectionMetadata, now: datetim
     return "VALID"
 
 class ColabRendezvousService:
-    def __init__(self, auth: DriveAuth):
+    def __init__(self, auth: DriveAuth, registry: PairingRegistry = pairing_registry):
         self.auth = auth
+        self.registry = registry
         
     def start(self) -> RendezvousState:
         try:
@@ -66,7 +70,8 @@ class ColabRendezvousService:
         except Exception:
             return RendezvousState(state="AUTH_REQUIRED")
             
-        request_id = uuid.uuid4().hex
+        session = self.registry.create()
+        request_id = session.request_id
         now = datetime.now(timezone.utc)
         expires_at = datetime.fromtimestamp(now.timestamp() + COLAB_REQUEST_TTL_SECONDS, timezone.utc)
         
@@ -88,6 +93,7 @@ class ColabRendezvousService:
             else:
                 client.create_text_file(folder_id, COLAB_CONNECTION_FILENAME, payload)
         except Exception:
+            self.registry.revoke(request_id)
             return RendezvousState(state="FAILED", request_id=request_id)
             
         return RendezvousState(state="WAITING", request_id=request_id)
@@ -142,11 +148,17 @@ class ColabRendezvousService:
                 
         return RendezvousState(state="WAITING", request_id=request_id)
 
-    def verify_url(self, url: str) -> RendezvousState:
+    def verify_url(self, url: str, request_id: str) -> RendezvousState:
         try:
             normalized = normalize_colab_base_url(url)
-            client = DirectColabHttpClient(normalized)
+            session = self.registry.lookup(request_id)
+            if session is None:
+                return RendezvousState(state="PAIRING_REQUIRED", request_id=request_id)
+            client = DirectColabHttpClient(normalized, session)
             client.check_health()
-            return RendezvousState(state="CONNECTED", base_url=normalized)
+            self.registry.bind(request_id, normalized)
+            return RendezvousState(
+                state="CONNECTED", base_url=normalized, request_id=request_id
+            )
         except (ColabUrlError, EngineError, Exception):
-            return RendezvousState(state="FAILED")
+            return RendezvousState(state="FAILED", request_id=request_id)

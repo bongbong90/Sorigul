@@ -16,7 +16,7 @@ import urllib.request
 import pytest
 
 from src.domain.models import DriveAuthState
-from src.services.drive import GoogleOAuthService, LoopbackCallbackServer
+from src.services.drive import DriveError, GoogleOAuthService, LoopbackCallbackServer
 
 
 def test_dynamic_port_allocation_never_uses_a_fixed_port():
@@ -214,3 +214,126 @@ def test_automatic_callback_completes_the_flow_without_manual_paste(tmp_path, fa
     assert service.state == DriveAuthState.CONNECTED
     assert token_path.exists()
     assert "automatic-code" not in token_path.read_text(encoding="utf-8")
+
+
+class _ControlledCallbackServer:
+    instances = []
+
+    def __init__(self, expected_state):
+        self.expected_state = expected_state
+        self.port = 49152 + len(self.instances)
+        self.result = None
+        self.ready = threading.Event()
+        self.instances.append(self)
+
+    @property
+    def redirect_uri(self):
+        return f"http://127.0.0.1:{self.port}/"
+
+    def start(self):
+        pass
+
+    def wait_for_code(self, timeout=300):
+        self.ready.wait(5)
+        return self.result
+
+    def shutdown(self):
+        self.ready.set()
+
+
+@pytest.fixture
+def controlled_oauth(tmp_path, fake_google_auth_oauthlib, monkeypatch):
+    import src.services.drive as drive_module
+
+    _ControlledCallbackServer.instances = []
+    monkeypatch.setattr(drive_module, "LoopbackCallbackServer", _ControlledCallbackServer)
+    credential_path = tmp_path / "google_oauth_client.json"
+    credential_path.write_text("{}", encoding="utf-8")
+    service = GoogleOAuthService(credential_path, tmp_path / "token.json")
+    writes = []
+    monkeypatch.setattr(service, "_write_token", lambda payload: writes.append(payload))
+    return service, writes
+
+
+def test_second_simultaneous_start_is_rejected(controlled_oauth):
+    service, _writes = controlled_oauth
+    service.start()
+    with pytest.raises(DriveError) as caught:
+        service.start()
+    assert caught.value.code == "DRIVE_AUTH_IN_PROGRESS"
+    _ControlledCallbackServer.instances[0].shutdown()
+
+
+def test_manual_and_auto_completion_race_exchanges_exactly_once(controlled_oauth):
+    service, writes = controlled_oauth
+    fetch_count = 0
+    fetch_lock = threading.Lock()
+    original_fetch = _FakeFlow.fetch_token
+
+    def counted_fetch(flow, code):
+        nonlocal fetch_count
+        with fetch_lock:
+            fetch_count += 1
+        return original_fetch(flow, code)
+
+    service.start()
+    attempt = service._attempt
+    attempt.flow.fetch_token = types.MethodType(counted_fetch, attempt.flow)
+    server = _ControlledCallbackServer.instances[0]
+    server.result = "auto-code"
+    manual_errors = []
+
+    def manual_complete():
+        try:
+            service.complete("manual-code")
+        except DriveError as exc:
+            manual_errors.append(exc.code)
+
+    thread = threading.Thread(target=manual_complete)
+    thread.start()
+    server.ready.set()
+    thread.join(timeout=5)
+    for _ in range(50):
+        if service.state == DriveAuthState.CONNECTED:
+            break
+        threading.Event().wait(0.02)
+
+    assert fetch_count == 1
+    assert len(writes) == 1
+    assert service.state == DriveAuthState.CONNECTED
+
+
+def test_stale_callback_cannot_consume_new_attempt(controlled_oauth):
+    service, _writes = controlled_oauth
+    service.start()
+    old_attempt = service._attempt
+    old_server = _ControlledCallbackServer.instances[0]
+    old_server.result = None
+    old_server.ready.set()
+    for _ in range(50):
+        if service._attempt is None:
+            break
+        threading.Event().wait(0.02)
+
+    service.start()
+    new_attempt = service._attempt
+    with pytest.raises(DriveError) as caught:
+        service._complete_attempt(old_attempt, "stale-code")
+    assert caught.value.code == "DRIVE_AUTH_FLOW_MISSING"
+    assert service._attempt is new_attempt
+    _ControlledCallbackServer.instances[1].shutdown()
+
+
+def test_failed_exchange_does_not_write_token(controlled_oauth):
+    service, writes = controlled_oauth
+    service.start()
+    attempt = service._attempt
+
+    def fail_fetch(code):
+        raise RuntimeError("test exchange failure")
+
+    attempt.flow.fetch_token = fail_fetch
+    with pytest.raises(DriveError) as caught:
+        service.complete("test-code")
+    assert caught.value.code == "DRIVE_AUTH_COMPLETE_FAILED"
+    assert writes == []
