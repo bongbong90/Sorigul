@@ -203,6 +203,15 @@ if ([string]::IsNullOrWhiteSpace($FfmpegSource) -or -not (Test-Path -LiteralPath
 $StagedFfmpeg = Join-Path $BinariesDir "ffmpeg.exe"
 Copy-Item -Force $FfmpegSource $StagedFfmpeg
 
+if (-not (Test-Path -LiteralPath $StagedExe -PathType Leaf)) {
+    Write-Error "Staged backend executable not found: $StagedExe"
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $StagedFfmpeg -PathType Leaf)) {
+    Write-Error "Staged ffmpeg executable not found: $StagedFfmpeg"
+    exit 1
+}
+
 function Write-FileReport($path, $label) {
     $item = Get-Item $path
     $hash = (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLower()
@@ -214,23 +223,66 @@ function Write-FileReport($path, $label) {
 Write-FileReport $StagedExe "sorigul-backend.exe"
 Write-FileReport $StagedFfmpeg "ffmpeg.exe"
 
-Write-Step "Running staged self-test (sorigul-backend.exe --self-test)"
-Push-Location $BinariesDir
-try {
-    & ".\sorigul-backend.exe" --self-test
-    $SelfTestExit = $LASTEXITCODE
-} finally {
-    Pop-Location
+$SelfTestLog = Join-Path `
+    $BinariesDir `
+    "sorigul-backend-selftest.log"
+if (Test-Path -LiteralPath $SelfTestLog) {
+    Remove-Item -LiteralPath $SelfTestLog -Force
 }
 
-$SelfTestLog = Join-Path $BinariesDir "sorigul-backend-selftest.log"
-if (Test-Path $SelfTestLog) {
-    Write-Host "--- self-test log ---"
-    Get-Content $SelfTestLog | Write-Host
+Write-Step "Running staged self-test (sorigul-backend.exe --self-test)"
+$SelfTestProcess = Start-Process `
+    -FilePath $StagedExe `
+    -ArgumentList "--self-test" `
+    -WorkingDirectory $BinariesDir `
+    -Wait `
+    -PassThru
+$SelfTestExit = $SelfTestProcess.ExitCode
+
+if (-not (Test-Path -LiteralPath $SelfTestLog -PathType Leaf)) {
+    Write-Error "PACKAGED_SELFTEST_LOG_MISSING" -ErrorAction Continue
+    exit 1
+}
+
+$SelfTestContent = [System.IO.File]::ReadAllText(
+    $SelfTestLog,
+    [System.Text.Encoding]::UTF8
+)
+Write-Host "--- self-test log ---"
+Write-Host $SelfTestContent
+
+$RequiredSelfTestChecks = @(
+    "fastapi_app_import",
+    "uvicorn_import",
+    "google_drive_runtime_import",
+    "whisper_import",
+    "torch_import",
+    "torch_cuda_build",
+    "torch_cuda_available",
+    "ffmpeg_availability",
+    "audio_metadata_service_import",
+    "runtime_path_initialization"
+)
+$SelfTestLines = @($SelfTestContent -split "\r?\n")
+$IncompleteSelfTestChecks = @(
+    foreach ($Check in $RequiredSelfTestChecks) {
+        $ExpectedLine = "[self-test] ${Check}: PASS"
+        $CheckPrefix = "[self-test] ${Check}:"
+        $MatchingLines = @($SelfTestLines | Where-Object { $_.StartsWith($CheckPrefix) })
+        if ($MatchingLines.Count -ne 1 -or $MatchingLines[0] -ne $ExpectedLine) {
+            $Check
+        }
+    }
+)
+if ($IncompleteSelfTestChecks.Count -ne 0) {
+    Write-Error (
+        "PACKAGED_SELFTEST_INCOMPLETE: {0}" -f ($IncompleteSelfTestChecks -join ", ")
+    ) -ErrorAction Continue
+    exit 1
 }
 
 if ($SelfTestExit -ne 0) {
-    Write-Error "Packaged backend self-test failed (exit $SelfTestExit). See log above."
+    Write-Error "Packaged backend self-test failed (exit $SelfTestExit)." -ErrorAction Continue
     exit $SelfTestExit
 }
 

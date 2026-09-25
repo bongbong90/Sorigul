@@ -135,6 +135,62 @@ def test_ffmpeg_resolver_uses_utf8_temp_result_without_stdout_capture():
     assert finally_position < result_cleanup_position
 
 
+def test_packaged_self_test_waits_for_gui_process_and_requires_complete_fresh_log():
+    repo_root = Path(__file__).resolve().parents[2]
+    build_script = (repo_root / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+    spec = (repo_root / "backend/packaging/sorigul_backend.spec").read_text(encoding="utf-8")
+
+    report_position = build_script.index('Write-FileReport $StagedFfmpeg "ffmpeg.exe"')
+    block_start = build_script.index("$SelfTestLog = Join-Path", report_position)
+    block_end = build_script.index('Write-Host "Sidecar build + self-test PASSED."', block_start)
+    self_test_block = build_script[block_start:block_end]
+
+    remove_log_position = self_test_block.index(
+        "Remove-Item -LiteralPath $SelfTestLog -Force"
+    )
+    start_process_position = self_test_block.index("$SelfTestProcess = Start-Process")
+    exit_code_position = self_test_block.index(
+        "$SelfTestExit = $SelfTestProcess.ExitCode"
+    )
+    log_guard_position = self_test_block.index(
+        "Test-Path -LiteralPath $SelfTestLog -PathType Leaf"
+    )
+    log_read_position = self_test_block.index("[System.IO.File]::ReadAllText(")
+    completeness_position = self_test_block.index("PACKAGED_SELFTEST_INCOMPLETE")
+    exit_gate_position = self_test_block.index("if ($SelfTestExit -ne 0)")
+
+    assert '& ".\\sorigul-backend.exe" --self-test' not in self_test_block
+    assert "$LASTEXITCODE" not in self_test_block
+    assert '-FilePath $StagedExe' in self_test_block
+    assert '-ArgumentList "--self-test"' in self_test_block
+    assert '-WorkingDirectory $BinariesDir' in self_test_block
+    assert "-Wait" in self_test_block
+    assert "-PassThru" in self_test_block
+    assert "PACKAGED_SELFTEST_LOG_MISSING" in self_test_block
+    assert "[System.Text.Encoding]::UTF8" in self_test_block
+    assert "    console=False," in spec
+
+    required_checks = (
+        "fastapi_app_import",
+        "uvicorn_import",
+        "google_drive_runtime_import",
+        "whisper_import",
+        "torch_import",
+        "torch_cuda_build",
+        "torch_cuda_available",
+        "ffmpeg_availability",
+        "audio_metadata_service_import",
+        "runtime_path_initialization",
+    )
+    for check in required_checks:
+        assert f'"{check}"' in self_test_block
+
+    assert report_position < block_start
+    assert remove_log_position < start_process_position < exit_code_position
+    assert exit_code_position < log_guard_position < log_read_position
+    assert log_read_position < completeness_position < exit_gate_position
+
+
 def test_cuda_contract_files_are_explicit():
     repo_root = Path(__file__).resolve().parents[2]
     requirement = (repo_root / "tools/requirements-torch-cuda.txt").read_text(encoding="utf-8")
