@@ -1,18 +1,21 @@
 from datetime import datetime, timezone, timedelta
 import json
+import time
 from pydantic import BaseModel, ConfigDict, field_validator
-from typing import Optional, Literal
+from typing import Callable, Optional, Literal
 
 from src.services.drive import DriveAuth
 from src.services.colab_url import normalize_colab_base_url, ColabUrlError
 from src.services.colab_security import PairingRegistry, pairing_registry
-from src.engines.colab import DirectColabHttpClient, EngineError
+from src.engines.colab import DirectColabHttpClient
 
 COLAB_RUNTIME_FOLDER = "Sorigul Runtime"
 COLAB_CONNECTION_FILENAME = "colab_connection.json"
 COLAB_SCHEMA_VERSION = 1
 COLAB_REQUEST_TTL_SECONDS = 600
 COLAB_READY_TTL_SECONDS = 3600
+COLAB_READINESS_TIMEOUT_SECONDS = 12.0
+COLAB_READINESS_POLL_INTERVAL_SECONDS = 0.5
 
 class ColabConnectionMetadata(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -60,9 +63,22 @@ def _validate_metadata_freshness(metadata: ColabConnectionMetadata, now: datetim
     return "VALID"
 
 class ColabRendezvousService:
-    def __init__(self, auth: DriveAuth, registry: PairingRegistry = pairing_registry):
+    def __init__(
+        self,
+        auth: DriveAuth,
+        registry: PairingRegistry = pairing_registry,
+        *,
+        readiness_timeout_seconds: float = COLAB_READINESS_TIMEOUT_SECONDS,
+        readiness_poll_interval_seconds: float = COLAB_READINESS_POLL_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.auth = auth
         self.registry = registry
+        self.readiness_timeout_seconds = readiness_timeout_seconds
+        self.readiness_poll_interval_seconds = readiness_poll_interval_seconds
+        self._clock = clock
+        self._sleep = sleep
         
     def start(self) -> RendezvousState:
         try:
@@ -149,16 +165,38 @@ class ColabRendezvousService:
         return RendezvousState(state="WAITING", request_id=request_id)
 
     def verify_url(self, url: str, request_id: str) -> RendezvousState:
+        session = self.registry.lookup(request_id)
+        if session is None:
+            return RendezvousState(state="PAIRING_REQUIRED", request_id=request_id)
+
         try:
             normalized = normalize_colab_base_url(url)
-            session = self.registry.lookup(request_id)
-            if session is None:
-                return RendezvousState(state="PAIRING_REQUIRED", request_id=request_id)
+        except ColabUrlError:
+            return RendezvousState(state="FAILED", request_id=request_id)
+
+        deadline = self._clock() + self.readiness_timeout_seconds
+        while True:
+            readiness = self.poll(request_id)
+            if readiness.state == "FOUND":
+                break
+            if readiness.state in {"AUTH_REQUIRED", "EXPIRED", "FAILED"}:
+                return RendezvousState(state=readiness.state, request_id=request_id)
+
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return RendezvousState(state="WAITING", request_id=request_id)
+            self._sleep(min(self.readiness_poll_interval_seconds, remaining))
+
+        session = self.registry.lookup(request_id)
+        if session is None:
+            return RendezvousState(state="PAIRING_REQUIRED", request_id=request_id)
+
+        try:
             client = DirectColabHttpClient(normalized, session)
             client.check_health()
             self.registry.bind(request_id, normalized)
             return RendezvousState(
                 state="CONNECTED", base_url=normalized, request_id=request_id
             )
-        except (ColabUrlError, EngineError, Exception):
+        except Exception:
             return RendezvousState(state="FAILED", request_id=request_id)

@@ -224,6 +224,7 @@ class _ControlledCallbackServer:
         self.port = 49152 + len(self.instances)
         self.result = None
         self.ready = threading.Event()
+        self.shutdown_calls = 0
         self.instances.append(self)
 
     @property
@@ -238,6 +239,7 @@ class _ControlledCallbackServer:
         return self.result
 
     def shutdown(self):
+        self.shutdown_calls += 1
         self.ready.set()
 
 
@@ -301,6 +303,20 @@ def test_manual_and_auto_completion_race_exchanges_exactly_once(controlled_oauth
     assert fetch_count == 1
     assert len(writes) == 1
     assert service.state == DriveAuthState.CONNECTED
+
+
+def test_manual_completion_shuts_down_only_its_callback_listener(controlled_oauth):
+    service, writes = controlled_oauth
+    service.start()
+    attempt = service._attempt
+    server = attempt.callback_server
+
+    result = service.complete("manual-code")
+
+    assert result == DriveAuthState.CONNECTED
+    assert writes
+    assert server.shutdown_calls == 1
+    assert server.ready.is_set()
 
 
 def test_stale_callback_cannot_consume_new_attempt(controlled_oauth):

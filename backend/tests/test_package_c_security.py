@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ from src.engines.colab import DirectColabHttpClient
 from src.services.colab_rendezvous import ColabRendezvousService
 from src.services.colab_security import EMPTY_SHA256, PairingRegistry, parse_request_id
 from src.services.colab_url import ColabUrlError, normalize_colab_base_url
-from src.services.drive import write_private_file
+from src.services.drive import DriveError, GoogleOAuthService, write_private_file
 
 
 class FakeDriveClient:
@@ -182,3 +181,129 @@ def test_private_file_acl_failure_never_publishes_and_cleans_temp(tmp_path):
         write_private_file(target, "test-token", platform_name="nt", run=run)
     assert not target.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+class _ValidCredentials:
+    expired = False
+    refresh_token = None
+    valid = True
+
+
+def _patch_valid_existing_token_loader(monkeypatch, events):
+    def load(path, scopes):
+        events.append(("load", Path(path), list(scopes)))
+        return _ValidCredentials()
+
+    monkeypatch.setattr(
+        "google.oauth2.credentials.Credentials.from_authorized_user_file", load
+    )
+    monkeypatch.setattr(
+        "src.services.drive.build_authorized_http", lambda _credentials: object()
+    )
+    monkeypatch.setattr(
+        "googleapiclient.discovery.build", lambda *_args, **_kwargs: object()
+    )
+
+
+def test_existing_posix_token_is_chmodded_before_credential_load(tmp_path, monkeypatch):
+    token_path = tmp_path / "legacy-token.json"
+    token_path.write_text('{"legacy":true}', encoding="utf-8")
+    token_path.chmod(0o644)
+    events = []
+    original_chmod = os.chmod
+
+    def chmod(path, mode):
+        events.append(("chmod", Path(path), mode))
+        original_chmod(path, mode)
+
+    monkeypatch.setattr(os, "chmod", chmod)
+    _patch_valid_existing_token_loader(monkeypatch, events)
+
+    GoogleOAuthService(
+        tmp_path / "client.json", token_path, platform_name="posix"
+    ).ensure_client()
+
+    assert [event[0] for event in events] == ["chmod", "load"]
+    assert events[0][1:] == (token_path, 0o600)
+
+
+def test_existing_windows_token_acl_precedes_credential_load(tmp_path, monkeypatch):
+    token_path = tmp_path / "legacy-token.json"
+    token_path.write_text('{"legacy":true}', encoding="utf-8")
+    events = []
+
+    def run(args, **kwargs):
+        events.append((args[0], list(args), dict(kwargs)))
+        if args[0] == "whoami.exe":
+            return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
+        return SimpleNamespace(stdout="")
+
+    _patch_valid_existing_token_loader(monkeypatch, events)
+
+    GoogleOAuthService(
+        tmp_path / "client.json",
+        token_path,
+        platform_name="nt",
+        permission_run=run,
+    ).ensure_client()
+
+    assert [event[0] for event in events] == ["whoami.exe", "icacls.exe", "load"]
+    assert events[1][1] == [
+        "icacls.exe",
+        str(token_path),
+        "/inheritance:r",
+        "/grant:r",
+        "*S-1-5-21-123:(F)",
+    ]
+    assert events[1][2]["shell"] is False
+
+
+def test_existing_token_permission_failure_preserves_file_and_blocks_parser(tmp_path, monkeypatch):
+    token_path = tmp_path / "legacy-token.json"
+    original = '{"legacy":"must-remain"}'
+    token_path.write_text(original, encoding="utf-8")
+    events = []
+
+    def run(args, **_kwargs):
+        events.append(args[0])
+        if args[0] == "whoami.exe":
+            return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
+        raise subprocess.CalledProcessError(5, args)
+
+    _patch_valid_existing_token_loader(monkeypatch, events)
+    service = GoogleOAuthService(
+        tmp_path / "client.json",
+        token_path,
+        platform_name="nt",
+        permission_run=run,
+    )
+
+    with pytest.raises(DriveError) as caught:
+        service.ensure_client()
+
+    assert caught.value.code == "DRIVE_TOKEN_PERMISSIONS_FAILED"
+    assert caught.value.user_message == (
+        "Google Drive 인증 정보의 보안 권한을 설정하지 못했습니다. 다시 연결해 주세요."
+    )
+    assert events == ["whoami.exe", "icacls.exe"]
+    assert token_path.exists()
+    assert token_path.read_text(encoding="utf-8") == original
+
+
+def test_existing_private_token_permission_enforcement_is_idempotent(tmp_path, monkeypatch):
+    token_path = tmp_path / "private-token.json"
+    token_path.write_text('{"private":true}', encoding="utf-8")
+    token_path.chmod(0o600)
+    events = []
+    chmod_calls = []
+    monkeypatch.setattr(os, "chmod", lambda path, mode: chmod_calls.append((Path(path), mode)))
+    _patch_valid_existing_token_loader(monkeypatch, events)
+    service = GoogleOAuthService(
+        tmp_path / "client.json", token_path, platform_name="posix"
+    )
+
+    service.ensure_client()
+    service.ensure_client()
+
+    assert chmod_calls == [(token_path, 0o600), (token_path, 0o600)]
+    assert [event[0] for event in events] == ["load", "load"]

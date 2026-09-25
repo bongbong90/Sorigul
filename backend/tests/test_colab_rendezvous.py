@@ -41,6 +41,18 @@ class FakeAuth:
             raise Exception("Auth Error")
         return self.client
 
+
+def set_rendezvous_metadata(client, request_id, status="READY", url="https://drive-metadata.example.test"):
+    now = datetime.now(timezone.utc)
+    client.files["fake_file_id"] = json.dumps({
+        "schema_version": COLAB_SCHEMA_VERSION,
+        "request_id": request_id,
+        "url": url if status == "READY" else "",
+        "status": status,
+        "updated_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=3600)).isoformat(),
+    })
+
 def test_start_success():
     client = FakeDriveClient()
     auth = FakeAuth(client)
@@ -215,6 +227,7 @@ def test_health_verify(monkeypatch):
 
     monkeypatch.setattr('src.engines.colab.DirectColabHttpClient.check_health', lambda self: None)
     request_id = service.registry.create().request_id
+    set_rendezvous_metadata(client, request_id)
     res = service.verify_url("https://example.trycloudflare.com", request_id)
     assert res.state == "CONNECTED"
     assert res.base_url == "https://example.trycloudflare.com"
@@ -227,6 +240,7 @@ def test_health_verify_failure(monkeypatch):
     def fail(self): raise Exception('failed')
     monkeypatch.setattr('src.engines.colab.DirectColabHttpClient.check_health', fail)
     request_id = service.registry.create().request_id
+    set_rendezvous_metadata(client, request_id)
     res = service.verify_url("https://example.trycloudflare.com", request_id)
     assert res.state == "FAILED"
 
@@ -293,10 +307,162 @@ def test_real_health_verifier(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
     request_id = service.registry.create().request_id
+    set_rendezvous_metadata(client, request_id)
     res = service.verify_url("https://example.trycloudflare.com/health", request_id)
     assert res.state == "CONNECTED"
     assert res.base_url == "https://example.trycloudflare.com"
     assert called_url == "https://example.trycloudflare.com/health"
+
+
+class FakeClock:
+    def __init__(self):
+        self.value = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.value
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.value += seconds
+
+
+class SequencedDriveClient(FakeDriveClient):
+    def __init__(self, request_id, statuses):
+        super().__init__()
+        self.request_id = request_id
+        self.statuses = list(statuses)
+        self.read_count = 0
+        self.files["fake_file_id"] = "sequence-placeholder"
+
+    def read_text_file(self, file_id):
+        status = self.statuses[min(self.read_count, len(self.statuses) - 1)]
+        self.read_count += 1
+        now = datetime.now(timezone.utc)
+        return json.dumps({
+            "schema_version": COLAB_SCHEMA_VERSION,
+            "request_id": self.request_id,
+            "url": "https://drive-metadata.example.test" if status == "READY" else "",
+            "status": status,
+            "updated_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=3600)).isoformat(),
+        })
+
+
+def test_manual_verify_waits_for_ready_and_uses_manual_target(monkeypatch):
+    registry = PairingRegistry()
+    request_id = registry.create().request_id
+    drive = SequencedDriveClient(request_id, ["REQUESTED", "REQUESTED", "READY"])
+    clock = FakeClock()
+    health_calls = []
+
+    def check_health(http_client):
+        health_calls.append((http_client.base_url, drive.read_count))
+
+    monkeypatch.setattr('src.engines.colab.DirectColabHttpClient.check_health', check_health)
+    service = ColabRendezvousService(
+        FakeAuth(drive),
+        registry,
+        readiness_timeout_seconds=12.0,
+        readiness_poll_interval_seconds=0.5,
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    result = service.verify_url("https://manual-target.example.test", request_id)
+
+    assert result.state == "CONNECTED"
+    assert result.base_url == "https://manual-target.example.test"
+    assert health_calls == [("https://manual-target.example.test", 3)]
+    assert clock.sleeps == [0.5, 0.5]
+
+
+@pytest.mark.parametrize("status", ["EXPIRED", "FAILED"])
+def test_manual_verify_propagates_terminal_readiness(status, monkeypatch):
+    registry = PairingRegistry()
+    request_id = registry.create().request_id
+    drive = SequencedDriveClient(request_id, [status])
+    if status == "EXPIRED":
+        expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+        drive.read_text_file = lambda _file_id: json.dumps({
+            "schema_version": COLAB_SCHEMA_VERSION,
+            "request_id": request_id,
+            "url": "",
+            "status": "REQUESTED",
+            "updated_at": (expired - timedelta(seconds=10)).isoformat(),
+            "expires_at": expired.isoformat(),
+        })
+    health_calls = []
+    monkeypatch.setattr(
+        'src.engines.colab.DirectColabHttpClient.check_health',
+        lambda self: health_calls.append(self.base_url),
+    )
+
+    result = ColabRendezvousService(FakeAuth(drive), registry).verify_url(
+        "https://manual-target.example.test", request_id
+    )
+
+    assert result.state == status
+    assert health_calls == []
+
+
+def test_manual_verify_propagates_auth_required_without_health(monkeypatch):
+    registry = PairingRegistry()
+    request_id = registry.create().request_id
+    health_calls = []
+    monkeypatch.setattr(
+        'src.engines.colab.DirectColabHttpClient.check_health',
+        lambda self: health_calls.append(self.base_url),
+    )
+
+    result = ColabRendezvousService(FakeAuth(), registry).verify_url(
+        "https://manual-target.example.test", request_id
+    )
+
+    assert result.state == "AUTH_REQUIRED"
+    assert health_calls == []
+
+
+def test_manual_verify_timeout_is_bounded_without_real_sleep(monkeypatch):
+    registry = PairingRegistry()
+    request_id = registry.create().request_id
+    drive = SequencedDriveClient(request_id, ["REQUESTED"])
+    clock = FakeClock()
+    health_calls = []
+    monkeypatch.setattr(
+        'src.engines.colab.DirectColabHttpClient.check_health',
+        lambda self: health_calls.append(self.base_url),
+    )
+    service = ColabRendezvousService(
+        FakeAuth(drive),
+        registry,
+        readiness_timeout_seconds=1.0,
+        readiness_poll_interval_seconds=0.25,
+        clock=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    result = service.verify_url("https://manual-target.example.test", request_id)
+
+    assert result.state == "WAITING"
+    assert clock.value == 1.0
+    assert clock.sleeps == [0.25, 0.25, 0.25, 0.25]
+    assert health_calls == []
+
+
+def test_manual_verify_without_memory_signer_requires_pairing(monkeypatch):
+    health_calls = []
+    monkeypatch.setattr(
+        'src.engines.colab.DirectColabHttpClient.check_health',
+        lambda self: health_calls.append(self.base_url),
+    )
+
+    result = ColabRendezvousService(FakeAuth(), PairingRegistry()).verify_url(
+        "https://manual-target.example.test", "missing-request"
+    )
+
+    assert result.state == "PAIRING_REQUIRED"
+    assert health_calls == []
 
 def test_artifact_roundtrip():
     import sys

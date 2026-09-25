@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { api } from '../../api/client'
 import type { RendezvousState } from '../../api/client'
 import { AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
@@ -18,6 +18,8 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const [manualUrl, setManualUrl] = useState('')
   const [verifying, setVerifying] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
+  const [manualModeActive, setManualModeActive] = useState(false)
+  const manualModeRef = useRef(false)
 
   useEffect(() => {
     if (engine === 'local_whisper') {
@@ -25,13 +27,16 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       setColabState('WAITING')
       setVerifying(false)
       setErrorMsg('')
+      setManualModeActive(false)
+      manualModeRef.current = false
     }
   }, [engine])
 
   useEffect(() => {
     let timer: number
-    if (engine === 'direct_colab' && requestId && (colabState === 'WAITING' || colabState === 'FOUND')) {
+    if (engine === 'direct_colab' && requestId && !manualModeActive && !verifying && (colabState === 'WAITING' || colabState === 'FOUND')) {
       timer = window.setInterval(async () => {
+        if (manualModeRef.current) return
         try {
           const res = await api.pollColabRendezvous(requestId)
           if (res.state === 'FOUND' && res.base_url) {
@@ -67,12 +72,14 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       }, 3000)
     }
     return () => clearInterval(timer)
-  }, [engine, requestId, colabState, onBaseUrlChange])
+  }, [engine, requestId, colabState, manualModeActive, verifying, onBaseUrlChange])
 
   const handleStartRendezvous = async () => {
     try {
       setColabState('WAITING')
       setErrorMsg('')
+      setManualModeActive(false)
+      manualModeRef.current = false
       onBaseUrlChange(null)
       const res = await api.startColabRendezvous()
       if (res.state === 'WAITING' && res.request_id) {
@@ -91,11 +98,13 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const handleManualVerify = async () => {
     if (!manualUrl) return
     try {
+      setManualModeActive(true)
+      manualModeRef.current = true
       setVerifying(true)
       setErrorMsg('')
       onBaseUrlChange(null)
       let pairingRequestId = requestId
-      if (!pairingRequestId) {
+      if (!pairingRequestId || ['EXPIRED', 'FAILED', 'PAIRING_REQUIRED'].includes(colabState)) {
         const started = await api.startColabRendezvous()
         if (started.state !== 'WAITING' || !started.request_id) {
           setColabState(started.state)
@@ -108,14 +117,19 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
         }
         pairingRequestId = started.request_id
         setRequestId(pairingRequestId)
+        setColabState('WAITING')
       }
       const res = await api.verifyColabUrl(manualUrl, pairingRequestId)
       if (res.state === 'CONNECTED' && res.base_url) {
         setColabState('CONNECTED')
         onBaseUrlChange(res.base_url)
       } else {
-        setColabState('FAILED')
-        setErrorMsg('연결 확인에 실패했습니다.')
+        setColabState(res.state)
+        if (res.state === 'WAITING') setErrorMsg('Colab 런타임의 보안 연결 준비를 기다리고 있습니다. 다시 확인해 주세요.')
+        else if (res.state === 'AUTH_REQUIRED') setErrorMsg('Google Drive 연결이 필요합니다.')
+        else if (res.state === 'EXPIRED') setErrorMsg('연결 대기 시간이 만료되었습니다. 다시 확인해 주세요.')
+        else if (res.state === 'PAIRING_REQUIRED') setErrorMsg('보안 연결 정보가 만료되었습니다. 다시 확인해 주세요.')
+        else setErrorMsg('연결 확인에 실패했습니다.')
       }
     } catch (err: any) {
       setColabState('FAILED')

@@ -423,6 +423,7 @@ class LoopbackCallbackServer:
         return self._outcome.code
 
     def shutdown(self) -> None:
+        self._outcome.event.set()
         try:
             self._httpd.server_close()
         except OSError:
@@ -452,6 +453,40 @@ def _resolve_current_windows_sid(run=None) -> str:
     if len(rows) != 1 or len(rows[0]) < 2 or not rows[0][1].startswith("S-"):
         raise OSError("Could not resolve the current Windows user SID")
     return rows[0][1]
+
+
+def enforce_private_file_permissions(
+    path: Path,
+    *,
+    platform_name: Optional[str] = None,
+    run=None,
+) -> None:
+    """Enforce private permissions on an existing file without rewriting it."""
+    platform_name = os.name if platform_name is None else platform_name
+    try:
+        if platform_name == "nt":
+            runner = run or subprocess.run
+            sid = _resolve_current_windows_sid(runner)
+            runner(
+                [
+                    "icacls.exe",
+                    str(path),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"*{sid}:(F)",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=False,
+            )
+        else:
+            os.chmod(path, 0o600)
+    except Exception as exc:
+        raise DriveError(
+            "DRIVE_TOKEN_PERMISSIONS_FAILED",
+            "Google Drive 인증 정보의 보안 권한을 설정하지 못했습니다. 다시 연결해 주세요.",
+        ) from exc
 
 
 def write_private_file(
@@ -505,9 +540,18 @@ def write_private_file(
 
 
 class GoogleOAuthService:
-    def __init__(self, credential_path: Path, token_path: Path):
+    def __init__(
+        self,
+        credential_path: Path,
+        token_path: Path,
+        *,
+        platform_name: Optional[str] = None,
+        permission_run=None,
+    ):
         self.credential_path = credential_path
         self.token_path = token_path
+        self._platform_name = platform_name
+        self._permission_run = permission_run
         self._state = DriveAuthState.UNAUTHENTICATED
         self._attempt: Optional[OAuthAttempt] = None
         self._attempt_lock = threading.RLock()
@@ -520,6 +564,15 @@ class GoogleOAuthService:
         if not self.token_path.exists():
             self._state = DriveAuthState.UNAUTHENTICATED
             raise DriveError("DRIVE_AUTH_REQUIRED", "Google Drive 연결이 필요합니다.")
+        try:
+            enforce_private_file_permissions(
+                self.token_path,
+                platform_name=self._platform_name,
+                run=self._permission_run,
+            )
+        except DriveError:
+            self._state = DriveAuthState.REAUTH_REQUIRED
+            raise
         try:
             from google.auth.transport.requests import Request
             from google.oauth2.credentials import Credentials
@@ -644,6 +697,7 @@ class GoogleOAuthService:
                 raise DriveError("DRIVE_AUTH_FLOW_MISSING", "진행 중인 Google Drive 인증이 없습니다.")
             attempt.completing = True
         try:
+            attempt.callback_server.shutdown()
             attempt.flow.fetch_token(code=code)
             self._write_token(attempt.flow.credentials.to_json())
         except Exception as exc:
