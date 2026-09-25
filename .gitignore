@@ -40,3 +40,4 @@ token*.json
 *.exe
 *.msi
 *.wixpdb
+frontend/src-tauri/binaries/sorigul-build-manifest.json

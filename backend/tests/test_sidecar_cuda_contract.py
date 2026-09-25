@@ -119,9 +119,7 @@ def test_ffmpeg_resolver_uses_utf8_temp_result_without_stdout_capture():
     execute_position = resolver.index("& $VenvPython $FfmpegResolverPath")
     read_position = resolver.index("[System.IO.File]::ReadAllText(")
     finally_position = resolver.index("} finally {", execute_position)
-    env_cleanup_position = resolver.index(
-        "$FfmpegResultEnvironmentVariable,\n        $null,", finally_position
-    )
+    env_cleanup_position = resolver.index("$null,", finally_position)
     script_cleanup_position = resolver.index(
         "Remove-Item -LiteralPath $FfmpegResolverPath -Force", finally_position
     )
@@ -135,13 +133,12 @@ def test_ffmpeg_resolver_uses_utf8_temp_result_without_stdout_capture():
     assert finally_position < result_cleanup_position
 
 
-def test_packaged_self_test_waits_for_gui_process_and_requires_complete_fresh_log():
+def test_packaged_self_test_uses_bounded_watchdog_and_complete_fresh_log():
     repo_root = Path(__file__).resolve().parents[2]
     build_script = (repo_root / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
     spec = (repo_root / "backend/packaging/sorigul_backend.spec").read_text(encoding="utf-8")
 
-    report_position = build_script.index('Write-FileReport $StagedFfmpeg "ffmpeg.exe"')
-    block_start = build_script.index("$SelfTestLog = Join-Path", report_position)
+    block_start = build_script.index("$SelfTestLog = Join-Path")
     block_end = build_script.index('Write-Host "Sidecar build + self-test PASSED."', block_start)
     self_test_block = build_script[block_start:block_end]
 
@@ -149,6 +146,8 @@ def test_packaged_self_test_waits_for_gui_process_and_requires_complete_fresh_lo
         "Remove-Item -LiteralPath $SelfTestLog -Force"
     )
     start_process_position = self_test_block.index("$SelfTestProcess = Start-Process")
+    deadline_position = self_test_block.index("$SelfTestDeadline")
+    timeout_position = self_test_block.index("PACKAGED_SELFTEST_TIMEOUT")
     exit_code_position = self_test_block.index(
         "$SelfTestExit = $SelfTestProcess.ExitCode"
     )
@@ -160,12 +159,15 @@ def test_packaged_self_test_waits_for_gui_process_and_requires_complete_fresh_lo
     exit_gate_position = self_test_block.index("if ($SelfTestExit -ne 0)")
 
     assert '& ".\\sorigul-backend.exe" --self-test' not in self_test_block
-    assert "$LASTEXITCODE" not in self_test_block
-    assert '-FilePath $StagedExe' in self_test_block
+    assert "$SelfTestExit = $LASTEXITCODE" not in self_test_block
+    assert '-FilePath $CandidateExe' in self_test_block
     assert '-ArgumentList "--self-test"' in self_test_block
-    assert '-WorkingDirectory $BinariesDir' in self_test_block
-    assert "-Wait" in self_test_block
+    assert '-WorkingDirectory $CandidateDir' in self_test_block
+    assert "-Wait" not in self_test_block
     assert "-PassThru" in self_test_block
+    assert "$SelfTestTimeoutSeconds = 300" in build_script
+    assert "taskkill.exe /PID $SelfTestProcess.Id /T /F" in self_test_block
+    assert "PACKAGED_SELFTEST_TIMEOUT_CLEANUP_FAILED" in self_test_block
     assert "PACKAGED_SELFTEST_LOG_MISSING" in self_test_block
     assert "[System.Text.Encoding]::UTF8" in self_test_block
     assert "    console=False," in spec
@@ -178,15 +180,16 @@ def test_packaged_self_test_waits_for_gui_process_and_requires_complete_fresh_lo
         "torch_import",
         "torch_cuda_build",
         "torch_cuda_available",
-        "ffmpeg_availability",
+        "torch_cuda_compute",
+        "bundled_ffmpeg_execution",
         "audio_metadata_service_import",
         "runtime_path_initialization",
     )
     for check in required_checks:
         assert f'"{check}"' in self_test_block
 
-    assert report_position < block_start
     assert remove_log_position < start_process_position < exit_code_position
+    assert start_process_position < deadline_position < timeout_position
     assert exit_code_position < log_guard_position < log_read_position
     assert log_read_position < completeness_position < exit_gate_position
 
