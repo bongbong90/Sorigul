@@ -140,12 +140,63 @@ Write-Step "Staging sorigul-backend.exe -> $StagedExe"
 Copy-Item -Force $BuiltExe $StagedExe
 
 Write-Step "Staging bundled ffmpeg (via imageio-ffmpeg)"
-$FfmpegSourceScript = @"
+$FfmpegResolverScript = @'
+import os
+from pathlib import Path
+
 import imageio_ffmpeg
-print(imageio_ffmpeg.get_ffmpeg_exe())
-"@
-$FfmpegSource = (& $VenvPython -c $FfmpegSourceScript).Trim()
-if (-not (Test-Path $FfmpegSource)) {
+
+
+result_path = Path(os.environ["SORIGUL_FFMPEG_RESOLVER_RESULT"])
+result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
+'@
+$FfmpegResolverId = [guid]::NewGuid().ToString("N")
+$FfmpegResolverPath = Join-Path `
+    $env:TEMP `
+    "Sorigul_FfmpegResolver_$FfmpegResolverId.py"
+$FfmpegResultPath = Join-Path `
+    $env:TEMP `
+    "Sorigul_FfmpegResolver_$FfmpegResolverId.txt"
+$FfmpegResultEnvironmentVariable = "SORIGUL_FFMPEG_RESOLVER_RESULT"
+$FfmpegResolverExit = $null
+$FfmpegSource = $null
+try {
+    [System.Environment]::SetEnvironmentVariable(
+        $FfmpegResultEnvironmentVariable,
+        $FfmpegResultPath,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    [System.IO.File]::WriteAllText(
+        $FfmpegResolverPath,
+        $FfmpegResolverScript,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    & $VenvPython $FfmpegResolverPath
+    $FfmpegResolverExit = $LASTEXITCODE
+    if ($FfmpegResolverExit -eq 0 -and (Test-Path -LiteralPath $FfmpegResultPath -PathType Leaf)) {
+        $FfmpegSource = [System.IO.File]::ReadAllText(
+            $FfmpegResultPath,
+            [System.Text.Encoding]::UTF8
+        ).Trim()
+    }
+} finally {
+    [System.Environment]::SetEnvironmentVariable(
+        $FfmpegResultEnvironmentVariable,
+        $null,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    if (Test-Path -LiteralPath $FfmpegResolverPath) {
+        Remove-Item -LiteralPath $FfmpegResolverPath -Force
+    }
+    if (Test-Path -LiteralPath $FfmpegResultPath) {
+        Remove-Item -LiteralPath $FfmpegResultPath -Force
+    }
+}
+if ($FfmpegResolverExit -ne 0) {
+    Write-Error "imageio-ffmpeg resolver failed (exit $FfmpegResolverExit)."
+    exit $FfmpegResolverExit
+}
+if ([string]::IsNullOrWhiteSpace($FfmpegSource) -or -not (Test-Path -LiteralPath $FfmpegSource -PathType Leaf)) {
     Write-Error "imageio-ffmpeg did not resolve a usable ffmpeg executable (got '$FfmpegSource')."
     exit 1
 }

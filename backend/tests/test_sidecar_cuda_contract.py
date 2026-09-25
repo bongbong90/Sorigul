@@ -96,6 +96,45 @@ def test_cuda_preflight_uses_unique_temp_python_file_with_finally_cleanup():
     assert "$CudaPreflightExit -eq 42" in build_script
 
 
+def test_ffmpeg_resolver_uses_utf8_temp_result_without_stdout_capture():
+    repo_root = Path(__file__).resolve().parents[2]
+    build_script = (repo_root / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+
+    resolver_start = build_script.index('$FfmpegResolverScript = @\'')
+    resolver_end = build_script.index('$StagedFfmpeg = Join-Path', resolver_start)
+    resolver = build_script[resolver_start:resolver_end]
+
+    assert "(& $VenvPython -c" not in resolver
+    assert "print(imageio_ffmpeg.get_ffmpeg_exe())" not in resolver
+    assert '$FfmpegResolverId = [guid]::NewGuid().ToString("N")' in resolver
+    assert '"Sorigul_FfmpegResolver_$FfmpegResolverId.py"' in resolver
+    assert '"Sorigul_FfmpegResolver_$FfmpegResolverId.txt"' in resolver
+    assert 'os.environ["SORIGUL_FFMPEG_RESOLVER_RESULT"]' in resolver
+    assert 'encoding="utf-8"' in resolver
+    assert "[System.IO.File]::ReadAllText(" in resolver
+    assert "[System.Text.Encoding]::UTF8" in resolver
+    assert "Test-Path -LiteralPath $FfmpegResultPath -PathType Leaf" in resolver
+    assert "Test-Path -LiteralPath $FfmpegSource -PathType Leaf" in resolver
+
+    execute_position = resolver.index("& $VenvPython $FfmpegResolverPath")
+    read_position = resolver.index("[System.IO.File]::ReadAllText(")
+    finally_position = resolver.index("} finally {", execute_position)
+    env_cleanup_position = resolver.index(
+        "$FfmpegResultEnvironmentVariable,\n        $null,", finally_position
+    )
+    script_cleanup_position = resolver.index(
+        "Remove-Item -LiteralPath $FfmpegResolverPath -Force", finally_position
+    )
+    result_cleanup_position = resolver.index(
+        "Remove-Item -LiteralPath $FfmpegResultPath -Force", finally_position
+    )
+
+    assert execute_position < read_position < finally_position
+    assert finally_position < env_cleanup_position
+    assert finally_position < script_cleanup_position
+    assert finally_position < result_cleanup_position
+
+
 def test_cuda_contract_files_are_explicit():
     repo_root = Path(__file__).resolve().parents[2]
     requirement = (repo_root / "tools/requirements-torch-cuda.txt").read_text(encoding="utf-8")
