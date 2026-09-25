@@ -468,8 +468,8 @@ def test_state_transitions_are_persisted_before_done(tmp_path):
     observed = []
     original_mutate = manager.mutate_job
 
-    def recording_mutate(job_id, mutation):
-        result = original_mutate(job_id, mutation)
+    def recording_mutate(job_id, mutation, **kwargs):
+        result = original_mutate(job_id, mutation, **kwargs)
         if result:
             observed.append(result.files["A"])
         return result

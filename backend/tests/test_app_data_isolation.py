@@ -85,10 +85,23 @@ def test_test_root_is_owned_temp_and_differs_from_originals(isolated_app_data_ro
             assert not _is_under(root, original)
 
 
-def test_routes_import_used_by_tests_is_isolated(isolated_app_data_root):
-    import src.api.routes as routes
+def test_routes_import_under_session_environment_is_isolated(isolated_app_data_root, monkeypatch):
+    # A fresh import under the unmodified session environment -- exactly
+    # what any test's first routes import sees. (The already-imported module
+    # cannot be inspected reliably: some tests reassign its singletons.)
+    import src.api as api_package
 
-    _assert_routes_singletons_under(routes, Path(isolated_app_data_root) / "Sorigul")
+    monkeypatch.delitem(sys.modules, ROUTES, raising=False)
+    monkeypatch.delattr(api_package, "routes", raising=False)
+
+    routes = importlib.import_module(ROUTES)
+
+    expected_root = (
+        Path(isolated_app_data_root) / "Sorigul"
+        if os.name == "nt"
+        else Path(isolated_app_data_root) / ".config" / "Sorigul"
+    )
+    _assert_routes_singletons_under(routes, expected_root)
 
 
 def test_fresh_routes_import_resolves_under_temporary_localappdata(tmp_path, monkeypatch):

@@ -4,7 +4,7 @@ import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from pydantic import ValidationError
 from src.domain.models import FileMetadata, JobModel, FileStatus, JobEvent
 
@@ -199,12 +199,23 @@ class JobManager:
                     self.jobs[job.job_id] = previous
                 raise
 
-    def mutate_job(self, job_id: str, mutation) -> Optional[JobModel]:
+    def mutate_job(
+        self,
+        job_id: str,
+        mutation,
+        after_persist: Optional[Callable[[], None]] = None,
+    ) -> Optional[JobModel]:
         """Apply a mutation and persist it while holding the process lock.
 
         If the mutation raises or persisting fails, the in-memory Job is
         restored, so memory never claims a state jobs.json does not hold; the
-        error (e.g. JobStorageError) propagates.
+        error (e.g. JobStorageError) propagates and ``after_persist`` never runs.
+
+        ``after_persist`` runs only once jobs.json holds the new state, still
+        under this lock, so no other Job mutation can interleave between the
+        persisted state and its side effect. It must be a non-failing,
+        in-memory synchronization action only (e.g. ``threading.Event.set``)
+        -- never I/O, network, filesystem work or an arbitrary user callback.
         """
         with self._lock:
             job = self.jobs.get(job_id)
@@ -218,4 +229,6 @@ class JobManager:
             except BaseException:
                 self.jobs[job_id] = snapshot
                 raise
+            if after_persist is not None:
+                after_persist()
             return job.model_copy(deep=True)

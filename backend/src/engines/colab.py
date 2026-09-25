@@ -31,6 +31,7 @@ FFMPEG_SPLIT_TIMEOUT_SECONDS = 300
 FFMPEG_POLL_INTERVAL_SECONDS = 0.2
 # How long to wait for an ffmpeg child to be reaped after terminate/kill.
 FFMPEG_REAP_TIMEOUT_SECONDS = 10
+FFMPEG_PROCESS_CLEANUP_FAILED = "FFMPEG_PROCESS_CLEANUP_FAILED"
 # Only the tail of ffmpeg's stderr is kept for diagnosis.
 FFMPEG_STDERR_LIMIT_BYTES = 16 * 1024
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -47,19 +48,37 @@ def _audio_split_timeout_error(detail: str) -> EngineError:
     )
 
 
+def _process_cleanup_failed_error(detail: str) -> EngineError:
+    # Fatal: a child that may still be running must stop the batch, and it
+    # takes precedence over the timeout or Stop/Cancel that triggered cleanup.
+    return EngineError(
+        FFMPEG_PROCESS_CLEANUP_FAILED,
+        ErrorCategory.RUNTIME,
+        "Colab 오디오 준비 프로세스를 안전하게 종료하지 못했습니다.",
+        technical_detail=detail,
+        fatal=True,
+    )
+
+
 def _reap(process) -> None:
     """Terminates this exact child (never anything found by name) and waits
-    for it, escalating to kill if terminate is not enough."""
-    for stop in (process.terminate, process.kill):
+    for it, escalating to kill if terminate is not enough. Returns only once
+    the child was waited on; otherwise raises FFMPEG_PROCESS_CLEANUP_FAILED --
+    it never falls through silently."""
+    steps = []
+    for name, stop in (("terminate", process.terminate), ("kill", process.kill)):
         try:
             stop()
-        except OSError:
-            pass
+            steps.append(f"{name}=ok")
+        except OSError as exc:
+            steps.append(f"{name}=error:{exc}")
         try:
             process.wait(timeout=FFMPEG_REAP_TIMEOUT_SECONDS)
             return
         except subprocess.TimeoutExpired:
-            continue
+            steps.append(f"wait-after-{name}=timeout({FFMPEG_REAP_TIMEOUT_SECONDS}s)")
+    pid = getattr(process, "pid", None)
+    raise _process_cleanup_failed_error(f"ffmpeg pid={pid} not reaped: {'; '.join(steps)}")
 
 
 def run_ffmpeg(
@@ -74,7 +93,8 @@ def run_ffmpeg(
     """Runs one ffmpeg invocation with a hard deadline, honouring Stop/Cancel
     while it runs. On timeout or Stop/Cancel the exact child is terminated
     and reaped before AUDIO_SPLIT_TIMEOUT / StopRequested / CancelRequested
-    propagates. Returns the exit code; raises AUDIO_SPLIT_FAILED on nonzero.
+    propagates; if it cannot be reaped, FFMPEG_PROCESS_CLEANUP_FAILED is
+    raised instead. Returns the exit code; raises AUDIO_SPLIT_FAILED on nonzero.
     """
     popen = popen or subprocess.Popen
     with tempfile.TemporaryFile() as stderr_file:
@@ -86,27 +106,29 @@ def run_ffmpeg(
             creationflags=_CREATE_NO_WINDOW,
         )
         deadline = clock() + timeout_seconds
-        finished = False
+        # False once the child exited on its own or a reap was attempted, so
+        # the safety net below never reaps twice or masks a reap failure.
+        needs_reap = True
         try:
             while True:
                 try:
                     returncode = process.wait(timeout=poll_interval_seconds)
-                    finished = True
+                    needs_reap = False
                     break
                 except subprocess.TimeoutExpired:
                     pass
                 if token is not None and (token.is_cancel_requested or token.is_stop_requested):
-                    _reap(process)
-                    finished = True
+                    needs_reap = False
+                    _reap(process)  # a reap failure wins over Stop/Cancel
                     token.raise_if_requested()
                 if clock() >= deadline:
-                    _reap(process)
-                    finished = True
+                    needs_reap = False
+                    _reap(process)  # a reap failure wins over the timeout
                     raise _audio_split_timeout_error(
                         f"ffmpeg exceeded {timeout_seconds}s: {_stderr_tail(stderr_file)}"
                     )
         finally:
-            if not finished:
+            if needs_reap:
                 _reap(process)
         if returncode != 0:
             raise EngineError(
@@ -537,7 +559,10 @@ class DirectColabEngine:
             self.cache.clear(source_path)
             return result
         except EngineError as exc:
-            token.raise_if_requested()
+            # A child that could not be reaped must never be reported as a
+            # clean Stop/Cancel.
+            if exc.code != FFMPEG_PROCESS_CLEANUP_FAILED:
+                token.raise_if_requested()
             if not exc.retryable:
                 self.cache.clear(source_path)
             raise

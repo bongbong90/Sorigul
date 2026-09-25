@@ -568,16 +568,19 @@ def test_ffmpeg_splitter_known_duration_logic(tmp_path, monkeypatch):
 class FakeProcess:
     """Stands in for one exact ffmpeg child. Never launches anything."""
 
-    def __init__(self, command, kwargs, returncode=0, hang=False, on_wait=None):
+    def __init__(self, command, kwargs, returncode=0, hang=False, on_wait=None, unreapable=False):
         self.command = command
         self.kwargs = kwargs
         self.returncode = returncode
         self.hang = hang
         self.on_wait = on_wait
+        self.unreapable = unreapable
+        self.pid = 4242
         self.wait_calls = 0
         self.terminated = False
         self.killed = False
         self.reaped = False
+        self.waits_after_stop = []
 
     def wait(self, timeout=None):
         import subprocess
@@ -585,6 +588,10 @@ class FakeProcess:
         self.wait_calls += 1
         if self.on_wait is not None:
             self.on_wait(self)
+        if self.terminated or self.killed:
+            self.waits_after_stop.append("kill" if self.killed else "terminate")
+            if self.unreapable:
+                raise subprocess.TimeoutExpired(self.command, timeout)
         if self.hang and not (self.terminated or self.killed):
             raise subprocess.TimeoutExpired(self.command, timeout)
         if self.terminated or self.killed:
@@ -600,12 +607,13 @@ class FakeProcess:
 
 
 class FakePopen:
-    def __init__(self, on_start=None, returncode=0, hang=False, stderr=b"", on_wait=None):
+    def __init__(self, on_start=None, returncode=0, hang=False, stderr=b"", on_wait=None, unreapable=False):
         self.on_start = on_start
         self.returncode = returncode
         self.hang = hang
         self.stderr = stderr
         self.on_wait = on_wait
+        self.unreapable = unreapable
         self.commands = []
         self.processes = []
 
@@ -616,7 +624,9 @@ class FakePopen:
             kwargs["stderr"].write(self.stderr)
         if self.on_start is not None:
             self.on_start(command)
-        process = FakeProcess(command, kwargs, self.returncode, self.hang, self.on_wait)
+        process = FakeProcess(
+            command, kwargs, self.returncode, self.hang, self.on_wait, self.unreapable
+        )
         self.processes.append(process)
         return process
 
@@ -717,6 +727,128 @@ def test_ffmpeg_stop_or_cancel_kills_exact_child_reaps_and_cleans_up(split_sourc
     assert process.terminated and process.reaped
     assert len(popen.processes) == 1
     assert not _temp_dir_of(popen).exists()
+
+
+def test_reap_failure_is_explicit_after_terminate_and_kill():
+    from src.engines.colab import FFMPEG_PROCESS_CLEANUP_FAILED, _reap
+
+    process = FakeProcess(["ffmpeg"], {}, hang=True, unreapable=True)
+
+    with pytest.raises(EngineError) as caught:
+        _reap(process)
+
+    assert process.terminated and process.killed
+    assert process.waits_after_stop == ["terminate", "kill"], "both waits must be attempted"
+    assert process.reaped is False
+    assert caught.value.code == FFMPEG_PROCESS_CLEANUP_FAILED
+    assert caught.value.category == ErrorCategory.RUNTIME
+    assert caught.value.fatal is True
+    assert caught.value.user_message == "Colab 오디오 준비 프로세스를 안전하게 종료하지 못했습니다."
+    assert "wait-after-kill=timeout" in caught.value.technical_detail
+
+
+def test_ffmpeg_timeout_with_unreapable_child_reports_cleanup_failure(split_source):
+    from src.engines.colab import FFMPEG_PROCESS_CLEANUP_FAILED, FFmpegAudioSplitter
+
+    popen = FakePopen(hang=True, unreapable=True)
+    splitter = FFmpegAudioSplitter(
+        timeout_seconds=300,
+        popen=popen,
+        clock=SteppingClock(step=100),
+        poll_interval_seconds=0,
+    )
+
+    with pytest.raises(EngineError) as caught:
+        splitter.split(split_source, 300, CancellationToken())
+
+    assert caught.value.code == FFMPEG_PROCESS_CLEANUP_FAILED, "must not be masked as AUDIO_SPLIT_TIMEOUT"
+    assert caught.value.fatal is True
+    process = popen.processes[0]
+    assert process.terminated and process.killed
+    assert process.waits_after_stop == ["terminate", "kill"]
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["stop", "cancel"])
+def test_ffmpeg_stop_or_cancel_with_unreapable_child_reports_cleanup_failure(split_source, cancel):
+    from src.engines.colab import FFMPEG_PROCESS_CLEANUP_FAILED, FFmpegAudioSplitter
+
+    token = CancellationToken()
+
+    def request_while_running(process):
+        if process.wait_calls == 1:
+            token.request_cancel() if cancel else token.request_stop()
+
+    popen = FakePopen(hang=True, unreapable=True, on_wait=request_while_running)
+    splitter = FFmpegAudioSplitter(popen=popen, poll_interval_seconds=0)
+
+    with pytest.raises(EngineError) as caught:
+        splitter.split(split_source, 300, token)
+
+    assert caught.value.code == FFMPEG_PROCESS_CLEANUP_FAILED
+    process = popen.processes[0]
+    assert process.terminated and process.killed
+    assert process.waits_after_stop == ["terminate", "kill"]
+
+
+class CleanupFailingSplitter(FakeSplitter):
+    def __init__(self, root, token, cancel):
+        super().__init__(root, [0])
+        self.token = token
+        self.cancel = cancel
+
+    def split(self, source_path, chunk_seconds, token=None):
+        from src.engines.colab import _process_cleanup_failed_error
+
+        self.token.request_cancel() if self.cancel else self.token.request_stop()
+        raise _process_cleanup_failed_error("ffmpeg pid=4242 not reaped")
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["stop", "cancel"])
+def test_engine_does_not_turn_cleanup_failure_into_stop_or_cancel(tmp_path, cancel):
+    from src.engines.colab import FFMPEG_PROCESS_CLEANUP_FAILED
+
+    source = tmp_path / "lecture.mp3"
+    source.write_bytes(b"source")
+    token = CancellationToken()
+    engine = DirectColabEngine(
+        FakeClient([]),
+        CleanupFailingSplitter(tmp_path, token, cancel),
+        ColabRecoveryCache(tmp_path / "cache"),
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(EngineError) as caught:
+        engine.transcribe(source, token, lambda *_: None, lambda _: None)
+    assert caught.value.code == FFMPEG_PROCESS_CLEANUP_FAILED
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["stop", "cancel"])
+def test_runner_never_reports_stopped_or_cancelled_when_cleanup_failed(tmp_path, cancel):
+    folder = tmp_path / "sources"
+    folder.mkdir()
+    for name in ("A", "B"):
+        (folder / f"{name}.mp3").write_bytes(b"source")
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"], engine="direct_colab")
+    token = CancellationToken()
+    engine = DirectColabEngine(
+        FakeClient([]),
+        CleanupFailingSplitter(tmp_path, token, cancel),
+        ColabRecoveryCache(tmp_path / "cache"),
+        retry_delay_seconds=0,
+    )
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, token)
+
+    finished = manager.get_job(job.job_id)
+    assert finished.status == FileStatus.FAILED
+    assert finished.files["A"] == FileStatus.FAILED
+    assert FileStatus.STOPPED not in finished.files.values()
+    assert FileStatus.CANCELLED not in finished.files.values()
+    assert finished.batch_completed is False
+    job_events = [e.message for e in finished.events if e.category == "Job" and e.message.startswith("Job ")]
+    assert job_events == ["Job 실패"]
+    assert not (folder / "A.txt").exists()
 
 
 def test_colab_engine_passes_token_to_splitter(tmp_path):

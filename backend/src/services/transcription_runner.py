@@ -16,6 +16,7 @@ from src.domain.transcription import (
     TranscriptionEngine,
 )
 from src.engines.colab import (
+    FFMPEG_PROCESS_CLEANUP_FAILED,
     ColabRecoveryCache,
     DirectColabEngine,
     DirectColabHttpClient,
@@ -127,6 +128,7 @@ class TranscriptionRunner:
             return
         self._event(job_id, "info", "Job", "전사 시작")
         fatal_error = False
+        process_cleanup_failed = False
 
         for file_id, initial_status in list(job.files.items()):
             if initial_status != FileStatus.WAITING:
@@ -258,6 +260,8 @@ class TranscriptionRunner:
                 break
             except EngineError as exc:
                 self._file_failed(job_id, file_id, item.filename, exc)
+                if exc.code == FFMPEG_PROCESS_CLEANUP_FAILED:
+                    process_cleanup_failed = True
                 if exc.fatal:
                     fatal_error = True
                     break
@@ -279,7 +283,7 @@ class TranscriptionRunner:
                 if observes_colab_speed:
                     self._update_colab_eta(job_id, colab_observations, scanned)
 
-        self._finalize(job_id, token, fatal_error)
+        self._finalize(job_id, token, fatal_error, process_cleanup_failed)
 
     def _clear_eta(self, job_id: str):
         self.job_manager.mutate_job(job_id, lambda job: setattr(job, "eta_seconds", None))
@@ -520,9 +524,9 @@ class TranscriptionRunner:
             )
             self._update_counts(job)
             self._append_terminal_event(job)
-            token.mark_finished()
 
-        self.job_manager.mutate_job(job_id, mutation)
+        # Finished only once the terminal state is persisted (same lock hold).
+        self.job_manager.mutate_job(job_id, mutation, after_persist=token.mark_finished)
 
     def _acknowledge_cancel(self, job_id: str, file_id: str, filename: str):
         def mutation(job: JobModel):
@@ -547,10 +551,21 @@ class TranscriptionRunner:
 
         self.job_manager.mutate_job(job_id, mutation)
 
-    def _finalize(self, job_id: str, token: CancellationToken, fatal_error: bool):
+    def _finalize(
+        self,
+        job_id: str,
+        token: CancellationToken,
+        fatal_error: bool,
+        process_cleanup_failed: bool = False,
+    ):
         def mutation(job: JobModel):
             self._update_counts(job)
-            if token.is_cancel_requested or job.status == FileStatus.CANCEL_REQUESTED:
+            if process_cleanup_failed:
+                # A child process may still be alive: never report the run
+                # as cleanly STOPPED/CANCELLED, even if one was requested.
+                job.status = FileStatus.FAILED
+                job.batch_completed = False
+            elif token.is_cancel_requested or job.status == FileStatus.CANCEL_REQUESTED:
                 for file_id, state in job.files.items():
                     if state in {FileStatus.WAITING, FileStatus.CANCEL_REQUESTED}:
                         job.files[file_id] = FileStatus.CANCELLED
@@ -573,11 +588,12 @@ class TranscriptionRunner:
             job.eta_seconds = None
             self._update_counts(job)
             self._append_terminal_event(job)
-            # Persisted together with the terminal state (same lock): from
-            # here on no new Stop/Cancel can be acknowledged by this run.
-            token.mark_finished()
 
-        self.job_manager.mutate_job(job_id, mutation)
+        # mark_finished runs only after the terminal state is persisted, and
+        # before the JobManager lock is released: from then on no new
+        # Stop/Cancel can be acknowledged by this run. If persisting fails,
+        # the token stays unfinished.
+        self.job_manager.mutate_job(job_id, mutation, after_persist=token.mark_finished)
         finished = self.job_manager.get_job(job_id)
         if finished is not None and self.job_finished_callback is not None:
             self.job_finished_callback(finished)
@@ -654,20 +670,32 @@ class BackgroundExecutionService:
             token = self._tokens.get(job_id)
             if token is None or token.is_finished:
                 return False
+            eligible = False
             accepted = False
 
             def mutation(job: JobModel):
-                nonlocal accepted
+                nonlocal eligible
                 # Checked under the JobManager lock, the same lock the
-                # runner's terminal mutation holds while finishing the token.
+                # runner holds while persisting its terminal state and
+                # marking the token finished.
                 if token.is_finished:
                     return
-                signal(token)
-                accepted = True
+                eligible = True
                 if on_accepted is not None:
                     on_accepted(job)
 
-            self.runner.job_manager.mutate_job(job_id, mutation)
+            def signal_after_persist():
+                # Runs only once the request's Job state/event is persisted,
+                # still under the JobManager lock. If persisting fails the
+                # token is left untouched and the request is not acknowledged.
+                nonlocal accepted
+                if eligible:
+                    signal(token)
+                    accepted = True
+
+            self.runner.job_manager.mutate_job(
+                job_id, mutation, after_persist=signal_after_persist
+            )
             return accepted
 
     def run_if_not_started(

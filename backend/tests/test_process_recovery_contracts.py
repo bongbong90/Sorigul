@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from src.domain.models import DriveAuthState, DriveStatus, FileStatus
+from src.domain.models import DriveAuthState, DriveStatus, FileStatus, JobEvent
 from src.domain.transcription import CancellationToken, TranscriptionResult
 from src.engines.local_whisper import LocalWhisperEngine
 from src.services.desktop_state import ApplicationEventStore, DesktopCoordinator
@@ -382,6 +382,134 @@ def test_request_after_terminal_persisted_is_not_acknowledged(tmp_path):
     assert service.request_stop(job.job_id) is False
     assert service.request_cancel(job.job_id) is False
     assert manager.get_job(job.job_id).status == FileStatus.DONE
+
+
+# -- Persistence-atomic token side effects (B-R3) -----------------------------------
+
+
+def active_job_with_registered_run(tmp_path):
+    folder = make_folder(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"])
+    job.status = FileStatus.TRANSCRIBING
+    job.files["A"] = FileStatus.TRANSCRIBING
+    manager.update_job(job)
+    runner = TranscriptionRunner(manager, lambda _job: ImmediateEngine())
+    service = BackgroundExecutionService(runner)
+    token = CancellationToken()
+    service._tokens[job.job_id] = token  # an active, not yet finished run
+    return manager, runner, service, token, job.job_id
+
+
+def fail_next_saves(manager, monkeypatch):
+    def failing_save():
+        raise JobStorageError("JOB_STORAGE_WRITE_FAILED", "injected save failure")
+
+    monkeypatch.setattr(manager, "_save_jobs_unlocked", failing_save)
+
+
+def assert_job_unchanged(manager, job_id, before):
+    after = manager.get_job(job_id)
+    assert after.status == before.status
+    assert after.files == before.files
+    assert [e.message for e in after.events] == [e.message for e in before.events]
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["stop", "cancel"])
+def test_request_save_failure_leaves_token_and_job_unchanged(tmp_path, monkeypatch, cancel):
+    manager, _, service, token, job_id = active_job_with_registered_run(tmp_path)
+    before = manager.get_job(job_id)
+
+    def record(job):
+        job.status = FileStatus.CANCEL_REQUESTED if cancel else job.status
+        job.events.append(JobEvent(level="warning", category="Test", message="요청 기록"))
+
+    fail_next_saves(manager, monkeypatch)
+    request = service.request_cancel if cancel else service.request_stop
+    with pytest.raises(JobStorageError):
+        request(job_id, on_accepted=record)
+
+    assert_job_unchanged(manager, job_id, before)
+    assert token.is_stop_requested is False
+    assert token.is_cancel_requested is False
+    assert token.is_finished is False
+
+
+@pytest.mark.parametrize("action", ["stop", "cancel"])
+def test_route_never_reports_acknowledgement_when_request_save_fails(
+    tmp_path, monkeypatch, routes, action
+):
+    manager, _, service, token, job_id = active_job_with_registered_run(tmp_path)
+    monkeypatch.setattr(routes, "job_manager", manager)
+    monkeypatch.setattr(routes, "execution_service", service)
+    before = manager.get_job(job_id)
+    fail_next_saves(manager, monkeypatch)
+
+    with pytest.raises(JobStorageError):
+        routes.job_action(job_id, routes.JobActionRequest(action=action))
+
+    assert_job_unchanged(manager, job_id, before)
+    assert not token.is_stop_requested and not token.is_cancel_requested
+
+
+def test_finalize_save_failure_leaves_token_unfinished(tmp_path, monkeypatch):
+    manager, runner, service, token, job_id = active_job_with_registered_run(tmp_path)
+    before = manager.get_job(job_id)
+    fail_next_saves(manager, monkeypatch)
+
+    with pytest.raises(JobStorageError):
+        runner._finalize(job_id, token, fatal_error=False)
+
+    assert_job_unchanged(manager, job_id, before)
+    assert token.is_finished is False
+
+
+def test_fatal_finalize_save_failure_leaves_token_unfinished(tmp_path, monkeypatch):
+    from src.domain.transcription import EngineError, ErrorCategory
+
+    manager, runner, service, token, job_id = active_job_with_registered_run(tmp_path)
+    before = manager.get_job(job_id)
+    fail_next_saves(manager, monkeypatch)
+
+    with pytest.raises(JobStorageError):
+        runner._finish_fatal(
+            job_id, token, EngineError("X", ErrorCategory.RUNTIME, "치명적 오류", fatal=True)
+        )
+
+    assert_job_unchanged(manager, job_id, before)
+    assert token.is_finished is False
+
+
+@pytest.mark.parametrize("fatal", [False, True], ids=["finalize", "fatal-finalize"])
+def test_terminal_persist_then_finished_then_requests_refused(tmp_path, fatal):
+    from src.domain.transcription import EngineError, ErrorCategory
+
+    manager, runner, service, token, job_id = active_job_with_registered_run(tmp_path)
+    finished_at_persist = []
+    real_save = manager._save_jobs_unlocked
+
+    def observing_save():
+        real_save()
+        finished_at_persist.append(token.is_finished)
+
+    manager._save_jobs_unlocked = observing_save
+    if fatal:
+        runner._finish_fatal(job_id, token, EngineError("X", ErrorCategory.RUNTIME, "치명적", fatal=True))
+        expected_status, expected_event = FileStatus.FAILED, "Job 실패"
+    else:
+        token.request_stop()  # an already-acknowledged stop being finalized
+        runner._finalize(job_id, token, fatal_error=False)
+        expected_status, expected_event = FileStatus.STOPPED, "Job 중지됨"
+
+    assert finished_at_persist == [False], "finished is set only after the save completed"
+    assert token.is_finished is True
+    persisted = json.loads(manager.storage_path.read_text(encoding="utf-8"))[job_id]
+    assert persisted["status"] == expected_status.value
+    assert persisted["events"][-1]["message"] == expected_event
+    assert service.request_stop(job_id) is False
+    assert service.request_cancel(job_id) is False
+    assert token.is_cancel_requested is False
+    assert token.is_stop_requested is (not fatal)
 
 
 # -- Drive: isolation from the transcription worker (AUD-DRV-001) ----------------
