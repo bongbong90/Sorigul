@@ -173,6 +173,7 @@ def test_packaged_self_test_uses_bounded_watchdog_and_complete_fresh_log():
     assert "    console=False," in spec
 
     required_checks = (
+        "self_test_app_data_isolation",
         "fastapi_app_import",
         "uvicorn_import",
         "google_drive_runtime_import",
