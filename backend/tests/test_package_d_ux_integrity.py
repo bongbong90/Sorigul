@@ -248,3 +248,45 @@ def test_sidecar_status_uses_snapshot_plus_structured_event():
     assert "await listen<SidecarStatus>" in native
     assert "get_sidecar_status" in native
     assert "Backend 시작 실패" in shell
+
+
+def test_colab_verify_timeout_requires_explicit_recheck_without_duplicate_post():
+    component = (ROOT / "frontend/src/components/transcription/EngineSection.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "const [connectionUncertain, setConnectionUncertain] = useState(false)" in component
+    assert "!manualModeActive && !connectionUncertain && !startingRendezvous" in component
+    assert "setConnectionUncertain(true)" in component
+    assert "연결 결과 확인 필요" in component
+    assert "colabState === 'WAITING' && !connectionUncertain" in component
+    assert "setStartingRendezvous(true)" in component
+    assert "setStartingRendezvous(false)" in component
+
+    automatic_error_handler = component.split("} catch (error) {", 1)[1].split(
+        "} finally", 1
+    )[0]
+    automatic_timeout_handler = automatic_error_handler.split(
+        "if (isRequestTimeout(error)) {", 1
+    )[1].split("} else {", 1)[0]
+    assert "setColabState('WAITING')" in automatic_timeout_handler
+    assert "setConnectionUncertain(true)" in automatic_timeout_handler
+    assert "setColabState('FAILED')" not in automatic_timeout_handler
+    assert "api.verifyColabUrl" not in automatic_timeout_handler
+
+    explicit_start = component.split("const handleStartRendezvous", 1)[1].split(
+        "const handleManualVerify", 1
+    )[0]
+    assert "setConnectionUncertain(false)" in explicit_start
+    assert "setRequestId(null)" in explicit_start
+    assert "api.startColabRendezvous(controller.signal)" in explicit_start
+    assert "setRequestId(res.request_id)" in explicit_start
+
+    connected_handler = component.split("verifyRes.state === 'CONNECTED'", 1)[1].split(
+        "} else", 1
+    )[0]
+    assert "setConnectionUncertain(false)" in connected_handler
+
+    local_reset = component.split("if (engine === 'local_whisper')", 1)[1].split(
+        "return () =>", 1
+    )[0]
+    assert "setConnectionUncertain(false)" in local_reset

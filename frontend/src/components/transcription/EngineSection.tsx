@@ -20,18 +20,22 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const [verifying, setVerifying] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [manualModeActive, setManualModeActive] = useState(false)
+  const [connectionUncertain, setConnectionUncertain] = useState(false)
+  const [startingRendezvous, setStartingRendezvous] = useState(false)
   const manualModeRef = useRef(false)
   const operationControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     operationControllerRef.current?.abort()
     operationControllerRef.current = null
+    setStartingRendezvous(false)
     if (engine === 'local_whisper') {
       setRequestId(null)
       setColabState('WAITING')
       setVerifying(false)
       setErrorMsg('')
       setManualModeActive(false)
+      setConnectionUncertain(false)
       manualModeRef.current = false
     }
     return () => {
@@ -44,7 +48,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
     let active = true
     let timer: number | undefined
     let controller: AbortController | undefined
-    if (engine === 'direct_colab' && requestId && !manualModeActive) {
+    if (engine === 'direct_colab' && requestId && !manualModeActive && !connectionUncertain && !startingRendezvous) {
       const schedule = () => {
         if (active && !manualModeRef.current) timer = window.setTimeout(() => void poll(), 3000)
       }
@@ -62,6 +66,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
               if (!active || manualModeRef.current) return
               if (verifyRes.state === 'CONNECTED' && verifyRes.base_url) {
                 setColabState('CONNECTED')
+                setConnectionUncertain(false)
                 onBaseUrlChange(verifyRes.base_url)
                 setErrorMsg('')
               } else {
@@ -72,9 +77,11 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
               if (!active || isRequestAbort(error)) return
               if (isRequestTimeout(error)) {
                 setColabState('WAITING')
+                setConnectionUncertain(true)
                 setErrorMsg(getUserMessage(error))
               } else {
                 setColabState('FAILED')
+                setConnectionUncertain(false)
                 setErrorMsg(getUserMessage(error))
               }
             } finally {
@@ -82,6 +89,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
             }
           } else if (res.state !== 'WAITING') {
             setColabState(res.state)
+            setConnectionUncertain(false)
             if (res.state === 'AUTH_REQUIRED') setErrorMsg('Google Drive 인증이 필요합니다.')
             else if (res.state === 'EXPIRED') setErrorMsg('연결 대기 시간이 만료되었습니다.')
             else if (res.state === 'FAILED') setErrorMsg('Colab 연결에 실패했습니다.')
@@ -99,14 +107,17 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       if (timer !== undefined) window.clearTimeout(timer)
       controller?.abort()
     }
-  }, [engine, requestId, manualModeActive, onBaseUrlChange])
+  }, [engine, requestId, manualModeActive, connectionUncertain, startingRendezvous, onBaseUrlChange])
 
   const handleStartRendezvous = async () => {
     const controller = new AbortController()
     operationControllerRef.current?.abort()
     operationControllerRef.current = controller
+    setStartingRendezvous(true)
+    setConnectionUncertain(false)
     try {
       setColabState('WAITING')
+      setRequestId(null)
       setErrorMsg('')
       setManualModeActive(false)
       manualModeRef.current = false
@@ -114,15 +125,26 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       const res = await api.startColabRendezvous(controller.signal)
       if (res.state === 'WAITING' && res.request_id) {
         setRequestId(res.request_id)
+        setConnectionUncertain(false)
       } else {
         setColabState(res.state)
+        setConnectionUncertain(false)
         if (res.state === 'AUTH_REQUIRED') setErrorMsg('Google Drive 인증이 필요합니다.')
         else setErrorMsg('연결 시작에 실패했습니다.')
       }
     } catch (error) {
       if (isRequestAbort(error)) return
-      if (!isRequestTimeout(error)) setColabState('FAILED')
+      if (isRequestTimeout(error)) setConnectionUncertain(true)
+      else {
+        setColabState('FAILED')
+        setConnectionUncertain(false)
+      }
       setErrorMsg(getUserMessage(error))
+    } finally {
+      if (operationControllerRef.current === controller) {
+        operationControllerRef.current = null
+        setStartingRendezvous(false)
+      }
     }
   }
 
@@ -134,6 +156,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
     try {
       setManualModeActive(true)
       manualModeRef.current = true
+      setConnectionUncertain(false)
       setVerifying(true)
       setErrorMsg('')
       onBaseUrlChange(null)
@@ -142,6 +165,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
         const started = await api.startColabRendezvous(controller.signal)
         if (started.state !== 'WAITING' || !started.request_id) {
           setColabState(started.state)
+          setConnectionUncertain(false)
           setErrorMsg(
             started.state === 'AUTH_REQUIRED'
               ? 'Google Drive 인증이 필요합니다.'
@@ -156,9 +180,11 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       const res = await api.verifyColabUrl(manualUrl, pairingRequestId, controller.signal)
       if (res.state === 'CONNECTED' && res.base_url) {
         setColabState('CONNECTED')
+        setConnectionUncertain(false)
         onBaseUrlChange(res.base_url)
       } else {
         setColabState(res.state)
+        if (res.state !== 'WAITING') setConnectionUncertain(false)
         if (res.state === 'WAITING') setErrorMsg('Colab 런타임의 보안 연결 준비를 기다리고 있습니다. 다시 확인해 주세요.')
         else if (res.state === 'AUTH_REQUIRED') setErrorMsg('Google Drive 연결이 필요합니다.')
         else if (res.state === 'EXPIRED') setErrorMsg('연결 대기 시간이 만료되었습니다. 다시 확인해 주세요.')
@@ -167,7 +193,11 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       }
     } catch (error) {
       if (isRequestAbort(error)) return
-      if (!isRequestTimeout(error)) setColabState('FAILED')
+      if (isRequestTimeout(error)) setConnectionUncertain(true)
+      else {
+        setColabState('FAILED')
+        setConnectionUncertain(false)
+      }
       setErrorMsg(getUserMessage(error))
     } finally {
       if (operationControllerRef.current === controller) {
@@ -226,6 +256,10 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
                 <span className="engine-state engine-state-connected">
                   <CheckCircle className="engine-icon-small" aria-hidden="true" /> 연결됨
                 </span>
+              ) : connectionUncertain ? (
+                <span className="engine-state engine-state-waiting">
+                  <AlertTriangle className="engine-icon-small" aria-hidden="true" /> 연결 결과 확인 필요
+                </span>
               ) : verifying || (requestId && colabState === 'FOUND') ? (
                 <span className="engine-state engine-state-verifying">
                   <Loader2 className="engine-icon-small engine-spinner" aria-hidden="true" /> 연결 확인 중...
@@ -241,7 +275,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
             
             <Button
               onClick={handleStartRendezvous}
-              disabled={disabled || verifying || (requestId !== null && colabState === 'WAITING')}
+              disabled={disabled || verifying || startingRendezvous || (requestId !== null && colabState === 'WAITING' && !connectionUncertain)}
             >
               Colab 연결
             </Button>
@@ -273,12 +307,12 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
                   onChange={e => setManualUrl(e.target.value)}
                   placeholder="https://xxxxx.trycloudflare.com"
                   className="input engine-manual-input"
-                  disabled={disabled || verifying}
+                  disabled={disabled || verifying || startingRendezvous}
                 />
                 <Button
                   variant="secondary"
                   onClick={handleManualVerify}
-                  disabled={disabled || verifying || !manualUrl}
+                  disabled={disabled || verifying || startingRendezvous || !manualUrl}
                 >
                   확인
                 </Button>

@@ -187,7 +187,9 @@ export class ApiError extends Error implements ApiErrorShape {
 export const REQUEST_TIMEOUT_MS = {
   FAST_LOCAL: 5_000,
   STANDARD_LOCAL: 30_000,
-  // Backend Drive I/O is bounded at 60s and Colab readiness at 12s.
+  // Individual Drive HTTP requests are bounded at 60s; some backend Drive
+  // workflows have longer overall deadlines. Colab's 12s readiness loop budget
+  // excludes the latency of its underlying Drive operations.
   LONG_EXTERNAL_BRIDGE: 90_000,
 } as const
 
