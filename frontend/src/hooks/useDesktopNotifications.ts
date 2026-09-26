@@ -25,6 +25,8 @@ export function useDesktopNotifications(): void {
   useEffect(() => {
     if (!isTauri()) return
     let active = true
+    let timer: number | undefined
+    let controller: AbortController | undefined
 
     async function ensurePermission(): Promise<boolean> {
       if (permissionGranted.current) return true
@@ -38,9 +40,11 @@ export function useDesktopNotifications(): void {
 
     async function poll() {
       let events: StructuredEvent[]
+      controller = new AbortController()
       try {
-        events = await api.events()
+        events = await api.events(controller.signal)
       } catch {
+        if (active) timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
         return
       }
       if (!active) return
@@ -49,23 +53,27 @@ export function useDesktopNotifications(): void {
       if (!initialized.current) {
         for (const event of relevant) seen.current.add(eventKey(event))
         initialized.current = true
+        if (active) timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
         return
       }
 
       const unseen = relevant.filter((event) => !seen.current.has(eventKey(event)))
-      if (unseen.length === 0) return
-      const granted = await ensurePermission()
-      for (const event of unseen) {
-        seen.current.add(eventKey(event))
-        if (granted) sendNotification({ title: 'Sorigul', body: event.message })
+      if (unseen.length > 0) {
+        const granted = await ensurePermission()
+        if (!active) return
+        for (const event of unseen) {
+          seen.current.add(eventKey(event))
+          if (granted) sendNotification({ title: 'Sorigul', body: event.message })
+        }
       }
+      if (active) timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS)
     }
 
     void poll()
-    const timer = window.setInterval(() => void poll(), POLL_INTERVAL_MS)
     return () => {
       active = false
-      window.clearInterval(timer)
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
     }
   }, [])
 }

@@ -18,24 +18,29 @@ export function useCloseBehaviorSync(): void {
     if (!isTauri()) return
     let active = true
     let synced = false
+    let timer: number | undefined
+    let controller: AbortController | undefined
 
     async function sync() {
       if (synced) return
+      controller = new AbortController()
       try {
-        const settings = await api.settings()
+        const settings = await api.settings(controller.signal)
         if (!active) return
         synced = true
         await invoke('set_close_behavior', { behavior: settings.close_behavior })
       } catch {
         // Backend not ready yet; retry on the next tick.
+      } finally {
+        if (active && !synced) timer = window.setTimeout(() => void sync(), RETRY_INTERVAL_MS)
       }
     }
 
     void sync()
-    const timer = window.setInterval(() => void sync(), RETRY_INTERVAL_MS)
     return () => {
       active = false
-      window.clearInterval(timer)
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
     }
   }, [])
 }

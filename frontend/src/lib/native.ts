@@ -1,8 +1,38 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
 export { isTauri }
+
+export interface SidecarStatus {
+  state: 'STARTING' | 'CONNECTED' | 'STARTUP_FAILED'
+  owned: boolean | null
+  code: string | null
+  message: string | null
+}
+
+/** Subscribe first, then read the latest snapshot so startup events cannot be lost. */
+export async function watchSidecarStatus(
+  onStatus: (status: SidecarStatus) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {}
+  const unlisten = await listen<SidecarStatus>('sorigul://sidecar-status', (event) => {
+    onStatus(event.payload)
+  })
+  try {
+    onStatus(await invoke<SidecarStatus>('get_sidecar_status'))
+  } catch (error) {
+    unlisten()
+    throw error
+  }
+  return unlisten
+}
+
+export async function retrySidecarStartup(): Promise<void> {
+  if (!isTauri()) return
+  await invoke('retry_sidecar_startup')
+}
 
 /**
  * Native Windows folder picker when running under Tauri; falls back to a

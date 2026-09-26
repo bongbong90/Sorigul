@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class CloseBehavior(str, Enum):
@@ -70,6 +70,21 @@ class SettingsPatch(BaseModel):
     subject_stage_overrides: Optional[StageOverrides] = None
     drive_exam_root: Optional[str] = None
 
+    @field_validator(
+        "notifications",
+        "close_behavior",
+        "shutdown",
+        "last_engine",
+        "subject_stage_overrides",
+        "drive_exam_root",
+        mode="before",
+    )
+    @classmethod
+    def reject_explicit_null_for_required_settings(cls, value):
+        if value is None:
+            raise ValueError("이 설정은 null일 수 없습니다.")
+        return value
+
 
 class SettingsManager:
     def __init__(self, storage_path: Path):
@@ -81,9 +96,10 @@ class SettingsManager:
 
     def update(self, patch: SettingsPatch) -> RuntimeSettings:
         payload = self._settings.model_dump(mode="json")
-        payload.update(patch.model_dump(mode="json", exclude_none=True))
-        self._settings = RuntimeSettings.model_validate(payload)
-        self._save()
+        payload.update(patch.model_dump(mode="json", exclude_unset=True))
+        candidate = RuntimeSettings.model_validate(payload)
+        self._save(candidate)
+        self._settings = candidate
         return self.get()
 
     def _load(self) -> RuntimeSettings:
@@ -96,11 +112,12 @@ class SettingsManager:
             self._quarantine()
             return RuntimeSettings()
 
-    def _save(self):
+    def _save(self, settings: Optional[RuntimeSettings] = None):
+        value = settings or self._settings
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{uuid.uuid4().hex}.tmp")
         temp_path.write_text(
-            json.dumps(self._settings.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            json.dumps(value.model_dump(mode="json"), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         temp_path.replace(self.storage_path)

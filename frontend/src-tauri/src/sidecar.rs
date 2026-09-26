@@ -320,6 +320,15 @@ pub enum SidecarStatus {
     StartupFailed(String),
 }
 
+pub fn startup_failure_code_from_exit_code(exit_code: Option<i32>) -> &'static str {
+    match exit_code {
+        Some(20) => "JOB_STORAGE_READ_FAILED",
+        Some(21) => "JOB_STORAGE_QUARANTINE_FAILED",
+        Some(22) => "JOB_STORAGE_WRITE_FAILED",
+        _ => "BACKEND_EXITED_DURING_STARTUP",
+    }
+}
+
 #[derive(Debug)]
 pub struct SpawnSpec {
     pub program: String,
@@ -502,9 +511,9 @@ impl SidecarManager {
             if self.is_owned() {
                 if let Some(owned_process) = self.process.lock().unwrap().as_mut() {
                     if let Ok(Some(status)) = owned_process.child.try_wait() {
-                        return SidecarStatus::StartupFailed(format!(
-                            "BACKEND_EXITED_DURING_STARTUP: {status}"
-                        ));
+                        return SidecarStatus::StartupFailed(
+                            startup_failure_code_from_exit_code(status.code()).into(),
+                        );
                     }
                 }
             }
@@ -574,6 +583,26 @@ impl SidecarManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_packaged_job_storage_exit_codes() {
+        assert_eq!(
+            startup_failure_code_from_exit_code(Some(20)),
+            "JOB_STORAGE_READ_FAILED"
+        );
+        assert_eq!(
+            startup_failure_code_from_exit_code(Some(21)),
+            "JOB_STORAGE_QUARANTINE_FAILED"
+        );
+        assert_eq!(
+            startup_failure_code_from_exit_code(Some(22)),
+            "JOB_STORAGE_WRITE_FAILED"
+        );
+        assert_eq!(
+            startup_failure_code_from_exit_code(Some(1)),
+            "BACKEND_EXITED_DURING_STARTUP"
+        );
+    }
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 

@@ -4,6 +4,8 @@ import {
   api,
   getSavedFolder,
   getUserMessage,
+  isRequestAbort,
+  isRequestTimeout,
   saveFolder,
   type JobModel,
   type NormalizationPreview,
@@ -131,9 +133,12 @@ export function TranscriptionPage() {
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
   const preflightLockRef = useRef(false)
+  const backendStatusRef = useRef<BackendStatus>('STARTING')
   const engineHydratedRef = useRef(false)
   const [preflightActive, setPreflightActive] = useState(false)
   const isPreflighting = preflightActive
+
+  useEffect(() => { backendStatusRef.current = backendStatus }, [backendStatus])
 
   const knownStage = knownStageFor(subject)
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
@@ -151,18 +156,21 @@ export function TranscriptionPage() {
   // from before this upgrade is non-destructively adopted rather than
   // dropped (D22). last_course/last_subject prefill the classification
   // inputs.
-  const loadSettings = useCallback(async () => {
+  const loadSettings = useCallback(async (signal?: AbortSignal) => {
     try {
-      const loaded = await api.settings()
+      const loaded = await api.settings(signal)
+      if (signal?.aborted) return
       let effectiveFolder = loaded.transcription_folder
       if (!effectiveFolder) {
         const legacy = getSavedFolder()
         if (legacy) {
           effectiveFolder = legacy
           try {
-            const adopted = await api.saveSettings({ ...loaded, transcription_folder: legacy })
+            const adopted = await api.saveSettings({ ...loaded, transcription_folder: legacy }, signal)
+            if (signal?.aborted) return
             setSettings(adopted)
           } catch {
+            if (signal?.aborted) return
             setSettings(loaded)
           }
         } else {
@@ -185,13 +193,21 @@ export function TranscriptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const loadFolder = useCallback(async () => {
-    if (!folder) { setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return }
+  const loadFolder = useCallback(async (signal?: AbortSignal) => {
+    if (!folder) {
+      backendStatusRef.current = 'CONNECTED'
+      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return
+    }
     try {
-      const [scanned, jobs, drive] = await Promise.all([api.scan(folder), api.jobs(), api.driveStatus()])
+      const [scanned, jobs, drive] = await Promise.all([api.scan(folder, signal), api.jobs(signal), api.driveStatus(signal)])
       const matching = jobs.filter((item) => item.folder === folder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
+      backendStatusRef.current = 'CONNECTED'
       setFiles(scanned); setJob(matching); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
-    } catch (cause) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
+    } catch (cause) {
+      if (isRequestAbort(cause)) return
+      backendStatusRef.current = 'OFFLINE'
+      setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
+    }
   }, [folder])
 
   // A packaged Tauri cold start can have the frontend polling before the
@@ -199,39 +215,70 @@ export function TranscriptionPage() {
   // once the backend actually answers -- not just once at mount (Section
   // 14). loadSettings is idempotent (guards its own writes), so calling it
   // again here on every successful reconnect is safe.
-  const reconnect = useCallback(async () => {
+  const reconnect = useCallback(async (signal?: AbortSignal) => {
+    backendStatusRef.current = 'STARTING'
     setBackendStatus('STARTING')
-    try { await api.health(); await loadSettings(); await loadFolder() }
-    catch (cause) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
+    try { await api.health(signal); await loadSettings(signal); await loadFolder(signal) }
+    catch (cause) {
+      if (isRequestAbort(cause)) return
+      backendStatusRef.current = 'OFFLINE'
+      setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
+    }
   }, [loadSettings, loadFolder])
 
-  useEffect(() => { void reconnect() }, [reconnect])
   useEffect(() => {
-    const healthTimer = window.setInterval(async () => {
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const pollHealth = async () => {
+      controller = new AbortController()
       try {
-        await api.health()
-        setBackendStatus((current) => {
-          // Only the OFFLINE/STARTING -> CONNECTED edge triggers a real
-          // resync; once already CONNECTED, every 4s tick just confirms
-          // liveness without re-fetching (no request loop).
-          if (current !== 'CONNECTED') void reconnect()
-          return 'CONNECTED'
-        })
-      } catch { setBackendStatus('OFFLINE') }
-    }, 4000)
-    return () => window.clearInterval(healthTimer)
+        if (backendStatusRef.current !== 'CONNECTED') await reconnect(controller.signal)
+        else {
+          await api.health(controller.signal)
+          if (active) setBackendStatus('CONNECTED')
+        }
+      } catch (cause) {
+        if (active && !isRequestAbort(cause)) {
+          backendStatusRef.current = 'OFFLINE'
+          setBackendStatus('OFFLINE')
+        }
+      } finally {
+        if (active) timer = window.setTimeout(() => void pollHealth(), 4000)
+      }
+    }
+    void pollHealth()
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
+    }
   }, [reconnect])
   useEffect(() => {
     if (!activeJobId || !activeJobStatus || !ACTIVE_STATES.has(activeJobStatus)) return
     let active = true
-    const timer = window.setInterval(async () => {
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const pollJob = async () => {
+      controller = new AbortController()
       try {
-        const updated = await api.job(activeJobId)
+        const updated = await api.job(activeJobId, controller.signal)
+        if (!ACTIVE_STATES.has(updated.status)) {
+          if (active) await loadFolder(controller.signal)
+          return
+        }
         if (active) setJob(updated)
-        if (!ACTIVE_STATES.has(updated.status)) { window.clearInterval(timer); if (active) void loadFolder() }
-      } catch (cause) { if (active) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) } }
-    }, 1500)
-    return () => { active = false; window.clearInterval(timer) }
+      } catch (cause) {
+        if (active && !isRequestAbort(cause)) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
+      }
+      if (active) timer = window.setTimeout(() => void pollJob(), 1500)
+    }
+    timer = window.setTimeout(() => void pollJob(), 1500)
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
+    }
   }, [activeJobId, activeJobStatus, loadFolder])
 
   const runStartMs = latestRunStartMs(job?.events ?? [])
@@ -496,7 +543,15 @@ export function TranscriptionPage() {
       const updated = await api.actionJob(job.job_id, actionName)
       setJob(updated)
       if (actionName === 'retry' && updated.status === 'WAITING') setJob(await api.startJob(job.job_id))
-    } catch (cause) { setMessage(getUserMessage(cause)) }
+    } catch (cause) {
+      setMessage(getUserMessage(cause))
+      if (isRequestTimeout(cause)) {
+        try {
+          setJob(await api.job(job.job_id))
+          setMessage('요청 시간이 초과되어 현재 작업 상태를 다시 확인했습니다.')
+        } catch { /* preserve the uncertain-result timeout message */ }
+      }
+    }
   }
 
   async function uploadDrive(retry = false) {

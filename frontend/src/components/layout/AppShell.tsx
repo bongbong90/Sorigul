@@ -1,4 +1,7 @@
 import type { ComponentType, ReactNode, SVGProps } from 'react'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
+import type { SidecarStatus } from '../../lib/native'
+import { Button } from '../ui/Button'
 import {
   FoldersIcon,
   LogIcon,
@@ -21,6 +24,8 @@ interface AppShellProps {
   title: string
   onNavigate: (item: NavigationId) => void
   children?: ReactNode
+  sidecarStatus: SidecarStatus | null
+  onRetrySidecar: () => void
 }
 
 const primaryNavigation: NavigationItem[] = [
@@ -66,7 +71,7 @@ function NavigationLink({
   )
 }
 
-export function AppShell({ activeItem, title, onNavigate, children }: AppShellProps) {
+export function AppShell({ activeItem, title, onNavigate, children, sidecarStatus, onRetrySidecar }: AppShellProps) {
   return (
     <div className="app-shell">
       <aside className="app-sidebar">
@@ -106,7 +111,21 @@ export function AppShell({ activeItem, title, onNavigate, children }: AppShellPr
       </header>
 
       <main className="app-main" id="main-content">
-        <div className="app-main-content">{children}</div>
+        <div className="app-main-content">
+          {sidecarStatus?.state === 'STARTUP_FAILED' ? (
+            <div className="sidecar-startup-alert" role="alert">
+              <AlertTriangle aria-hidden="true" />
+              <div>
+                <strong>Backend 시작 실패</strong>
+                <span>{sidecarStatus.message ?? 'Backend를 시작하지 못했습니다.'}</span>
+              </div>
+              <Button variant="secondary" onClick={onRetrySidecar}>
+                <RefreshCw aria-hidden="true" /> 다시 시도
+              </Button>
+            </div>
+          ) : null}
+          {children}
+        </div>
       </main>
     </div>
   )

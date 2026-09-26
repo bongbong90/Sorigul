@@ -184,6 +184,17 @@ export class ApiError extends Error implements ApiErrorShape {
   }
 }
 
+export const REQUEST_TIMEOUT_MS = {
+  FAST_LOCAL: 5_000,
+  STANDARD_LOCAL: 30_000,
+  // Backend Drive I/O is bounded at 60s and Colab readiness at 12s.
+  LONG_EXTERNAL_BRIDGE: 90_000,
+} as const
+
+interface RequestOptions extends RequestInit {
+  timeoutMs?: number
+}
+
 const configuredBase = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.trim()
 export const API_BASE_URL = (configuredBase || 'http://127.0.0.1:8000/api').replace(/\/$/, '')
 
@@ -195,56 +206,98 @@ function errorMessage(payload: unknown): string | undefined {
   return undefined
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response
+async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
+  const { timeoutMs = REQUEST_TIMEOUT_MS.STANDARD_LOCAL, signal: callerSignal, ...fetchInit } = init
+  const controller = new AbortController()
+  let timedOut = false
+  const abortFromCaller = () => controller.abort(callerSignal?.reason)
+  if (callerSignal?.aborted) abortFromCaller()
+  else callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort('request-timeout')
+  }, timeoutMs)
+
+  let responseReceived = false
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...init?.headers },
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...fetchInit,
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...fetchInit.headers },
     })
-  } catch {
+    responseReceived = true
+    if (!response.ok) {
+      let payload: unknown
+      try {
+        payload = await response.json()
+      } catch (error) {
+        if (controller.signal.aborted) throw error
+        payload = undefined
+      }
+      throw new ApiError({
+        code: `HTTP_${response.status}`,
+        userMessage: errorMessage(payload) ?? '요청을 처리하지 못했습니다.',
+        retryable: response.status >= 500 || response.status === 408 || response.status === 429,
+        status: response.status,
+      })
+    }
+    return await response.json() as T
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    if (timedOut) {
+      const mutation = Boolean(fetchInit.method && !['GET', 'HEAD'].includes(fetchInit.method.toUpperCase()))
+      throw new ApiError({
+        code: 'REQUEST_TIMEOUT',
+        userMessage: mutation
+          ? '요청 시간이 초과되어 결과를 확인할 수 없습니다. 상태를 다시 확인해 주세요.'
+          : '요청 시간이 초과되었습니다. 상태를 다시 확인해 주세요.',
+        retryable: true,
+      })
+    }
+    if (controller.signal.aborted) {
+      throw new ApiError({
+        code: 'REQUEST_ABORTED',
+        userMessage: '요청이 취소되었습니다.',
+        retryable: false,
+      })
+    }
+    if (responseReceived) {
+      throw new ApiError({
+        code: 'INVALID_RESPONSE',
+        userMessage: 'Backend 응답을 읽지 못했습니다.',
+        retryable: true,
+      })
+    }
     throw new ApiError({
       code: 'BACKEND_OFFLINE',
       userMessage: 'Backend에 연결할 수 없습니다.',
       retryable: true,
     })
+  } finally {
+    window.clearTimeout(timer)
+    callerSignal?.removeEventListener('abort', abortFromCaller)
   }
-  if (!response.ok) {
-    let payload: unknown
-    try {
-      payload = await response.json()
-    } catch {
-      payload = undefined
-    }
-    throw new ApiError({
-      code: `HTTP_${response.status}`,
-      userMessage: errorMessage(payload) ?? '요청을 처리하지 못했습니다.',
-      retryable: response.status >= 500 || response.status === 408 || response.status === 429,
-      status: response.status,
-    })
-  }
-  return response.json() as Promise<T>
 }
 
 export const api = {
-  health: () => request<{ status: 'ok' }>('/health'),
-  scan: (folder: string) => request<ScannedFile[]>('/scan', {
-    method: 'POST', body: JSON.stringify({ folder }),
+  health: (signal?: AbortSignal) => request<{ status: 'ok' }>('/health', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
+    method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   normalize: (folder: string, filename: string, course: string, subject: string) =>
     request<NormalizationPreview>('/normalize/preview', {
-      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }),
+      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   normalizeBatch: (folder: string, filenames: string[], course: string, subject: string) =>
     request<NormalizationPreview[]>('/normalize/batch', {
-      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }),
+      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   rename: (folder: string, oldStem: string, newStem: string) =>
     request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
-      method: 'POST', body: JSON.stringify({ folder, old_stem: oldStem, new_stem: newStem }),
+      method: 'POST', body: JSON.stringify({ folder, old_stem: oldStem, new_stem: newStem }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
-  jobs: () => request<JobModel[]>('/jobs'),
-  job: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}`),
+  jobs: (signal?: AbortSignal) => request<JobModel[]>('/jobs', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  job: (jobId: string, signal?: AbortSignal) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}`, { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   createJob: (payload: {
     folder: string
     file_ids: string[]
@@ -257,26 +310,26 @@ export const api = {
     subject: string
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
-  }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload) }),
-  startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST' }),
+  }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>
     request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/action`, {
-      method: 'POST', body: JSON.stringify({ action }),
+      method: 'POST', body: JSON.stringify({ action }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   uploadDrive: (jobId: string, fileId: string, retry = false) =>
     request<DriveFileState>(
       `/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(fileId)}/drive${retry ? '/retry' : ''}`,
-      { method: 'POST' },
+      { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE },
     ),
-  driveStatus: () => request<{ auth_state: DriveAuthState; scope: string }>('/drive/status'),
+  driveStatus: (signal?: AbortSignal) => request<{ auth_state: DriveAuthState; scope: string }>('/drive/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
   startDriveAuth: () => request<{ state: string; authorization_url: string; scope: string }>('/drive/auth/start', {
-    method: 'POST',
+    method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
   completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
-    method: 'POST', body: JSON.stringify({ code }),
+    method: 'POST', body: JSON.stringify({ code }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
   folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
-    method: 'POST', body: JSON.stringify({ folder, filter }),
+    method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   textPreview: (scanId: string, itemId: string) =>
     request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
@@ -289,18 +342,26 @@ export const api = {
       { method: 'POST' },
     )
   },
-  events: () => request<StructuredEvent[]>('/events'),
-  settings: () => request<RuntimeSettings>('/settings'),
-  saveSettings: (settings: RuntimeSettings) => request<RuntimeSettings>('/settings', {
-    method: 'PUT', body: JSON.stringify(settings),
+  events: (signal?: AbortSignal) => request<StructuredEvent[]>('/events', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  settings: (signal?: AbortSignal) => request<RuntimeSettings>('/settings', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  saveSettings: (settings: RuntimeSettings, signal?: AbortSignal) => request<RuntimeSettings>('/settings', {
+    method: 'PUT', body: JSON.stringify(settings), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  startColabRendezvous: () => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST' }),
-  pollColabRendezvous: (requestId: string) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId)),
-  verifyColabUrl: (url: string, requestId: string) => request<RendezvousState>('/colab/verify', {
-    method: 'POST', body: JSON.stringify({ url, request_id: requestId }),
+  startColabRendezvous: (signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST', signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
+  pollColabRendezvous: (requestId: string, signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId), { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
+  verifyColabUrl: (url: string, requestId: string, signal?: AbortSignal) => request<RendezvousState>('/colab/verify', {
+    method: 'POST', body: JSON.stringify({ url, request_id: requestId }), signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
-  shutdown: () => request<ShutdownState>('/desktop/shutdown'),
-  cancelShutdown: () => request<ShutdownState>('/desktop/shutdown/cancel', { method: 'POST' }),
+  shutdown: (signal?: AbortSignal) => request<ShutdownState>('/desktop/shutdown', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  cancelShutdown: () => request<ShutdownState>('/desktop/shutdown/cancel', { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+}
+
+export function isRequestAbort(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'REQUEST_ABORTED'
+}
+
+export function isRequestTimeout(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'REQUEST_TIMEOUT'
 }
 
 export function getUserMessage(error: unknown): string {

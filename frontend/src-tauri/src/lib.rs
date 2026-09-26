@@ -4,6 +4,7 @@ mod sidecar;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
@@ -20,8 +21,80 @@ const PATH_LIST_SEPARATOR: &str = ":";
 
 struct AppState {
     sidecar: Arc<SidecarManager>,
+    sidecar_status: Mutex<SidecarStatusPayload>,
     shutdown_gate: ShutdownGate,
     close_behavior: Mutex<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SidecarStatusPayload {
+    state: &'static str,
+    owned: Option<bool>,
+    code: Option<String>,
+    message: Option<String>,
+}
+
+impl SidecarStatusPayload {
+    fn starting() -> Self {
+        Self {
+            state: "STARTING",
+            owned: None,
+            code: None,
+            message: None,
+        }
+    }
+
+    fn from_status(status: &SidecarStatus) -> Self {
+        match status {
+            SidecarStatus::Starting => Self::starting(),
+            SidecarStatus::Connected { owned } => Self {
+                state: "CONNECTED",
+                owned: Some(*owned),
+                code: None,
+                message: None,
+            },
+            SidecarStatus::StartupFailed(reason) => {
+                let code = reason.split(':').next().unwrap_or("STARTUP_FAILED").trim();
+                let message = match code {
+                    "JOB_STORAGE_READ_FAILED" => "작업 기록 파일을 읽을 수 없어 Backend를 시작하지 못했습니다. 파일 권한이나 디스크 상태를 확인해 주세요.",
+                    "JOB_STORAGE_QUARANTINE_FAILED" => "손상된 작업 기록을 안전하게 보관하지 못해 Backend를 시작하지 못했습니다.",
+                    "JOB_STORAGE_WRITE_FAILED" => "작업 기록 파일을 저장할 수 없어 Backend를 시작하지 못했습니다. 파일 권한이나 디스크 상태를 확인해 주세요.",
+                    "PORT_OCCUPIED_BY_OTHER_SERVICE" => "Backend 포트를 다른 프로그램이 사용 중입니다. 해당 프로그램을 종료한 뒤 다시 시도해 주세요.",
+                    "STARTUP_TIMEOUT" => "Backend 시작 시간이 초과되었습니다. 다시 시도해 주세요.",
+                    _ => "Backend를 시작하지 못했습니다. 다시 시도해 주세요.",
+                };
+                Self {
+                    state: "STARTUP_FAILED",
+                    owned: None,
+                    code: Some(code.to_string()),
+                    message: Some(message.to_string()),
+                }
+            }
+        }
+    }
+}
+
+fn publish_sidecar_status(app: &AppHandle, payload: SidecarStatusPayload) {
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.sidecar_status.lock().unwrap() = payload.clone();
+    }
+    let _ = app.emit("sorigul://sidecar-status", payload);
+}
+
+#[tauri::command]
+fn get_sidecar_status(state: State<AppState>) -> SidecarStatusPayload {
+    state.sidecar_status.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn retry_sidecar_startup(app: AppHandle, state: State<AppState>) {
+    let current = state.sidecar_status.lock().unwrap().clone();
+    if current.state != "STARTUP_FAILED" {
+        return;
+    }
+    let sidecar = state.sidecar.clone();
+    publish_sidecar_status(&app, SidecarStatusPayload::starting());
+    start_backend(app, sidecar);
 }
 
 #[tauri::command]
@@ -322,7 +395,7 @@ fn start_backend(app: AppHandle, sidecar: Arc<SidecarManager>) {
             ),
             Err(reason) => SidecarStatus::StartupFailed(reason),
         };
-        let _ = app.emit("sorigul://sidecar-status", format!("{resolved:?}"));
+        publish_sidecar_status(&app, SidecarStatusPayload::from_status(&resolved));
     });
 }
 
@@ -378,6 +451,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             sidecar: sidecar.clone(),
+            sidecar_status: Mutex::new(SidecarStatusPayload::starting()),
             shutdown_gate: ShutdownGate::new(),
             close_behavior: Mutex::new("tray".into()),
         })
@@ -386,6 +460,8 @@ pub fn run() {
             native_shutdown,
             reset_shutdown_gate,
             open_folder_by_intent,
+            get_sidecar_status,
+            retry_sidecar_startup,
         ])
         .setup(move |app| {
             build_tray(app)?;
@@ -419,7 +495,33 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_json_string, packaged_spawn_spec_from_resource_dir};
+    use super::{
+        extract_json_string, packaged_spawn_spec_from_resource_dir, SidecarStatus,
+        SidecarStatusPayload,
+    };
+
+    #[test]
+    fn sidecar_status_payload_is_structured_and_sanitizes_failure_detail() {
+        let payload = SidecarStatusPayload::from_status(&SidecarStatus::StartupFailed(
+            "SPAWN_FAILED: C:\\private\\backend.exe".into(),
+        ));
+        assert_eq!(payload.state, "STARTUP_FAILED");
+        assert_eq!(payload.code.as_deref(), Some("SPAWN_FAILED"));
+        assert_eq!(
+            payload.message.as_deref(),
+            Some("Backend를 시작하지 못했습니다. 다시 시도해 주세요.")
+        );
+        assert!(!payload.message.unwrap().contains("private"));
+    }
+
+    #[test]
+    fn job_storage_startup_failure_has_specific_user_message() {
+        let payload = SidecarStatusPayload::from_status(&SidecarStatus::StartupFailed(
+            "JOB_STORAGE_READ_FAILED".into(),
+        ));
+        assert_eq!(payload.code.as_deref(), Some("JOB_STORAGE_READ_FAILED"));
+        assert!(payload.message.unwrap().contains("작업 기록 파일"));
+    }
 
     /// A fresh, empty scratch directory under the OS temp dir, cleaned up
     /// when dropped. Avoids pulling in a `tempfile` dependency for three

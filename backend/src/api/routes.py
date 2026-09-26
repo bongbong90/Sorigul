@@ -12,7 +12,7 @@ from src.services.normalizer import (
     collect_existing_stems,
     validate_classification_text,
 )
-from src.services.renamer import BundleRenamer, UnsafeStemError, validate_safe_stem
+from src.services.renamer import BundleRenamer, RenameStatus, UnsafeStemError, validate_safe_stem
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
@@ -288,9 +288,15 @@ def apply_rename(req: RenameRequest):
     except UnsafeStemError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     renamer = BundleRenamer()
-    success = renamer.apply_rename(req.folder, old_stem, new_stem)
-    if not success:
-        raise HTTPException(status_code=400, detail="Rename failed due to conflict or error.")
+    result = renamer.apply_rename(req.folder, old_stem, new_stem)
+    if result.status == RenameStatus.RENAME_CONFLICT:
+        raise HTTPException(status_code=409, detail="같은 이름의 파일이 이미 있어 파일명을 변경할 수 없습니다.")
+    if result.status == RenameStatus.RENAME_NOTHING_TO_DO:
+        raise HTTPException(status_code=400, detail="변경할 파일을 찾을 수 없습니다.")
+    if result.status == RenameStatus.RENAME_APPLY_FAILED_ROLLED_BACK:
+        raise HTTPException(status_code=500, detail="파일명 변경에 실패했지만 원래 상태로 복구했습니다. 다시 시도해 주세요.")
+    if result.status == RenameStatus.RENAME_ROLLBACK_FAILED:
+        raise HTTPException(status_code=500, detail="파일명 변경 중 복구에 실패했습니다. 폴더의 파일 상태를 확인한 뒤 다시 시도해 주세요.")
     return RenameResponse(status="success", old_file_id=old_stem, new_file_id=new_stem)
 
 class CreateJobRequest(BaseModel):
@@ -576,7 +582,13 @@ def start_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not execution_service.start(job_id):
-        raise HTTPException(status_code=409, detail="Job cannot be started in its current state.")
+        latest = job_manager.get_job(job_id)
+        if latest is not None and latest.status == FileStatus.WAITING:
+            raise HTTPException(
+                status_code=409,
+                detail="이전 실행을 정리하고 있습니다. 잠시 후 상태를 다시 확인해 주세요.",
+            )
+        raise HTTPException(status_code=409, detail="현재 상태에서는 작업을 시작할 수 없습니다.")
     return job_manager.get_job(job_id)
 
 
