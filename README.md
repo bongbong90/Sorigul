@@ -11,7 +11,7 @@ Greenfield 프로젝트이며
 
 현재 Phase:
 
-Project Foundation / Design System v1
+Transcription Screen — Static UI
 
 관련 공식 문서:
 
@@ -19,3 +19,32 @@ docs/project/
 docs/design/
 
 현재 실제 transcription 기능은 구현하지 않는다.
+
+## Frontend
+
+- React
+- TypeScript
+- Vite
+
+현재 상태:
+- Frontend Foundation 완료
+- Design System Foundation 완료
+- App Shell 완료
+- Transcription Screen Static UI 완료
+- 실제 transcription 기능 없음
+- UI/UX First 진행 중
+
+Frontend 실행 방법:
+
+```
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend 검증:
+
+```
+npm run lint
+npm run build
+```

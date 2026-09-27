@@ -1,68 +1,33 @@
 # Sorigul Roadmap
 
-Phase 0
-Project Foundation
+`MIGRATION_CONTRACT.md`가 제품 행동과 마이그레이션의 최우선 기준이다. 완료된 UI foundation 이력과 앞으로의 실행 순서를 분리한다.
 
-Phase 1
-Design System v1
+## Completed Baseline
 
-Phase 2
-App Shell
+- Project Foundation
+- Design System v1
+- App Shell
+- Transcription Screen foundation
+- Mock Interaction foundation
+- Contract Baseline Sync
 
-Phase 3
-Transcription Screen
+이 항목들은 초기 UI foundation 작업 이력이다. 당시 Dashboard/Results를 전제로 한 계획은 현재 제품 navigation을 뜻하지 않는다.
 
-Phase 4
-Mock Interaction
+## Current Stage
 
-Phase 5
-Dashboard
+- **UI Feature Gap Closure** — `전사`, `로그`, `Folders` 구조와 누락된 Legacy ACTIVE 기능의 UI 계약 보완
 
-Phase 6
-Results
+## Migration Sequence
 
-Phase 7
-UX States
-- Empty
-- Loading
-- Error
-- Cancel
-- Retry
+1. **Contract Baseline Sync** — 완료
+2. **UI Feature Gap Closure** — 현재
 
-Phase 8
-UI Freeze v1
+3. **UI State / UX Validation** — 전사·실패·Retry·중지·취소·복구·Colab·Google Drive·runtime 상태 검증
+4. **UI Freeze** — Contract의 사용자 흐름과 action 승인
+5. **Core Backend / File / Job Migration** — scan, normalization, bundle verification, queue, persistence/recovery
+6. **Transcription Engine Migration** — Local Whisper와 Direct Colab 계약 구현
+7. **Google Drive / Results / Desktop UX** — Drive, 실제 디스크 기반 Folders, Log, Tray, Notification, Shutdown
+8. **Tauri Runtime / Installed Product** — sidecar lifecycle, Windows/Unicode, MSI와 설치 환경 검증
+9. **1:1 Parity Regression / Release** — Contract·Audit 기반 회귀, 설치형 통합 QA와 release
 
-Phase 9
-File Scan / Auto Refresh
-
-Phase 10
-Filename Normalization / Next Lesson
-
-Phase 11
-Local Job Queue
-
-Phase 12
-Local Whisper
-
-Phase 13
-Colab Automatic Transcription
-
-Phase 14
-Stop / Failure / Retry / Restore
-
-Phase 15
-External Result Upload
-
-Phase 16
-Dashboard Real Data
-
-Phase 17
-Results Real Data
-
-Phase 18
-Full QA
-
-Phase 19
-Desktop Packaging
-
-세부 Backend 구현 방식은 지금 확정하지 않는다.
+세부 Backend 구조, D09 Result 탐색/API 방식과 Log 저장 구조는 해당 구현 단계 전까지 확정하지 않는다.

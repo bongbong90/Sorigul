@@ -1,0 +1,2 @@
+# Optional Local engine dependency. The backend and fake-engine tests import without it.
+openai-whisper==20250625

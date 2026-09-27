@@ -1,0 +1,7 @@
+# Build artifacts staged here by scripts/build_backend_sidecar.ps1.
+# Never committed -- see root .gitignore's Packaging section. This file
+# only preserves the directory's existence and its contract (Tauri's
+# bundle.resources / Rust's packaged_spawn_spec both expect
+# binaries/sorigul-backend.exe and binaries/ffmpeg.exe at build/run time).
+*
+!.gitignore

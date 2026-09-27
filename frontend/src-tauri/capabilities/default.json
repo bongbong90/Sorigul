@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal native surface: folder picker, Drive OAuth browser handoff, and OS notifications. Explorer open is performed exclusively by the Rust open_folder_by_intent command (which validates the path through the backend before opening), so no filesystem-open capability is granted to the frontend at all. No shell/process-execution permission is granted.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "dialog:allow-open",
+    "opener:allow-open-url",
+    "notification:default"
+  ]
+}
