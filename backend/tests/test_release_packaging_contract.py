@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -330,3 +331,103 @@ def test_manifest_contains_release_identity_without_personal_data_fields():
         assert f"{field} =" in script
     for forbidden in ("username =", "user_home =", "credential =", "token =", "mp3_path ="):
         assert forbidden not in script.lower()
+
+
+def test_manifest_requirement_is_a_unique_pure_string_and_round_trip_validated():
+    script = (REPO_ROOT / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+
+    assert "[System.IO.File]::ReadAllLines($TorchRequirementPath)" in script
+    assert "Get-Content -LiteralPath (Join-Path $RepoRoot" not in script
+    assert "$TorchRequirementLines.Count -eq 0" in script
+    assert "$TorchRequirementLines.Count -ne 1" in script
+    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_MISSING" in script
+    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_AMBIGUOUS" in script
+    assert "$TorchRequirement = [string]$TorchRequirementLines[0]" in script
+    assert "$TorchRequirement -is [string]" in script
+    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_NOT_SCALAR" in script
+    assert '$TorchRequirement -cne "torch==2.13.0+cu130"' in script
+    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_MISMATCH" in script
+    assert "$ManifestJson | ConvertFrom-Json" in script
+    assert "$RoundTrippedManifest.torch_requirement -is [string]" in script
+    assert '$RoundTrippedManifest.expected_cuda -cne "13.0"' in script
+    assert "$RoundTrippedManifest.source_head -cne $SourceHead" in script
+    assert "BUILD_MANIFEST_SERIALIZATION_INVALID" in script
+    assert "$ManifestJson," in script
+
+
+def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
+    installer = (REPO_ROOT / "scripts/build_windows_installer.ps1").read_text(encoding="utf-8")
+
+    validation = installer.index("BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID")
+    frontend = installer.index('Write-Step "Building frontend production bundle"')
+    tauri = installer.index('Write-Step "Building Windows MSI')
+
+    assert validation < frontend < tauri
+    assert "$Manifest.torch_requirement -is [string]" in installer
+    assert '$Manifest.torch_requirement -cne "torch==2.13.0+cu130"' in installer
+    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID" in installer
+    assert "$Manifest.expected_cuda -is [string]" in installer
+    assert '$Manifest.expected_cuda -cne "13.0"' in installer
+    assert "BUILD_MANIFEST_CUDA_EXPECTATION_INVALID" in installer
+    assert "$CurrentSourceHeadOutput = @(& git rev-parse HEAD)" in installer
+    assert "$CurrentSourceHeadOutput.Count -ne 1" in installer
+    assert "$Manifest.source_head -cne $CurrentSourceHead" in installer
+    assert "BUILD_MANIFEST_SOURCE_HEAD_MISMATCH" in installer
+    assert "$Manifest.tracked_tree_clean -is [bool]" in installer
+
+
+def test_windows_powershell_manifest_requirement_serializes_as_scalar_string(tmp_path):
+    if os.name != "nt":
+        pytest.skip("Windows PowerShell regression")
+
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    if not powershell.is_file():
+        pytest.skip("Windows PowerShell is not installed")
+
+    requirements = tmp_path / "requirements-torch-cuda.txt"
+    requirements.write_text(
+        "# release CUDA runtime\ntorch==2.13.0+cu130\n", encoding="utf-8"
+    )
+    environment = os.environ.copy()
+    environment["SORIGUL_TEST_TORCH_REQUIREMENTS"] = str(requirements)
+    regression = r"""
+$TorchRequirementLines = @(
+    foreach ($Line in [System.IO.File]::ReadAllLines($env:SORIGUL_TEST_TORCH_REQUIREMENTS)) {
+        $TrimmedLine = [string]$Line.Trim()
+        if ($TrimmedLine -match '^torch==[^\s]+$') {
+            $TrimmedLine
+        }
+    }
+)
+if ($TorchRequirementLines.Count -ne 1) { exit 21 }
+$TorchRequirement = [string]$TorchRequirementLines[0]
+$ManifestJson = ([ordered]@{
+    torch_requirement = $TorchRequirement
+    expected_cuda = "13.0"
+    source_head = "test-head"
+} | ConvertTo-Json -Depth 4) + "`n"
+$RoundTrippedManifest = $ManifestJson | ConvertFrom-Json
+if (-not ($RoundTrippedManifest.torch_requirement -is [string])) { exit 22 }
+if ($RoundTrippedManifest.torch_requirement -cne "torch==2.13.0+cu130") { exit 23 }
+[Console]::Out.Write($ManifestJson)
+"""
+
+    completed = subprocess.run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-Command", regression],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    manifest = json.loads(completed.stdout)
+    assert type(manifest["torch_requirement"]) is str
+    assert manifest["torch_requirement"] == "torch==2.13.0+cu130"

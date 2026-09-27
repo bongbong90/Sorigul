@@ -77,7 +77,41 @@ try {
     Write-Error "BUILD_MANIFEST_INVALID: $($_.Exception.Message)"
     exit 1
 }
-if (-not $Manifest.tracked_tree_clean -or [string]::IsNullOrWhiteSpace($Manifest.source_head)) {
+if (
+    -not ($Manifest.torch_requirement -is [string]) -or
+    $Manifest.torch_requirement -cne "torch==2.13.0+cu130"
+) {
+    Write-Error "BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID"
+    exit 1
+}
+if (
+    -not ($Manifest.expected_cuda -is [string]) -or
+    $Manifest.expected_cuda -cne "13.0"
+) {
+    Write-Error "BUILD_MANIFEST_CUDA_EXPECTATION_INVALID"
+    exit 1
+}
+$CurrentSourceHeadOutput = @(& git rev-parse HEAD)
+$CurrentSourceHeadExitCode = $LASTEXITCODE
+$CurrentSourceHead = if ($CurrentSourceHeadOutput.Count -eq 1) {
+    [string]$CurrentSourceHeadOutput[0].Trim()
+} else {
+    ""
+}
+if (
+    $CurrentSourceHeadExitCode -ne 0 -or
+    $CurrentSourceHeadOutput.Count -ne 1 -or
+    [string]::IsNullOrWhiteSpace($CurrentSourceHead) -or
+    -not ($Manifest.source_head -is [string]) -or
+    $Manifest.source_head -cne $CurrentSourceHead
+) {
+    Write-Error "BUILD_MANIFEST_SOURCE_HEAD_MISMATCH"
+    exit 1
+}
+if (
+    -not ($Manifest.tracked_tree_clean -is [bool]) -or
+    $Manifest.tracked_tree_clean -ne $true
+) {
     Write-Error "BUILD_MANIFEST_NOT_RELEASE_ELIGIBLE"
     exit 1
 }
