@@ -795,3 +795,70 @@ Sorigul is `STUDY USE READY = YES` only when:
 15. user data remains intact.
 
 Public release readiness is not a project completion criterion.
+
+---
+
+## 12. Fixed delivery deadline — 2026-10-31
+
+The user has fixed the completion deadline at **2026-10-31 (KST)**.
+
+By the end of that date Sorigul must be usable as the user's real study transcription application with all approved functions implemented and the current installed workflow validated.
+
+### Schedule
+
+#### 2026-09-29 ~ 2026-10-04 — Contract/governance + source remediation
+- complete #107, #112, #106, #110, #111
+- run source-level full parity regression
+- exit: SOURCE PARITY BLOCKERS = 0
+
+#### 2026-10-05 ~ 2026-10-11 — Fresh build/install + desktop integration
+- complete #113
+- clean current-HEAD Local Runtime/Core/MSI build and install
+- complete #56 and #63
+- exit: CURRENT-HEAD INSTALLED CORE = PASS
+
+#### 2026-10-12 ~ 2026-10-18 — Real Local + external integrations
+- #47 real personal Local Korean study audio
+- #48 Drive real OAuth/API create/update/failure isolation
+- #48/#60 actual zero-cost Colab short/long/chunk flow only when a safely confirmed free session is available
+- no paid fallback
+
+#### 2026-10-19 ~ 2026-10-24 — Recovery / shutdown / defect burn-down
+- complete #59
+- clear all remaining P0/P1 product defects
+- validate shutdown countdown/cancel
+- #58 actual shutdown only after immediate explicit user approval
+- exit: KNOWN P0/P1 PRODUCT BLOCKERS = 0
+
+#### 2026-10-25 ~ 2026-10-28 — Final STUDY USE regression
+- complete #114 on one current installed artifact
+- short/long/multiple/already-complete/one-file-failure scenarios
+- Local/Colab/Drive/Folders/Log/Notification/Tray/live-folder/recovery/Unicode/cleanup
+- exit: STUDY WORKFLOW REGRESSION = PASS
+
+#### 2026-10-29 ~ 2026-10-31 — Closeout buffer
+- final regression fixes only
+- #54 README, #55 canonical test command, #7 final tracker sync
+- close completed Issues
+- verify stacked PR bases/diffs
+- bottom-up merge to main
+- final installed smoke check
+- no new discretionary feature work
+
+### Deadline discipline
+
+- P0/P1 functional parity and reliability outrank cosmetic polish.
+- A failed gate is fixed before advancing.
+- Independent defects remain separate Issues/commits/PRs.
+- Expensive build/install validation is batched after source remediation where safe.
+- Any source change that invalidates installed evidence makes the prior artifact evidence stale.
+- No approved functionality is removed merely to meet the deadline.
+- Zero-cost, lightweight, user-data safety, and Git/GitHub traceability rules remain mandatory.
+
+### Final deadline verdict
+
+STUDY USE READY = YES
+KNOWN P0/P1 PRODUCT BLOCKERS = 0
+CURRENT-HEAD INSTALLED REGRESSION = PASS
+GIT/GITHUB TRACEABILITY = COMPLETE
+PUBLIC RELEASE = NOT REQUIRED
