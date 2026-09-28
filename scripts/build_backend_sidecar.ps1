@@ -12,7 +12,8 @@
 
 $ErrorActionPreference = "Stop"
 $SelfTestTimeoutSeconds = 300
-$CoreSidecarSizeLimitBytes = 250MB # First-split regression ceiling, not a final product contract.
+$CoreArtifactSizeLimitMiB = 250 # First-split regression ceiling, not a final product contract.
+$CoreSidecarSizeLimitBytes = $CoreArtifactSizeLimitMiB * 1MB
 
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -189,7 +190,13 @@ try {
     $ForbiddenCorePatterns = @(
         "torch",
         "cuda",
-        "whisper"
+        "torch_cuda",
+        "cublas",
+        "cudnn",
+        "cufft",
+        "cusparse",
+        "cusolver",
+        "(^|[\\/., ])whisper($|[\\/., ])"
     )
     $CoreArchiveViolations = @(
         $ForbiddenCorePatterns | Where-Object { $CoreArchiveText -match $_ }
@@ -349,6 +356,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         source_head = $SourceHead
         generated_at_utc = [DateTime]::UtcNow.ToString("o")
         tracked_tree_clean = $true
+        core_sidecar_size_limit_mib = $CoreArtifactSizeLimitMiB
         sidecar_size = $CandidateExeMetadata.size
         sidecar_sha256 = $CandidateExeMetadata.sha256
         ffmpeg_size = $CandidateFfmpegMetadata.size
@@ -362,6 +370,8 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
     }
     if (
+        -not ($RoundTrippedManifest.core_sidecar_size_limit_mib -is [int]) -or
+        $RoundTrippedManifest.core_sidecar_size_limit_mib -ne $CoreArtifactSizeLimitMiB -or
         -not ($RoundTrippedManifest.source_head -is [string]) -or
         $RoundTrippedManifest.source_head -cne $SourceHead
     ) {

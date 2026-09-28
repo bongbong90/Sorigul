@@ -142,6 +142,23 @@ def test_runtime_manifest_missing_invalid_version_and_hash_fail_closed(tmp_path,
     assert invalid.value.code == "LOCAL_RUNTIME_INVALID"
 
 
+def test_runtime_manifest_provenance_is_required_and_must_match(runtime_dir):
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    manifest.pop("source_head")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(EngineError) as missing:
+        verify_runtime(runtime_dir)
+    assert missing.value.code == "LOCAL_RUNTIME_INVALID"
+
+    manifest["source_head"] = "a" * 40
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(EngineError) as mismatch:
+        verify_runtime(runtime_dir, expected_source_head="b" * 40)
+    assert mismatch.value.code == "LOCAL_RUNTIME_PROVENANCE_MISMATCH"
+
+
 def test_local_worker_protocol_preserves_fixed_options_and_result(runtime_dir, tmp_path):
     captured = []
     source = tmp_path / "전사자료" / "개념완성_민법_8주차_4강.mp3"
