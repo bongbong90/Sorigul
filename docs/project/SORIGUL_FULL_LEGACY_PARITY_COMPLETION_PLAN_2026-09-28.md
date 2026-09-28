@@ -127,6 +127,45 @@ Never commit or automatically delete:
 
 Actual Windows shutdown is executed only after immediate explicit user approval for that exact test.
 
+
+### 3.6 Hard delivery deadline — usable before November 2026
+
+The product must be usable for the user's daily study **before 2026-11-01 KST**.
+
+Planning target:
+- **2026-10-20:** installed daily-use beta — Local transcription and core desktop workflow usable on the user's PC
+- **2026-10-27:** release-candidate study build — all source remediation and installed integration complete; zero-cost external paths validated when safely available
+- **2026-10-30:** final STUDY USE workflow regression
+- **2026-10-31:** contingency / Git closeout / bottom-up merge window
+
+This is a schedule constraint, not permission to cut required Legacy parity silently.
+
+To protect the deadline, until STUDY USE READY:
+- no new product features outside the approved parity/completion plan;
+- no cosmetic redesign unless it blocks actual use;
+- no architecture refactor that is not required for a known blocker;
+- no public-release/signing work;
+- documentation polish stays behind functional blockers;
+- build/install is done at meaningful gates, not after every small source change;
+- an external zero-cost dependency that is unavailable must not prevent the Local path from being usable.
+
+Critical-path order:
+1. #107/#112 governance and canonical contract
+2. #106 transcription-engine parity
+3. #110/#111 remaining Legacy parity gaps
+4. source-level full regression
+5. #113 fresh lightweight current-HEAD build/install
+6. #56/#63 installed desktop integration
+7. #47 actual Local study audio as soon as suitable user audio is available
+8. #48/#60 zero-cost Colab/Drive validation, started early enough to leave recovery time
+9. #59 recovery policy
+10. #58 shutdown only with immediate explicit approval
+11. #114 final STUDY USE regression
+12. #54/#55 docs closeout and bottom-up merge
+
+Schedule rule:
+If a blocker threatens the 2026-10-31 deadline, record the blocker in GitHub immediately and work only the minimum safe fix needed to restore the approved contract. Do not substitute a different engine, paid service, destructive shortcut, or feature deletion to meet the date.
+
 ---
 
 ## 4. Canonical product contract after Legacy + conversation decisions
