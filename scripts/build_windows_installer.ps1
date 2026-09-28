@@ -10,6 +10,7 @@
 #>
 
 $ErrorActionPreference = "Stop"
+$CoreMsiSizeLimitBytes = 250MB # First-split regression ceiling, not a final product contract.
 
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -75,20 +76,6 @@ try {
     $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 } catch {
     Write-Error "BUILD_MANIFEST_INVALID: $($_.Exception.Message)"
-    exit 1
-}
-if (
-    -not ($Manifest.torch_requirement -is [string]) -or
-    $Manifest.torch_requirement -cne "torch==2.13.0+cu130"
-) {
-    Write-Error "BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID"
-    exit 1
-}
-if (
-    -not ($Manifest.expected_cuda -is [string]) -or
-    $Manifest.expected_cuda -cne "13.0"
-) {
-    Write-Error "BUILD_MANIFEST_CUDA_EXPECTATION_INVALID"
     exit 1
 }
 $CurrentSourceHeadOutput = @(& git rev-parse HEAD)
@@ -188,6 +175,10 @@ if ($CurrentRunMsiCandidates.Count -ne 1) {
     exit 1
 }
 $Msi = $CurrentRunMsiCandidates[0]
+if ($Msi.Length -gt $CoreMsiSizeLimitBytes) {
+    Write-Error "CORE_MSI_SIZE_REGRESSION: $($Msi.Length) bytes"
+    exit 1
+}
 
 Write-Host ""
 Write-Host "Source HEAD: $($Manifest.source_head)"
