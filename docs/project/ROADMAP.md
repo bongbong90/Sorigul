@@ -1,33 +1,42 @@
 # Sorigul Roadmap
 
-`MIGRATION_CONTRACT.md`가 제품 행동과 마이그레이션의 최우선 기준이다. 완료된 UI foundation 이력과 앞으로의 실행 순서를 분리한다.
+현재 제품 행동은 [`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md)에서 시작한다. 이 roadmap은 과거 completed baseline을 보존하면서 [`SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md`](SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md)의 현재 실행 순서를 요약한다.
 
-## Completed Baseline
+## Completed baseline
 
 - Project Foundation
 - Design System v1
-- App Shell
-- Transcription Screen foundation
-- Mock Interaction foundation
-- Contract Baseline Sync
+- App Shell, Transcription Screen과 Mock Interaction foundation
+- Contract Baseline Sync, UI State/UX Validation과 UI Freeze
+- Core Backend/File/Job, transcription, Drive/Results/Desktop source implementation
+- Tauri runtime과 Core/Local Runtime packaging split
+- 이전 full source regression과 installed/synthetic validation evidence
+- 5A full Legacy parity rebaseline and completion plan
 
-이 항목들은 초기 UI foundation 작업 이력이다. 당시 Dashboard/Results를 전제로 한 계획은 현재 제품 navigation을 뜻하지 않는다.
+이 항목들은 완료 이력이다. 과거 PASS나 당시 Dashboard/Results 전제는 current-HEAD installed verdict 또는 현재 navigation을 뜻하지 않는다.
 
-## Current Stage
+## Current stage
 
-- **UI Feature Gap Closure** — `전사`, `로그`, `Folders` 구조와 누락된 Legacy ACTIVE 기능의 UI 계약 보완
+**Personal Study Use Completion — Full Legacy Parity Remediation / Installed Validation**
 
-## Migration Sequence
+## Current execution order
 
-1. **Contract Baseline Sync** — 완료
-2. **UI Feature Gap Closure** — 현재
+1. **Governance/source of truth — #107/#112:** mandatory Git/GitHub lifecycle과 canonical current product contract를 잠근다.
+2. **Engine parity — #106:** Local OpenAI Whisper `medium`/Legacy-compatible fp16과 Colab `faster-whisper large-v3`/CUDA float16/CPU int8을 복구한다.
+3. **Auxiliary parity — #110/#111:** notification folder-open과 live transcription-folder change detection을 독립 work unit으로 복구한다.
+4. **Source regression:** preserved Legacy contracts, approved Intentional Changes, lightweight, zero-cost와 security boundary를 전체 검증한다.
+5. **Fresh installed gate — #113:** 하나의 current HEAD에서 Local Runtime/Core/MSI를 새로 build/install하고 provenance, payload exclusion, `<=250 MiB`, CUDA synthetic, health, FFmpeg, Unicode와 cleanup을 검증한다.
+6. **Native/integration — #56/#63:** 같은 artifact에서 Tray, close behavior, picker/reveal, notification, Folders, retry/recovery와 process cleanup을 검증한다.
+7. **Real Local/external — #47/#48/#60:** 실제 personal Local study audio와 안전하게 zero-cost로 확인된 Colab/Drive path를 검증한다. 확인할 수 없는 외부 gate는 기능 삭제 없이 PENDING으로 둔다.
+8. **Recovery — #59:** backend failure 후 OFFLINE/reconnect/restart와 job/result 보존 정책을 잠그고 검증한다.
+9. **Shutdown — #58:** countdown/cancel을 먼저 검증하고 실제 shutdown은 그 시점의 즉시 명시적 사용자 승인 후에만 실행한다.
+10. **Final workflow — #114:** 하나의 installed artifact로 전체 study workflow를 실행하여 `STUDY WORKFLOW REGRESSION = PASS`를 달성한다.
+11. **Closeout/main merge — #54/#55/#7:** 문서·test command·Tracker를 동기화하고 PR base/diff를 확인한 뒤 bottom-up으로 merge한다.
 
-3. **UI State / UX Validation** — 전사·실패·Retry·중지·취소·복구·Colab·Google Drive·runtime 상태 검증
-4. **UI Freeze** — Contract의 사용자 흐름과 action 승인
-5. **Core Backend / File / Job Migration** — scan, normalization, bundle verification, queue, persistence/recovery
-6. **Transcription Engine Migration** — Local Whisper와 Direct Colab 계약 구현
-7. **Google Drive / Results / Desktop UX** — Drive, 실제 디스크 기반 Folders, Log, Tray, Notification, Shutdown
-8. **Tauri Runtime / Installed Product** — sidecar lifecycle, Windows/Unicode, MSI와 설치 환경 검증
-9. **1:1 Parity Regression / Release** — Contract·Audit 기반 회귀, 설치형 통합 QA와 release
+각 gate가 실패하면 고친 뒤 통과하기 전까지 다음 단계로 진행하지 않는다. 새 독립 defect는 별도 Issue/commit/PR로 분리한다. #114 PASS 전에는 main merge하지 않으며 rebase와 force push를 사용하지 않는다.
 
-세부 Backend 구조, D09 Result 탐색/API 방식과 Log 저장 구조는 해당 구현 단계 전까지 확정하지 않는다.
+## Deadline
+
+**2026-10-31 KST — `STUDY USE READY = YES`**
+
+#116이 고정 deadline과 checkpoint를 추적한다. public GitHub Release는 목표가 아니며 deadline을 맞추기 위해 parity, zero-cost, lightweight, security 또는 user-data safety를 축소하지 않는다.
