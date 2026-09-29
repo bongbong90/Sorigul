@@ -36,6 +36,9 @@ ambiguous authority.
 integrates preserved Legacy behavior, approved Intentional Changes, the lightweight and zero-cost
 constraints, the 2026-10-31 study-use deadline, and the Git/GitHub governance lock.
 
+Unclear cost fails closed: no paid resource or fallback is enabled when zero-cost status cannot be
+safely established.
+
 The most important engine guardrail is explicit: Local is OpenAI Whisper `medium`; Colab is
 `faster-whisper large-v3` with CUDA `float16` preferred and CPU `int8` fallback. The current Sorigul
 Colab `medium` implementation is a defect owned by #106, not product authority.
