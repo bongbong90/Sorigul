@@ -27,6 +27,7 @@ from src.domain.models import (
 from src.services.job_manager import JobManager
 from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.scanner import FileScanner
+from src.services.windows_system import resolve_system32_executable
 
 
 logger = logging.getLogger(__name__)
@@ -443,7 +444,7 @@ class OAuthAttempt:
 def _resolve_current_windows_sid(run=None) -> str:
     runner = run or subprocess.run
     result = runner(
-        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        [str(resolve_system32_executable("whoami.exe")), "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
         check=True,
@@ -469,7 +470,7 @@ def enforce_private_file_permissions(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(path),
                     "/inheritance:r",
                     "/grant:r",
@@ -514,7 +515,7 @@ def write_private_file(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(temp_path),
                     "/inheritance:r",
                     "/grant:r",

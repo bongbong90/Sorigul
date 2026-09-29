@@ -12,7 +12,22 @@ from src.engines.colab import DirectColabHttpClient
 from src.services.colab_rendezvous import ColabRendezvousService
 from src.services.colab_security import EMPTY_SHA256, PairingRegistry, parse_request_id
 from src.services.colab_url import ColabUrlError, normalize_colab_base_url
+from src.services import windows_system
 from src.services.drive import DriveError, GoogleOAuthService, write_private_file
+
+
+@pytest.fixture(autouse=True)
+def trusted_system32(tmp_path_factory, monkeypatch):
+    """A fake OS-reported System32 so ACL argv is exact on every platform."""
+    directory = tmp_path_factory.mktemp("System32")
+    for name in windows_system.SYSTEM32_UTILITIES:
+        (directory / name).write_bytes(b"")
+    monkeypatch.setattr(windows_system, "_query_system_directory", lambda: str(directory))
+    return directory
+
+
+def _utility(args):
+    return Path(args[0]).name
 
 
 class FakeDriveClient:
@@ -157,19 +172,21 @@ def test_private_file_posix_mode_is_0600(tmp_path):
     assert target.exists()
 
 
-def test_private_file_windows_acl_uses_exact_sid_before_publish(tmp_path):
+def test_private_file_windows_acl_uses_exact_sid_before_publish(tmp_path, trusted_system32):
     target = tmp_path / "token.json"
     calls = []
 
     def run(args, **kwargs):
         calls.append((list(args), target.exists(), dict(kwargs)))
-        if args[0] == "whoami.exe":
+        if _utility(args) == "whoami.exe":
             return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
         return SimpleNamespace(stdout="")
 
     write_private_file(target, "test-token", platform_name="nt", run=run)
     assert target.read_text(encoding="utf-8") == "test-token"
-    assert calls[1][0][0] == "icacls.exe"
+    assert calls[0][0][0] == str(trusted_system32 / "whoami.exe")
+    assert calls[0][2]["shell"] is False
+    assert calls[1][0][0] == str(trusted_system32 / "icacls.exe")
     assert calls[1][0][-3:] == ["/inheritance:r", "/grant:r", "*S-1-5-21-123:(F)"]
     assert calls[1][1] is False
     assert calls[1][2]["shell"] is False
@@ -179,7 +196,7 @@ def test_private_file_acl_failure_never_publishes_and_cleans_temp(tmp_path):
     target = tmp_path / "token.json"
 
     def run(args, **_kwargs):
-        if args[0] == "whoami.exe":
+        if _utility(args) == "whoami.exe":
             return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
         raise subprocess.CalledProcessError(5, args)
 
@@ -233,14 +250,16 @@ def test_existing_posix_token_is_chmodded_before_credential_load(tmp_path, monke
     assert events[0][1:] == (token_path, 0o600)
 
 
-def test_existing_windows_token_acl_precedes_credential_load(tmp_path, monkeypatch):
+def test_existing_windows_token_acl_precedes_credential_load(
+    tmp_path, monkeypatch, trusted_system32
+):
     token_path = tmp_path / "legacy-token.json"
     token_path.write_text('{"legacy":true}', encoding="utf-8")
     events = []
 
     def run(args, **kwargs):
-        events.append((args[0], list(args), dict(kwargs)))
-        if args[0] == "whoami.exe":
+        events.append((_utility(args), list(args), dict(kwargs)))
+        if _utility(args) == "whoami.exe":
             return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
         return SimpleNamespace(stdout="")
 
@@ -254,8 +273,9 @@ def test_existing_windows_token_acl_precedes_credential_load(tmp_path, monkeypat
     ).ensure_client()
 
     assert [event[0] for event in events] == ["whoami.exe", "icacls.exe", "load"]
+    assert events[0][1][0] == str(trusted_system32 / "whoami.exe")
     assert events[1][1] == [
-        "icacls.exe",
+        str(trusted_system32 / "icacls.exe"),
         str(token_path),
         "/inheritance:r",
         "/grant:r",
@@ -271,8 +291,8 @@ def test_existing_token_permission_failure_preserves_file_and_blocks_parser(tmp_
     events = []
 
     def run(args, **_kwargs):
-        events.append(args[0])
-        if args[0] == "whoami.exe":
+        events.append(_utility(args))
+        if _utility(args) == "whoami.exe":
             return SimpleNamespace(stdout='"desktop-user","S-1-5-21-123"\n')
         raise subprocess.CalledProcessError(5, args)
 
