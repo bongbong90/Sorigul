@@ -335,18 +335,18 @@ export const api = {
   completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
     method: 'POST', body: JSON.stringify({ code }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
-  folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
-    method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  folders: (folder: string, filter: FolderFilter, signal?: AbortSignal) => request<FolderScanResult>('/folders/scan', {
+    method: 'POST', body: JSON.stringify({ folder, filter }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   // #111 live-change probe: opaque top-level metadata revision of the one
   // selected folder. Read-only; callers refresh via scan/folders on change.
   folderRevision: (folder: string, signal?: AbortSignal) => request<FolderRevision>('/folders/revision', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL,
   }),
-  textPreview: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
-  fullText: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`),
+  textPreview: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`, { signal }),
+  fullText: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`, { signal }),
   openFolderIntent: (scanId: string, itemId?: string) => {
     const query = itemId ? `?item_id=${encodeURIComponent(itemId)}` : ''
     return request<{ action: 'OPEN_FOLDER'; folder: string; item_filename?: string }>(
