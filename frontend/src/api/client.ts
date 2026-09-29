@@ -318,6 +318,9 @@ export const api = {
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  // Authoritative single-run owner (#126): the Job whose runner has not yet
+  // returned, across every folder and engine; null when idle.
+  activeJob: (signal?: AbortSignal) => request<JobModel | null>('/execution/active-job', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>
     request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/action`, {

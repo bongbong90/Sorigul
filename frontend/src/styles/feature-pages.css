@@ -164,6 +164,60 @@
   background: var(--color-status-cancelled-bg);
 }
 
+.active-run-banner {
+  border-color: var(--color-status-transcribing-text);
+  background: var(--color-status-transcribing-bg);
+}
+
+.active-run-banner > svg,
+.active-run-banner .btn svg {
+  inline-size: var(--icon-size-small);
+  block-size: var(--icon-size-small);
+  flex: 0 0 auto;
+  stroke-width: var(--icon-stroke-width);
+}
+
+.active-run-banner > div {
+  min-inline-size: 0;
+}
+
+.active-run-banner > .inline-actions {
+  flex: 0 0 auto;
+  flex-direction: row;
+}
+
+.active-run-details {
+  display: grid;
+  gap: var(--space-tight);
+  margin: 0;
+  min-inline-size: 0;
+}
+
+.active-run-details > div {
+  display: flex;
+  gap: var(--space-tight);
+  min-inline-size: 0;
+  font-size: var(--font-size-sm);
+}
+
+.active-run-details dt {
+  flex: 0 0 auto;
+  color: var(--color-text-secondary);
+}
+
+.active-run-details dd {
+  margin: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .result-summary {
   border-inline-start: 3px solid var(--color-status-failed-text);
 }
