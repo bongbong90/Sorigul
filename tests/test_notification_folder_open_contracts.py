@@ -108,10 +108,20 @@ def test_rust_folder_open_takes_job_id_and_uses_fixed_explorer_without_shell():
     command = block_after(rust, "fn open_notification_folder(")
     assert "open_validated_folder(&url, open_in_explorer)" in command
 
-    explorer = block_after(rust, "fn open_in_explorer(")
-    assert 'std::process::Command::new("explorer.exe")' in explorer
+    intent_command = block_after(rust, "fn open_folder_by_intent(")
+    assert "open_in_explorer(&intent.folder, intent.item_filename.as_deref())" in intent_command
+
+    opener = block_after(rust, "fn open_in_explorer(")
+    assert "explorer_command(folder, item_filename)?.spawn()?" in opener
+
+    # #122: Explorer by trusted absolute Windows-directory path, never PATH.
+    explorer = block_after(rust, "fn explorer_command(")
+    assert "windows_system::SystemUtility::Explorer" in explorer
+    assert "std::process::Command::new(explorer)" in explorer
     assert ".arg(&target)" in explorer
+    assert '"explorer.exe"' not in rust
     for forbidden in ("cmd.exe", '"cmd"', "powershell", '"/C"', "sh -c", "format!("):
+        assert forbidden not in opener, forbidden
         assert forbidden not in explorer, forbidden
 
 
