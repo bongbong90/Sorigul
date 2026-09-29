@@ -119,6 +119,11 @@ export interface FolderScanResult {
   counts: Record<FolderFilter, number>
 }
 
+export interface FolderRevision {
+  revision: string
+  file_count: number
+}
+
 export interface TextContent {
   filename: string
   text: string
@@ -332,6 +337,11 @@ export const api = {
   }),
   folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
     method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  }),
+  // #111 live-change probe: opaque top-level metadata revision of the one
+  // selected folder. Read-only; callers refresh via scan/folders on change.
+  folderRevision: (folder: string, signal?: AbortSignal) => request<FolderRevision>('/folders/revision', {
+    method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL,
   }),
   textPreview: (scanId: string, itemId: string) =>
     request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
