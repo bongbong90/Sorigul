@@ -273,11 +273,21 @@ def test_worker_output_verification_rejects_missing_txt(runtime_dir, tmp_path):
 
 
 class FakeCuda:
-    def __init__(self, available):
+    def __init__(self, available, total_memory=8 * 1024**3, property_error=None):
         self.available = available
+        self.total_memory = total_memory
+        self.property_error = property_error
 
     def is_available(self):
         return self.available
+
+    def get_device_name(self, _index):
+        return "Test GPU"
+
+    def get_device_properties(self, _index):
+        if self.property_error is not None:
+            raise self.property_error
+        return SimpleNamespace(total_memory=self.total_memory)
 
 
 class FakeModel:
@@ -338,6 +348,69 @@ def test_runtime_worker_keeps_cuda_cpu_and_fp16_fallbacks(tmp_path, monkeypatch)
     assert cpu_response["device"] == "cpu"
     assert cpu_whisper.loads == [("medium", "cuda"), ("medium", "cpu")]
     assert cpu_model.calls[0][1]["fp16"] is False
+
+
+@pytest.mark.parametrize(
+    "cuda,device,expected",
+    [
+        (FakeCuda(True, 8 * 1024**3), "cuda", True),
+        (FakeCuda(True, 4 * 1024**3), "cuda", False),
+        (FakeCuda(True, property_error=RuntimeError("query failed")), "cuda", False),
+        (FakeCuda(False), "cpu", False),
+        (FakeCuda(True, 8 * 1024**3), "cpu", False),
+    ],
+    ids=("cuda-8g", "cuda-4g", "property-error", "cuda-unavailable", "cpu-model"),
+)
+def test_runtime_fp16_policy_uses_selected_device_and_vram(cuda, device, expected):
+    assert local_runtime_main._detect_fp16(SimpleNamespace(cuda=cuda), device) is expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    ("CUDA kernel failed", "out of memory", "cuDNN error", "not implemented for 'half'"),
+)
+def test_runtime_fp16_retryable_markers(message):
+    assert local_runtime_main._is_fp16_retryable_error(RuntimeError(message)) is True
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        FileNotFoundError("CUDA input file missing"),
+        PermissionError("fp16 permission denied"),
+        IsADirectoryError("half path is a directory"),
+    ),
+)
+def test_runtime_file_errors_are_not_retried_as_fp16(tmp_path, monkeypatch, failure):
+    source = tmp_path / "lecture.mp3"
+    source.touch()
+    output = tmp_path / "output"
+    output.mkdir()
+    model = FakeModel(failure=failure)
+    whisper = FakeWhisper(model)
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=FakeCuda(True)))
+    monkeypatch.setitem(sys.modules, "whisper", whisper)
+
+    with pytest.raises(type(failure)):
+        local_runtime_main._transcribe(
+            {
+                "input_path": str(source),
+                "output_dir": str(output),
+                "options": dict(LocalWhisperEngine.TRANSCRIBE_OPTIONS),
+            }
+        )
+
+    assert len(model.calls) == 1
+    assert model.calls[0][1] == {
+        "language": "ko",
+        "task": "transcribe",
+        "temperature": 0,
+        "beam_size": 5,
+        "best_of": 5,
+        "patience": 1.0,
+        "condition_on_previous_text": False,
+        "fp16": True,
+    }
 
 
 def test_worker_failure_protocol_uses_stdout_without_traceback(monkeypatch):

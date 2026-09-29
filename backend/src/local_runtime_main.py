@@ -12,6 +12,20 @@ from src.engines.local_whisper import EXPECTED_CUDA, PROTOCOL_VERSION, TORCH_REQ
 from src.services.output_bundle import OutputBundleWriter
 
 
+FP16_MIN_VRAM_BYTES = 6 * 1024**3
+FP16_RETRYABLE_MARKERS = (
+    "cuda",
+    "out of memory",
+    "oom",
+    "half",
+    "fp16",
+    "float16",
+    "cublas",
+    "cudnn",
+    "not implemented for 'half'",
+)
+
+
 def _cuda_build_detail(torch_module) -> str:
     cuda_version = torch_module.version.cuda
     if cuda_version is None:
@@ -73,6 +87,30 @@ def _validate_request(request: Any) -> dict:
     return request
 
 
+def _detect_fp16(torch_module, device: str) -> bool:
+    """Use fp16 only for the selected CUDA model on a GPU with at least 6 GiB."""
+    if device != "cuda":
+        return False
+    try:
+        if not torch_module.cuda.is_available():
+            return False
+        torch_module.cuda.get_device_name(0)
+        total_memory = torch_module.cuda.get_device_properties(0).total_memory
+        return total_memory >= FP16_MIN_VRAM_BYTES
+    except Exception:  # noqa: BLE001 - hardware introspection must fail closed
+        return False
+
+
+def _is_fp16_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, (FileNotFoundError, PermissionError, IsADirectoryError)):
+        return False
+    try:
+        lowered = str(exc).lower()
+    except Exception:  # pragma: no cover - defensive exception boundary
+        return False
+    return any(marker in lowered for marker in FP16_RETRYABLE_MARKERS)
+
+
 def _transcribe(request: dict) -> dict:
     import torch
     import whisper
@@ -96,12 +134,11 @@ def _transcribe(request: dict) -> dict:
         model = whisper.load_model("medium", device="cpu")
 
     options = dict(request["options"])
-    options["fp16"] = device == "cuda"
+    options["fp16"] = _detect_fp16(torch, device)
     try:
         payload = model.transcribe(str(source_path), **options)
     except Exception as exc:  # noqa: BLE001 - prescribed fp16 fallback
-        lowered = str(exc).lower()
-        if options["fp16"] and any(marker in lowered for marker in ("fp16", "float16", "half", "cublas")):
+        if options["fp16"] and _is_fp16_retryable_error(exc):
             print("fp16 fallback", file=sys.stderr, flush=True)
             options["fp16"] = False
             payload = model.transcribe(str(source_path), **options)
