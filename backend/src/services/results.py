@@ -13,6 +13,19 @@ from src.services.scanner import FileScanner
 ResultFilter = Literal["all", "complete", "incomplete", "results"]
 RESULT_EXTENSIONS = {".txt", ".json", ".srt"}
 KNOWN_EXTENSIONS = {".mp3", *RESULT_EXTENSIONS}
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp949", "euc-kr")
+
+
+def _read_text_with_fallback(path: Path, max_chars: Optional[int] = None) -> str:
+    """Read display text with the deterministic Legacy encoding fallback."""
+    for encoding in _TEXT_ENCODINGS:
+        try:
+            with path.open("r", encoding=encoding, errors="strict") as handle:
+                return handle.read() if max_chars is None else handle.read(max_chars)
+        except UnicodeDecodeError:
+            continue
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.read() if max_chars is None else handle.read(max_chars)
 
 
 class FolderItem(BaseModel):
@@ -131,14 +144,10 @@ class ResultsService:
         size = path.stat().st_size
         if full and size > self.max_text_bytes:
             raise ValueError("TXT_TOO_LARGE")
-        try:
-            if full:
-                text = path.read_text(encoding="utf-8")
-            else:
-                with path.open("r", encoding="utf-8") as handle:
-                    text = handle.read(self.preview_chars + 1)
-        except UnicodeDecodeError as exc:
-            raise ValueError("TXT_NOT_UTF8") from exc
+        text = _read_text_with_fallback(
+            path,
+            max_chars=None if full else self.preview_chars + 1,
+        )
         if full:
             return TextContent(filename=path.name, text=text)
         truncated = len(text) > self.preview_chars
