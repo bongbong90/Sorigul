@@ -144,7 +144,7 @@ def test_core_self_test_excludes_local_runtime_and_local_self_test_is_bounded():
         assert f'"{check}"' not in core_script
     assert "bundled_ffmpeg_execution" in sidecar_main.REQUIRED_SELF_TEST_CHECKS
     assert "$SelfTestTimeoutSeconds = 300" in local_script
-    assert 'taskkill.exe /PID $SelfTestProcess.Id /T /F' in local_script
+    assert '& $TaskkillPath /PID $SelfTestProcess.Id /T /F' in local_script
     assert "LOCAL_RUNTIME_SELFTEST_TIMEOUT_CLEANUP_FAILED" in local_script
     assert '-ArgumentList "--self-test"' in local_script
     assert "-WindowStyle Hidden" in local_script
