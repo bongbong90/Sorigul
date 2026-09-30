@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { ExternalLink, FileText, FolderOpen, Maximize2, RefreshCw, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDown, ArrowUp, ArrowUpDown, ExternalLink, FileText, FolderOpen, Maximize2, RefreshCw, X } from 'lucide-react'
 import { api, getSavedFolder, getUserMessage, isRequestAbort, saveFolder, type FolderFilter, type FolderItem } from '../api/client'
 import { useFolderRevision } from '../hooks/useFolderRevision'
+import { nextFolderSort, sortFolderItems, type SortColumn, type SortDirection } from '../lib/folderSort'
 import { isTauri, openInExplorer, pickFolder } from '../lib/native'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -27,6 +28,8 @@ export function FoldersPage() {
   const [filter, setFilter] = useState<FolderFilter>('all')
   const [scanId, setScanId] = useState('')
   const [files, setFiles] = useState<FolderItem[]>([])
+  const [sortColumn, setSortColumn] = useState<SortColumn>('filename')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc')
   const [selectedId, setSelectedId] = useState<string>()
   const [preview, setPreview] = useState(PREVIEW_PLACEHOLDER)
   const [fullText, setFullText] = useState<string>()
@@ -130,13 +133,31 @@ export function FoldersPage() {
   }
 
   const selectedFile = files.find((file) => file.id === selectedId)
+  const sortedFiles = useMemo(
+    () => sortFolderItems(files, sortColumn, sortDirection),
+    [files, sortColumn, sortDirection],
+  )
+
+  function changeSort(column: SortColumn) {
+    const next = nextFolderSort({ column: sortColumn, direction: sortDirection }, column)
+    setSortColumn(next.column)
+    setSortDirection(next.direction)
+  }
+
+  function sortIcon(column: SortColumn) {
+    if (sortColumn !== column) return <ArrowUpDown aria-hidden="true" />
+    return sortDirection === 'asc'
+      ? <ArrowUp aria-hidden="true" />
+      : <ArrowDown aria-hidden="true" />
+  }
+
   return (
     <div className="feature-page folders-page">
       <div className="page-intro"><div><p className="eyebrow">실제 파일 기준</p><h2>전사 폴더의 결과를 확인하세요</h2><p>{error ?? message}</p></div>
         <div className="inline-actions"><Button variant="secondary" onClick={() => void changeFolder()}><FolderOpen aria-hidden="true" /> 폴더 변경</Button><Button variant="secondary" disabled={!scanId} onClick={() => void requestOpenFolder()}><FolderOpen aria-hidden="true" /> 폴더 열기</Button><Button disabled={!folder || loading} onClick={() => void refresh()}><RefreshCw aria-hidden="true" /> {loading ? '새로고침 중' : '새로고침'}</Button></div></div>
       <div className="filter-bar" aria-label="Folders 필터">{folderFilters.map((item) => <button type="button" key={item.id} className={filter === item.id ? 'filter-button filter-button-active' : 'filter-button'} aria-pressed={filter === item.id} onClick={() => { setFilter(item.id); void refresh(item.id) }}>{item.label}</button>)}</div>
-      <div className="folders-layout"><Card className="data-table-card"><div className="data-table-scroll"><table className="data-table folders-table"><caption className="visually-hidden">전사 폴더 파일 목록</caption><thead><tr><th>파일명</th><th>유형</th><th>상태</th><th>수정일</th></tr></thead><tbody>
-        {files.map((file) => <tr key={file.id} className={selectedId === file.id ? 'data-row-selected' : undefined}><td><button type="button" className="table-file-button" title={file.filename} onClick={() => void selectItem(file)}>{file.filename}</button></td><td>{file.kind}</td><td><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge></td><td className="text-numeric">{new Date(file.modified_at).toLocaleString('ko-KR')}</td></tr>)}
+      <div className="folders-layout"><Card className="data-table-card"><div className="data-table-scroll"><table className="data-table folders-table"><caption className="visually-hidden">전사 폴더 파일 목록</caption><thead><tr><th aria-sort={sortColumn === 'filename' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}><button type="button" className="table-sort-button" onClick={() => changeSort('filename')}>파일명 {sortIcon('filename')}</button></th><th aria-sort={sortColumn === 'kind' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}><button type="button" className="table-sort-button" onClick={() => changeSort('kind')}>유형 {sortIcon('kind')}</button></th><th>상태</th><th>수정일</th></tr></thead><tbody>
+        {sortedFiles.map((file) => <tr key={file.id} className={selectedId === file.id ? 'data-row-selected' : undefined}><td><button type="button" className="table-file-button" title={file.filename} onClick={() => void selectItem(file)}>{file.filename}</button></td><td>{file.kind}</td><td><Badge tone={statusTone(file.status)}>{statusLabel(file.status)}</Badge></td><td className="text-numeric">{new Date(file.modified_at).toLocaleString('ko-KR')}</td></tr>)}
         {!loading && files.length === 0 ? <tr><td colSpan={4}>표시할 파일이 없습니다.</td></tr> : null}
       </tbody></table></div></Card>
         <Card className="preview-card"><div className="section-heading-row"><div><span className="eyebrow">TXT Preview</span><h2 className="text-section-heading">{selectedFile?.filename ?? '파일을 선택하세요'}</h2></div><FileText aria-hidden="true" /></div><p className="preview-copy">{preview}</p><div className="inline-actions"><Button variant="secondary" disabled={selectedFile?.kind !== 'TXT'} onClick={() => void showFullText()}><Maximize2 aria-hidden="true" /> 전체 보기</Button><Button variant="secondary" disabled={!selectedId} onClick={() => void requestOpenFolder(selectedId)}><ExternalLink aria-hidden="true" /> 폴더 열기</Button></div></Card>

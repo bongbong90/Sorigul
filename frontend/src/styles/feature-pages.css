@@ -77,6 +77,7 @@
 .text-action:focus-visible,
 .icon-action:focus-visible,
 .filter-button:focus-visible,
+.table-sort-button:focus-visible,
 .table-file-button:focus-visible {
   outline: var(--focus-ring-width) solid var(--color-primary);
   outline-offset: var(--focus-ring-offset);
@@ -538,6 +539,23 @@
 
 .folders-table th:first-child {
   inline-size: 45%;
+}
+
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-tight);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button svg {
+  inline-size: 14px;
+  block-size: 14px;
 }
 
 .table-file-button {
