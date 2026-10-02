@@ -150,6 +150,45 @@ def test_core_self_test_excludes_local_runtime_and_local_self_test_is_bounded():
     assert "-WindowStyle Hidden" in local_script
 
 
+def test_local_runtime_self_test_failure_diagnostics_are_bounded_and_fail_closed():
+    script = (REPO_ROOT / "scripts/build_local_whisper_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "$SelfTestStdoutLimitBytes = 16KB" in script
+    assert "$SelfTestStderrTailLimitBytes = 16KB" in script
+    assert "Read-BoundedUtf8Text $SelfTestStdout" in script
+    assert "Read-BoundedUtf8Text $SelfTestStderr" in script
+    for field in (
+        "exit=",
+        "stdout=",
+        "stderr_tail=",
+        "json_parsed=",
+        "parse_error=",
+        "protocol=",
+        "ok=",
+        "status=",
+        "device=",
+        "error_code=",
+        "error_message=",
+    ):
+        assert f'"{field}$(Format-SelfTestDiagnosticValue' in script
+
+    invalid = script.index("LOCAL_RUNTIME_SELFTEST_RESPONSE_INVALID: $SelfTestDiagnostic")
+    failed = script.index("LOCAL_RUNTIME_SELFTEST_FAILED: $SelfTestDiagnostic")
+    promotion = script.rindex("Publish-RuntimeArtifacts")
+    assert invalid < promotion
+    assert failed < promotion
+    for success_condition in (
+        "$SelfTestExit -ne 0",
+        "$SelfTest.protocol_version -ne $ProtocolVersion",
+        "$SelfTest.ok -ne $true",
+        '$SelfTest.status -cne "DONE"',
+        '$SelfTest.device -cne "cuda"',
+    ):
+        assert success_condition in script
+
+
 def test_local_runtime_manifest_and_install_location_are_explicit():
     script = (REPO_ROOT / "scripts/build_local_whisper_runtime.ps1").read_text(encoding="utf-8")
     for field in (

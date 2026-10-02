@@ -10,6 +10,9 @@
 
 $ErrorActionPreference = "Stop"
 $SelfTestTimeoutSeconds = 300
+$SelfTestStdoutLimitBytes = 16KB
+$SelfTestStderrTailLimitBytes = 16KB
+$SelfTestFieldLimitChars = 2048
 $RuntimeVersion = 1
 $ProtocolVersion = 1
 $ExpectedTorch = "torch==2.13.0+cu130"
@@ -33,6 +36,45 @@ function Resolve-TrustedTaskkill {
 
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+function Read-BoundedUtf8Text($Path, [int]$MaxBytes, [bool]$Tail) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ""
+    }
+    $Stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite
+    )
+    try {
+        $WasTruncated = $Stream.Length -gt $MaxBytes
+        if ($Tail -and $WasTruncated) {
+            [void]$Stream.Seek(-$MaxBytes, [System.IO.SeekOrigin]::End)
+        }
+        $BytesToRead = [int][Math]::Min($MaxBytes, $Stream.Length - $Stream.Position)
+        $Buffer = New-Object byte[] $BytesToRead
+        $BytesRead = $Stream.Read($Buffer, 0, $BytesToRead)
+        $Text = [System.Text.Encoding]::UTF8.GetString($Buffer, 0, $BytesRead)
+        if ($WasTruncated) {
+            if ($Tail) { return "...[tail]$Text" }
+            return "$Text...[truncated]"
+        }
+        return $Text
+    } finally {
+        $Stream.Dispose()
+    }
+}
+
+function Format-SelfTestDiagnosticValue($Value, [int]$MaxChars = $SelfTestFieldLimitChars) {
+    if ($null -eq $Value) { return "<null>" }
+    $Text = [string]$Value
+    $Text = $Text.Replace("`r", "\r").Replace("`n", "\n")
+    if ($Text.Length -gt $MaxChars) {
+        return $Text.Substring(0, $MaxChars) + "...[truncated]"
+    }
+    return $Text
 }
 
 function Publish-RuntimeArtifacts($Artifacts) {
@@ -207,8 +249,33 @@ if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         throw "LOCAL_RUNTIME_SELFTEST_TIMEOUT"
     }
     $SelfTestExit = $SelfTestProcess.ExitCode
-    $SelfTestJson = [System.IO.File]::ReadAllText($SelfTestStdout, [System.Text.Encoding]::UTF8)
-    try { $SelfTest = $SelfTestJson | ConvertFrom-Json } catch { throw "LOCAL_RUNTIME_SELFTEST_RESPONSE_INVALID" }
+    $SelfTestJson = Read-BoundedUtf8Text $SelfTestStdout $SelfTestStdoutLimitBytes $false
+    $SelfTestStderrTail = Read-BoundedUtf8Text $SelfTestStderr $SelfTestStderrTailLimitBytes $true
+    $SelfTest = $null
+    $SelfTestJsonParsed = $false
+    $SelfTestParseError = $null
+    try {
+        $SelfTest = $SelfTestJson | ConvertFrom-Json
+        $SelfTestJsonParsed = $true
+    } catch {
+        $SelfTestParseError = $_.Exception.Message
+    }
+    $SelfTestDiagnostic = @(
+        "exit=$(Format-SelfTestDiagnosticValue $SelfTestExit)"
+        "stdout=$(Format-SelfTestDiagnosticValue $SelfTestJson $SelfTestStdoutLimitBytes)"
+        "stderr_tail=$(Format-SelfTestDiagnosticValue $SelfTestStderrTail $SelfTestStderrTailLimitBytes)"
+        "json_parsed=$(Format-SelfTestDiagnosticValue $SelfTestJsonParsed)"
+        "parse_error=$(Format-SelfTestDiagnosticValue $SelfTestParseError)"
+        "protocol=$(Format-SelfTestDiagnosticValue $SelfTest.protocol_version)"
+        "ok=$(Format-SelfTestDiagnosticValue $SelfTest.ok)"
+        "status=$(Format-SelfTestDiagnosticValue $SelfTest.status)"
+        "device=$(Format-SelfTestDiagnosticValue $SelfTest.device)"
+        "error_code=$(Format-SelfTestDiagnosticValue $SelfTest.error.code)"
+        "error_message=$(Format-SelfTestDiagnosticValue $SelfTest.error.message)"
+    ) -join "; "
+    if (-not $SelfTestJsonParsed) {
+        throw "LOCAL_RUNTIME_SELFTEST_RESPONSE_INVALID: $SelfTestDiagnostic"
+    }
     if (
         $SelfTestExit -ne 0 -or
         $SelfTest.protocol_version -ne $ProtocolVersion -or
@@ -216,7 +283,7 @@ if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         $SelfTest.status -cne "DONE" -or
         $SelfTest.device -cne "cuda"
     ) {
-        throw "LOCAL_RUNTIME_SELFTEST_FAILED"
+        throw "LOCAL_RUNTIME_SELFTEST_FAILED: $SelfTestDiagnostic"
     }
 
     $RuntimeHash = (Get-FileHash -LiteralPath $CandidateExe -Algorithm SHA256).Hash.ToLowerInvariant()
