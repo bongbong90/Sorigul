@@ -189,6 +189,22 @@ def test_local_runtime_self_test_failure_diagnostics_are_bounded_and_fail_closed
         assert success_condition in script
 
 
+def test_local_runtime_self_test_retains_process_handle_before_bounded_poll():
+    script = (REPO_ROOT / "scripts/build_local_whisper_runtime.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    start = script.index("$SelfTestProcess = Start-Process")
+    retain_handle = script.index("[void]$SelfTestProcess.Handle")
+    deadline = script.index("$Deadline = [DateTime]::UtcNow.AddSeconds")
+    poll = script.index("while (-not $SelfTestProcess.HasExited")
+    exit_code = script.index("$SelfTestExit = $SelfTestProcess.ExitCode")
+
+    assert start < retain_handle < deadline < poll < exit_code
+    assert "Start-Process" in script[start:retain_handle]
+    assert "-Wait" not in script[start:retain_handle]
+
+
 def test_local_runtime_manifest_and_install_location_are_explicit():
     script = (REPO_ROOT / "scripts/build_local_whisper_runtime.ps1").read_text(encoding="utf-8")
     for field in (

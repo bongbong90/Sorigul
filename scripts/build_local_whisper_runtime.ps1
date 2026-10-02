@@ -236,6 +236,10 @@ if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         -RedirectStandardError $SelfTestStderr `
         -WindowStyle Hidden `
         -PassThru
+    # Windows PowerShell 5 can release the native process handle before this
+    # bounded poll observes exit, leaving ExitCode as $null. Force handle
+    # acquisition while the process is live so the exact exit code is retained.
+    [void]$SelfTestProcess.Handle
     $Deadline = [DateTime]::UtcNow.AddSeconds($SelfTestTimeoutSeconds)
     while (-not $SelfTestProcess.HasExited -and [DateTime]::UtcNow -lt $Deadline) {
         Start-Sleep -Milliseconds 250
