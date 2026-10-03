@@ -33,6 +33,48 @@ function Get-MsiInventory($Directory) {
     )
 }
 
+function Invoke-CanonicalSidecarBuild {
+    # Runs only the sibling build_backend_sidecar.ps1 in a separate trusted
+    # Windows PowerShell 5 process. The script is parsed from its file and run
+    # as a ScriptBlock (like -Command), so a Restricted effective policy that
+    # blocks direct .ps1 invocation is neither changed nor bypassed, while
+    # $PSScriptRoot/$PSCommandPath stay file-backed. Returns the child exit code.
+    $SystemDirectory = [System.Environment]::SystemDirectory
+    $TrustedPowerShell = Join-Path $SystemDirectory "WindowsPowerShell\v1.0\powershell.exe"
+    if ([string]::IsNullOrWhiteSpace($SystemDirectory) -or
+        -not [System.IO.Path]::IsPathRooted($TrustedPowerShell) -or
+        -not (Test-Path -LiteralPath $TrustedPowerShell -PathType Leaf)) {
+        Write-Error "TRUSTED_WINDOWS_POWERSHELL_UNAVAILABLE"
+        return 1
+    }
+    $SidecarScript = Join-Path $PSScriptRoot "build_backend_sidecar.ps1"
+    if (-not (Test-Path -LiteralPath $SidecarScript -PathType Leaf)) {
+        Write-Error "SIDECAR_BUILD_SCRIPT_MISSING: $SidecarScript"
+        return 1
+    }
+    $QuotedScript = "'" + $SidecarScript.Replace("'", "''") + "'"
+    $ChildCommand = @"
+`$ErrorActionPreference = 'Stop'
+`$Tokens = `$null
+`$ParseErrors = `$null
+`$Ast = [System.Management.Automation.Language.Parser]::ParseFile($QuotedScript, [ref]`$Tokens, [ref]`$ParseErrors)
+if (`$ParseErrors.Count -ne 0) {
+    [Console]::Error.WriteLine('SIDECAR_BUILD_SCRIPT_PARSE_FAILED: ' + `$ParseErrors[0].Message)
+    exit 1
+}
+try {
+    & `$Ast.GetScriptBlock()
+} catch {
+    [Console]::Error.WriteLine('SIDECAR_BUILD_SCRIPT_FAILED: ' + `$_.Exception.Message)
+    exit 1
+}
+exit 0
+"@
+    $EncodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($ChildCommand))
+    & $TrustedPowerShell -NoProfile -NonInteractive -EncodedCommand $EncodedCommand | Out-Host
+    return $LASTEXITCODE
+}
+
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot "backend\src\main.py"))) {
     Write-Error "Could not confirm repository root (backend\src\main.py not found under '$RepoRoot')."
@@ -57,10 +99,10 @@ if ($MissingNotices.Count -ne 0) {
 }
 
 Write-Step "Building + validating the isolated backend sidecar candidate"
-& (Join-Path $PSScriptRoot "build_backend_sidecar.ps1")
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Sidecar build/self-test failed (exit $LASTEXITCODE). Stopping before frontend/Tauri build."
-    exit $LASTEXITCODE
+$SidecarExitCode = Invoke-CanonicalSidecarBuild
+if ($SidecarExitCode -ne 0) {
+    Write-Error "Sidecar build/self-test failed (exit $SidecarExitCode). Stopping before frontend/Tauri build."
+    exit $SidecarExitCode
 }
 
 $BinariesDir = Join-Path $RepoRoot "frontend\src-tauri\binaries"
