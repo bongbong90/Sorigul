@@ -53,7 +53,10 @@ function Invoke-TrustedPowerShellReadOnly {
     param([Parameter(Mandatory = $true)][string]$CommandText)
     # PS5 native -Command argument serialization removes embedded quotes.
     # UTF-16LE encoding preserves the read-only probe across that boundary.
-    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($CommandText))
+    # EncodedCommand serializes module-autoload progress as CLIXML on stderr;
+    # keep read-only probes quiet so later native tool logs remain plain text.
+    $ProbeCommand = '$ProgressPreference = ''SilentlyContinue''; ' + $CommandText
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($ProbeCommand))
     & $TrustedPowerShell -NoProfile -NonInteractive -EncodedCommand $EncodedCommand
 }
 

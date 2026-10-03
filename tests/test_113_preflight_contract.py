@@ -87,6 +87,7 @@ def test_ps5_read_only_probes_preserve_quotes_across_native_boundary(tmp_path):
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr == "", "read-only probes must not pollute native tool logs with CLIXML"
     lines = result.stdout.splitlines()
     assert len(lines) == 6
     assert lines[0].startswith("5.1.") and lines[0].endswith("|Desktop")
