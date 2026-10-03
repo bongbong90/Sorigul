@@ -50,6 +50,18 @@
 - 실패한 gate를 건너뛰지 않는다. 원인과 영향, 다음 조치를 Issue에 남긴다.
 - 외부 zero-cost dependency를 안전하게 검증할 수 없으면 기능을 삭제하거나 paid fallback을 도입하지 않고 `PENDING`으로 기록한다.
 
+## #113 preflight and artifact checkpoint semantics
+
+- #113의 pre-build command contract는 대화나 에이전트 기억이 아니라 repository가 소유한다.
+- canonical entrypoint는 `scripts/run_113_preflight.ps1` 하나다. 실행자는 이 스크립트의 child pytest/cwd/PYTHONPATH를 직접 재구성하지 않는다.
+- source-changing work를 commit/push/PR한 뒤 exact source HEAD를 Freeze하고, 그 **frozen HEAD에서 canonical preflight rehearsal을 artifact 생성 없이 완주**한다.
+- **preflight PASS 후에만 새 artifact run_id와 Single Writer session을 만든다.** Preflight 이전 harness 오류는 artifact session 폐기 사유가 아니다.
+- artifact session 중 이미 PASS한 stage는 `동일 HEAD + 동일 run_id + 동일 release-input identity`와 해당 artifact manifest/hash가 그대로인 경우 immutable checkpoint로 유지할 수 있다.
+- 이후 실패가 cwd, command construction, environment 전달, 로그 수집 같은 **harness/invocation failure**이고 기존 PASS artifact의 content/provenance를 바꾸지 않았다면 같은 run_id에서 실패 stage만 재시도한다. 각 attempt와 supersession을 evidence에 기록한다.
+- 다음은 checkpoint 재사용 금지 및 HARD STOP이다: source HEAD 또는 release input 변경, artifact self-test/content failure, artifact hash/provenance mismatch, manifest/source pairing ambiguity, MSI current-run identity ambiguity, install identity ambiguity, protected user-data mutation, orphan/port cleanup failure, temporary mutation restoration failure.
+- source HEAD 또는 release input 변경이 필요한 수정이면 기존 artifact evidence를 final evidence로 재사용하지 않고 새 Freeze부터 다시 시작한다.
+- 동일 stage 재시도에서도 failed/partial candidate를 final artifact로 승격하지 않는다. final evidence는 하나의 명확한 current attempt와 immutable PASS hashes를 가리켜야 한다.
+
 ## Merge policy
 
 - work unit이 완료되어도 PR은 승인된 merge gate까지 OPEN으로 유지할 수 있다.

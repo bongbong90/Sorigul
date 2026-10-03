@@ -171,11 +171,13 @@ def test_current_manifest_ownership_routes_local_identity_away_from_core():
     assert "is superseded by Current Product Contract §7" in truth
 
 
-def test_current_release_gate_orders_fresh_split_artifacts_before_installed_cuda():
+def test_current_release_gate_orders_preflight_before_fresh_artifacts_and_installed_cuda():
     status = read_repo("docs/release/CURRENT_RELEASE_STATUS.md")
-    steps = re.findall(r"^\d+\. (.+)$", status, re.MULTILINE)
+    steps = re.findall(r"^\\d+\\. (.+)$", status, re.MULTILINE)
     gates = (
         "Release Freeze:",
+        "canonical #113 preflight rehearsal",
+        "issue new artifact run_id",
         "fresh Local Runtime build",
         "fresh Core build",
         "fresh MSI",
@@ -184,13 +186,17 @@ def test_current_release_gate_orders_fresh_split_artifacts_before_installed_cuda
         "installed CUDA synthetic tensor",
         "only then actual Local MP3 gate",
     )
-    positions = [next(i for i, step in enumerate(steps) if step.startswith(gate)) for gate in gates]
+    positions = [
+        next(i for i, step in enumerate(steps) if step.startswith(gate))
+        for gate in gates
+    ]
 
     assert positions == sorted(positions)
     assert "fresh current-HEAD CUDA sidecar" not in status
-    assert "#113 remains BLOCKED until the prerequisites complete" in status
-    assert "separate 6A-R3c Core" in status
-    assert "one branch, one frozen HEAD and one artifact session" in status
+    assert "PRE-BUILD SOURCE READY = REQUIRES PREFLIGHT" in status
+    assert "#55 canonical preflight orchestration" in status
+    assert "preflight rehearsal is deliberately outside the artifact session" in status
+    assert "under the same run_id" in status
 
 
 def test_no_paid_ci_workflow_exists():

@@ -18,6 +18,18 @@ Sorigul은 greenfield architecture를 사용하되 Legacy ACTIVE 사용자 기�
 - [Roadmap](docs/project/ROADMAP.md)
 - [Documentation index](docs/README.md)
 
+## #113 canonical preflight
+
+#113 artifact session 전에 개발자나 에이전트가 개별 pytest working directory, PYTHONPATH 또는 child command를 기억해서 재구성하지 않는다. repository root에서 아래 **한 명령만** 실행한다.
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\run_113_preflight.ps1"
+```
+
+이 `Bypass`는 해당 preflight PowerShell process에만 적용한다. `Set-ExecutionPolicy`, registry 또는 Group Policy를 변경하지 않는다. 스크립트가 canonical root/backend working directory, trusted Windows executables, #161/#159 targeted regression과 전체 source regression을 소유한다. **child command를 직접 재구성하지 않는다.**
+
+Preflight는 Local Runtime/Core/MSI를 만들거나 Sorigul을 설치·제거하지 않는다. Frozen HEAD에서 preflight가 PASS한 뒤에만 새 #113 artifact `run_id`와 Single Writer session을 만든다.
+
 ## Frontend
 
 - React

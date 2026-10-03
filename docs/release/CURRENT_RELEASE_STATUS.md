@@ -12,17 +12,21 @@ This is the living current release ledger, not a historical validation artifact.
 
 `RELEASE READY = NO`
 
-`PRE-BUILD SOURCE READY = YES`
+`PRE-BUILD SOURCE READY = REQUIRES PREFLIGHT`
 
 The current source cannot be called release-ready until one fresh Local Runtime / Core / MSI set
 from the frozen Release Candidate HEAD passes clean install, installed Core/Local provenance
 pairing and installed CUDA synthetic validation, followed by the real Local gate. Prior isolated
 or stopped-attempt artifacts are historical evidence only and cannot satisfy fresh #113.
 
-The current sequence is 6A-R3b / #154 manifest gate reconciliation → separate 6A-R3c Core
-PowerShell 5 process-handle hardening → Release Freeze → #113 Fresh Artifact / Install Gate.
-#113 remains BLOCKED until the prerequisites complete. Release Freeze requires one agent,
-one branch, one frozen HEAD and one artifact session.
+#150, #154, #159 and #161 are complete. The latest #113 attempt stopped before
+artifact build because backend pytest was invoked from the wrong working directory; no
+product/source defect was established by that STOP.
+
+The current sequence is #55 canonical preflight orchestration → exact source Freeze →
+canonical preflight rehearsal PASS → new artifact run_id + Single Writer → #113 Fresh
+Artifact / Install Gate. The preflight rehearsal is deliberately outside the artifact session
+and must not build Local/Core/MSI artifacts or install/uninstall Sorigul.
 
 ## CUDA release requirement
 
@@ -54,28 +58,46 @@ TryCloudflare Quick Tunnel is only a best-effort connection to a user-started Co
 existing free/accountless research path with testing/development operational limitations. Sorigul
 does not automatically provision a paid or managed replacement.
 
-## Required post-E official release gate
+## Artifact checkpoint / retry policy
+
+A failure is classified by whether artifact identity remains trustworthy, not only by which
+stage number failed. A prior PASS stage may be retained when exact source HEAD, artifact
+run_id, release-input identity, manifest identity, artifact SHA-256/size and required
+self-test evidence are unchanged.
+
+If a later failure is only a harness/invocation error (for example cwd, command construction,
+environment forwarding or log collection) and it does not mutate those identities, retry only
+the failed stage under the same run_id and record the prior attempt as superseded.
+
+HARD STOP and checkpoint invalidation remain mandatory for source/release-input changes,
+artifact content/self-test failure, hash/provenance mismatch, manifest/source ambiguity,
+MSI identity ambiguity, install identity ambiguity, protected-user-data mutation,
+orphan/port cleanup failure or restoration failure.
+
+## Required official release gate
 
 The order is fixed:
 
-1. SOURCE regression PASS and separate 6A-R3c complete
-2. Release Freeze: exact Release Candidate HEAD and Single Writer preflight
-3. fresh Local Runtime build, isolated CUDA self-test and Local identity/manifest/hash
-4. fresh Core build, isolated Core self-test, Core provenance/size/hash and payload exclusions
-5. fresh MSI from the same frozen HEAD and current-run Core manifest/hash
-6. clean install
-7. installed Core/Local provenance pairing and fail-closed Local runtime discovery
-8. installed health/process/JobObject
-9. installed CUDA synthetic tensor
-10. bundled sibling ffmpeg
-11. Unicode/temp synthetic scan
-12. no-user-data verification
-13. only then actual Local MP3 gate
-14. optional zero-cost-safe external Colab gate
-15. optional zero-cost-safe Drive TXT/JSON/SRT gate
-16. Folders/retry/cleanup verification
-17. supervised shutdown only with explicit user approval
-18. final ledger
+1. source-changing work complete and source regression PASS
+2. Release Freeze: exact Release Candidate HEAD
+3. canonical #113 preflight rehearsal PASS with no Local/Core/MSI build or install
+4. issue new artifact run_id and acquire the Single Writer lock
+5. fresh Local Runtime build, isolated CUDA self-test and Local identity/manifest/hash
+6. fresh Core build, isolated Core self-test, Core provenance/size/hash and payload exclusions
+7. fresh MSI from the same frozen HEAD and current-run Core manifest/hash
+8. clean install
+9. installed Core/Local provenance pairing and fail-closed Local runtime discovery
+10. installed health/process/JobObject
+11. installed CUDA synthetic tensor
+12. bundled sibling ffmpeg
+13. Unicode/temp synthetic scan
+14. no-user-data verification
+15. only then actual Local MP3 gate
+16. optional zero-cost-safe external Colab gate
+17. optional zero-cost-safe Drive TXT/JSON/SRT gate
+18. Folders/retry/cleanup verification
+19. supervised shutdown only with explicit user approval
+20. final ledger and #114 Study Workflow Regression
 
 Until the synthetic installed gates pass, the real MP3 gate is blocked. Actual Windows shutdown is
 also blocked without immediate explicit user approval.
