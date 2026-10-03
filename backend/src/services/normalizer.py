@@ -1,4 +1,6 @@
 import re
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Set
 from pydantic import BaseModel
@@ -16,8 +18,13 @@ CONTROL_CHARS_PATTERN = re.compile(r'[\x00-\x1f\x7f]')
 # detected week/lesson, so leftover title text never survives into output.
 PAGE_MARKER_PATTERN = re.compile(r'\(\s*p\.?\s*\d+\s*(?:[~\-]\s*\d*)?\s*\)', re.IGNORECASE)
 
+# Legacy week/lesson detection precedence (#124). A leading "N강" is the
+# course-wide lecture counter of the downloaded name (e.g. "13강_[4주차]_..."),
+# never the lesson within the week: a lesson only counts when it follows the
+# week ("N주차 ... M강") or comes from the "[N-M]" week-lesson bracket.
+BRACKET_WEEK_LESSON_PATTERN = re.compile(r'\[(\d+)-(\d+)\]')
+WEEK_AND_LESSON_PATTERN = re.compile(r'(\d+)\s*주차[^\d]*(\d+)\s*강')
 WEEK_PATTERN = re.compile(r'(\d+)\s*주차')
-LESSON_PATTERN = re.compile(r'(\d+)\s*강')
 
 STANDARD_PATTERN = re.compile(
     r'^(?P<course>[^_]+)_(?P<subject>[^_]+)_(?P<week>\d+)주차_(?P<lesson>\d+)강$'
@@ -26,6 +33,38 @@ STANDARD_PATTERN = re.compile(
 RESULT_EXTENSIONS = (".mp3", ".txt", ".json", ".srt")
 
 MAX_LESSON_SEARCH_ATTEMPTS = 1000
+
+
+class DetectionMode(str, Enum):
+    BRACKET = "BRACKET"                  # "[N-M]": week N, preferred lesson M
+    WEEK_AND_LESSON = "WEEK_AND_LESSON"  # "N주차 ... M강": week N, preferred lesson M
+    WEEK_ONLY = "WEEK_ONLY"              # "N주차" alone: week N, first free lesson
+    UNKNOWN = "UNKNOWN"                  # no week: INVALID_TARGET
+
+
+@dataclass(frozen=True)
+class WeekLessonDetection:
+    week: Optional[int]
+    preferred_lesson: Optional[int]
+    mode: DetectionMode
+
+
+def detect_week_lesson(text: str) -> WeekLessonDetection:
+    """Detect week/lesson with the Legacy precedence: bracket, then
+    week-followed-by-lesson, then week only. Course/subject are never
+    detected here (D12)."""
+    bracket = BRACKET_WEEK_LESSON_PATTERN.search(text)
+    if bracket:
+        return WeekLessonDetection(int(bracket.group(1)), int(bracket.group(2)), DetectionMode.BRACKET)
+    week_and_lesson = WEEK_AND_LESSON_PATTERN.search(text)
+    if week_and_lesson:
+        return WeekLessonDetection(
+            int(week_and_lesson.group(1)), int(week_and_lesson.group(2)), DetectionMode.WEEK_AND_LESSON
+        )
+    week = WEEK_PATTERN.search(text)
+    if week:
+        return WeekLessonDetection(int(week.group(1)), None, DetectionMode.WEEK_ONLY)
+    return WeekLessonDetection(None, None, DetectionMode.UNKNOWN)
 
 
 class ClassificationValidationError(ValueError):
@@ -137,28 +176,28 @@ class FilenameNormalizer:
             cleaned = PAGE_MARKER_PATTERN.sub(' ', cleaned)
             cleaned = re.sub(r'\s+', ' ', cleaned).strip()
 
-            week_match = WEEK_PATTERN.search(cleaned)
-            lesson_match = LESSON_PATTERN.search(cleaned)
-
-            if not week_match or not lesson_match:
+            detection = detect_week_lesson(cleaned)
+            if detection.week is None:
                 return NormalizationPreview(
                     original_name=original_name,
                     suggested_name=None,
                     detected_course=course,
                     detected_subject=subject,
-                    detected_week=week_match.group(1) if week_match else None,
-                    detected_lesson=lesson_match.group(1) if lesson_match else None,
+                    detected_week=None,
+                    detected_lesson=None,
                     warnings=["파일명에서 주차/강을 확인하지 못했습니다."],
                     conflicts=[],
                     can_apply=False,
                     result_type="INVALID_TARGET",
                 )
 
-            week = week_match.group(1)
-            lesson = int(lesson_match.group(1))
+            week = str(detection.week)
+            # Week-only names take the first free lesson of that week.
+            lesson = detection.preferred_lesson if detection.preferred_lesson is not None else 1
 
-        # Resolve the target stem, stepping the lesson number forward past
-        # any collision on disk/in-batch -- this applies even when the file
+        # Resolve the target stem: the preferred (or first) lesson number,
+        # stepped forward past any MP3/TXT/JSON/SRT stem already on disk or
+        # reserved earlier in the batch -- this applies even when the file
         # is already standard-named, so a batch of files that would collide
         # on the same lesson number still gets a stable, conflict-free
         # assignment (Section 19).
