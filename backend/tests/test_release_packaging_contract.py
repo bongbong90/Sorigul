@@ -329,6 +329,8 @@ def test_manifest_contains_release_identity_without_personal_data_fields():
 
     for field in required_fields:
         assert f"{field} =" in script
+    for local_only in ("torch_requirement", "expected_cuda"):
+        assert local_only not in script
     for forbidden in ("username =", "user_home =", "credential =", "token =", "mp3_path ="):
         assert forbidden not in script.lower()
 
@@ -338,9 +340,12 @@ def test_local_manifest_requirement_is_a_scalar_string_and_round_trip_validated(
 
     assert '$ExpectedTorch = "torch==2.13.0+cu130"' in script
     assert '$ExpectedCuda = "13.0"' in script
+    assert "torch_requirement = $ExpectedTorch" in script
+    assert "expected_cuda = $ExpectedCuda" in script
     assert "$ManifestJson | ConvertFrom-Json" in script
     assert "$RoundTrippedManifest.torch_requirement -is [string]" in script
     assert "$RoundTrippedManifest.torch_requirement -cne $ExpectedTorch" in script
+    assert "$RoundTrippedManifest.expected_cuda -is [string]" in script
     assert "$RoundTrippedManifest.expected_cuda -cne $ExpectedCuda" in script
     assert "LOCAL_RUNTIME_MANIFEST_INVALID" in script
 
@@ -367,6 +372,12 @@ def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
     assert "$Manifest.source_head -cne $CurrentSourceHead" in installer
     assert "BUILD_MANIFEST_SOURCE_HEAD_MISMATCH" in installer
     assert "$Manifest.tracked_tree_clean -is [bool]" in installer
+    assert "$Manifest.tracked_tree_clean -ne $true" in installer
+    assert "$ActualSidecarHash -ne $Manifest.sidecar_sha256" in installer
+    assert "$ActualFfmpegHash -ne $Manifest.ffmpeg_sha256" in installer
+    assert "BUILD_MANIFEST_ARTIFACT_MISMATCH" in installer
+    for local_only in ("torch_requirement", "expected_cuda"):
+        assert local_only not in installer
 
 
 def test_manifest_integer_round_trip_accepts_windows_and_core_powershell_types():
@@ -378,7 +389,7 @@ def test_manifest_integer_round_trip_accepts_windows_and_core_powershell_types()
         assert "core_sidecar_size_limit_mib -is [long]" in script
 
 
-def test_windows_powershell_manifest_requirement_serializes_as_scalar_string(tmp_path):
+def test_windows_powershell_local_manifest_requirements_serialize_as_scalar_strings(tmp_path):
     if os.name != "nt":
         pytest.skip("Windows PowerShell regression")
 
@@ -417,6 +428,8 @@ $ManifestJson = ([ordered]@{
 $RoundTrippedManifest = $ManifestJson | ConvertFrom-Json
 if (-not ($RoundTrippedManifest.torch_requirement -is [string])) { exit 22 }
 if ($RoundTrippedManifest.torch_requirement -cne "torch==2.13.0+cu130") { exit 23 }
+if (-not ($RoundTrippedManifest.expected_cuda -is [string])) { exit 24 }
+if ($RoundTrippedManifest.expected_cuda -cne "13.0") { exit 25 }
 [Console]::Out.Write($ManifestJson)
 """
 
@@ -433,3 +446,5 @@ if ($RoundTrippedManifest.torch_requirement -cne "torch==2.13.0+cu130") { exit 2
     manifest = json.loads(completed.stdout)
     assert type(manifest["torch_requirement"]) is str
     assert manifest["torch_requirement"] == "torch==2.13.0+cu130"
+    assert type(manifest["expected_cuda"]) is str
+    assert manifest["expected_cuda"] == "13.0"

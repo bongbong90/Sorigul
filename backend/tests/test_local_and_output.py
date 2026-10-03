@@ -159,6 +159,105 @@ def test_runtime_manifest_provenance_is_required_and_must_match(runtime_dir):
     assert mismatch.value.code == "LOCAL_RUNTIME_PROVENANCE_MISMATCH"
 
 
+@pytest.mark.parametrize(
+    "field,wrong_value",
+    [
+        ("runtime_type", "other-runtime"),
+        ("torch_requirement", "torch==2.13.0+cpu"),
+        ("expected_cuda", "12.0"),
+    ],
+)
+@pytest.mark.parametrize("shape", ["missing", "wrong", "object", "array"])
+def test_runtime_local_identity_requires_exact_scalar_strings(runtime_dir, field, wrong_value, shape):
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    exact_value = manifest.pop(field)
+    if shape == "wrong":
+        manifest[field] = wrong_value
+    elif shape == "object":
+        manifest[field] = {"value": exact_value}
+    elif shape == "array":
+        manifest[field] = [exact_value]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(EngineError) as caught:
+        verify_runtime(runtime_dir)
+
+    assert caught.value.code == "LOCAL_RUNTIME_INVALID"
+    assert caught.value.technical_detail == f"invalid {field}"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("runtime_version", 2),
+        ("runtime_version", None),
+        ("runtime_version", "1"),
+        ("runtime_version", True),
+        ("protocol_version", None),
+        ("protocol_version", "1"),
+        ("protocol_version", True),
+    ],
+)
+def test_runtime_versions_require_supported_integer_identity(runtime_dir, field, value):
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if value is None:
+        manifest.pop(field)
+    else:
+        manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(EngineError) as caught:
+        verify_runtime(runtime_dir)
+
+    assert caught.value.code == "LOCAL_RUNTIME_VERSION_MISMATCH"
+
+
+@pytest.mark.parametrize("value", [None, False, "true", 1])
+def test_runtime_tracked_provenance_requires_clean_boolean(runtime_dir, value):
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if value is None:
+        manifest.pop("tracked_tree_clean")
+    else:
+        manifest["tracked_tree_clean"] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(EngineError) as caught:
+        verify_runtime(runtime_dir)
+
+    assert caught.value.code == "LOCAL_RUNTIME_INVALID"
+    assert caught.value.technical_detail == "invalid runtime source provenance"
+
+
+@pytest.mark.parametrize("value", [None, "0" * 64])
+def test_runtime_artifact_hash_is_required_and_must_match(runtime_dir, value):
+    manifest_path = runtime_dir / "runtime-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if value is None:
+        manifest.pop("artifact_sha256")
+    else:
+        manifest["artifact_sha256"] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(EngineError) as caught:
+        verify_runtime(runtime_dir)
+
+    assert caught.value.code == "LOCAL_RUNTIME_INVALID"
+
+
+def test_runtime_exact_local_identity_accepts_matching_core_provenance(runtime_dir):
+    manifest = json.loads((runtime_dir / "runtime-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["torch_requirement"] == "torch==2.13.0+cu130"
+    assert manifest["expected_cuda"] == "13.0"
+
+    verified = verify_runtime(runtime_dir, expected_source_head="a" * 40)
+
+    assert verified.executable == runtime_dir / "sorigul-local-whisper.exe"
+    assert verified.source_head == "a" * 40
+
+
 def test_local_worker_protocol_preserves_fixed_options_and_result(runtime_dir, tmp_path):
     captured = []
     source = tmp_path / "전사자료" / "개념완성_민법_8주차_4강.mp3"

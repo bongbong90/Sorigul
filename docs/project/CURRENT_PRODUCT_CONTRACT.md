@@ -198,6 +198,16 @@ Legacy의 display-only queue clear 버튼은 복구하지 않는다. (#127 A4, A
 
 Current regression ceiling은 Core/MSI `<= 250 MiB`다. 단순 크기보다 더 중요한 requirement는 Core/MSI 안의 `torch/CUDA/Whisper/Local Runtime payload = NONE`이다.
 
+Manifest ownership도 이 split-runtime 계약에 고정한다.
+
+- **Core build manifest owns Core provenance only:** schema/version metadata, `source_head`, `tracked_tree_clean`, Core size policy, sidecar/FFmpeg size/hash와 release input hashes.
+- **Core manifest MUST NOT own `torch_requirement` / `expected_cuda`.** Core/MSI consumer인 Windows installer도 이 Local-only field를 요구하거나 consume하지 않으며 Local Runtime을 설치하지 않는다.
+- **Local Runtime manifest owns Local runtime identity:** `runtime_type`, `runtime_version`, `protocol_version`, exact scalar string `torch_requirement = "torch==2.13.0+cu130"`, `expected_cuda = "13.0"`, worker/artifact hash, artifact size, `source_head`와 tracked clean provenance.
+- **Runtime discovery is the fail-closed consumer of Local-only metadata.** exact torch/CUDA identity, runtime/protocol version, artifact hashes와 tracked provenance를 검증한다.
+- **Local/Core `source_head` pairing remains mandatory.** installed Core와 Local Runtime의 source identity가 다르면 reject한다.
+
+Historical pre-split Core torch metadata acceptance는 현재 manifest ownership을 override하지 않는다. stale gate를 만족시키기 위해 Local-only metadata를 Core/MSI에 복구하지 않는다.
+
 ## 8. Zero-cost contract
 
 다음을 자동 선택, 구매, 활성화 또는 fallback으로 사용하지 않는다.
