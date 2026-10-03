@@ -42,6 +42,14 @@ function Get-GitSingleLine {
     return [string]$Output[0].Trim()
 }
 
+function Invoke-TrustedPowerShellReadOnly {
+    param([Parameter(Mandatory = $true)][string]$CommandText)
+    # PS5 native -Command argument serialization removes embedded quotes.
+    # UTF-16LE encoding preserves the read-only probe across that boundary.
+    $EncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($CommandText))
+    & $TrustedPowerShell -NoProfile -NonInteractive -EncodedCommand $EncodedCommand
+}
+
 function Assert-TrustedWindowsExecutable {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -111,7 +119,7 @@ Write-Step '[2/6] Trusted Windows executable boundary'
 Assert-TrustedWindowsExecutable -Path $TrustedPowerShell -Label 'Windows PowerShell 5'
 Assert-TrustedWindowsExecutable -Path $TrustedTaskkill -Label 'taskkill.exe'
 $PsIdentity = @(
-    & $TrustedPowerShell -NoProfile -NonInteractive -Command '[Console]::WriteLine("{0}|{1}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition)'
+    Invoke-TrustedPowerShellReadOnly -CommandText '[Console]::WriteLine(("{0}|{1}" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition))'
 )
 if ($LASTEXITCODE -ne 0 -or $PsIdentity.Count -ne 1 -or -not $PsIdentity[0].StartsWith('5.')) {
     throw "Trusted Windows PowerShell 5 identity check failed: $($PsIdentity -join ', ')"
@@ -123,7 +131,7 @@ Write-Host "PowerShell: $($PsIdentity[0])"
 
 Write-Step '[3/6] Execution-policy snapshot (read-only)'
 $PolicySnapshot = @(
-    & $TrustedPowerShell -NoProfile -NonInteractive -Command 'Get-ExecutionPolicy -List | ForEach-Object { "{0}={1}" -f $_.Scope, $_.ExecutionPolicy }'
+    Invoke-TrustedPowerShellReadOnly -CommandText 'Get-ExecutionPolicy -List | ForEach-Object { "{0}={1}" -f $_.Scope, $_.ExecutionPolicy }'
 )
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not read Windows PowerShell execution-policy snapshot.'

@@ -1,4 +1,8 @@
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +41,57 @@ def test_113_preflight_locks_source_and_trusted_windows_boundaries():
         assert required in script
 
     assert "Set-ExecutionPolicy" not in script
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows PowerShell 5")
+def test_ps5_read_only_probes_preserve_quotes_across_native_boundary(tmp_path):
+    script = read_repo("scripts/run_113_preflight.ps1")
+    start = script.index("function Invoke-TrustedPowerShellReadOnly {")
+    helper = script[start:script.index("\nfunction Assert-TrustedWindowsExecutable", start)]
+    # Use the production probe expressions, including embedded format quotes.
+    probes = {}
+    for name in ("PsIdentity", "PolicySnapshot"):
+        block = script.split(f"${name} = @(\n", 1)[1].split("\n)", 1)[0]
+        probes[name] = block.strip()
+
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    harness = tmp_path / "read only probes 한글 with spaces.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$TrustedPowerShell = Join-Path ([Environment]::SystemDirectory) "
+        "'WindowsPowerShell\\v1.0\\powershell.exe'\n"
+        f"{helper}\n"
+        f"{probes['PsIdentity']}\n"
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+        f"{probes['PolicySnapshot']}\n"
+        "exit $LASTEXITCODE\n",
+        encoding="utf-8-sig",
+    )
+    # A real PS5 -File parent recreates the failing native child-call boundary.
+    environment = os.environ.copy()
+    # Python can inherit PS7-only module paths during source-level validation.
+    # Restrict this isolated PS5 parent to its own native modules.
+    environment["PSModulePath"] = str(powershell.parent / "Modules")
+    result = subprocess.run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+         "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    assert len(lines) == 6
+    assert lines[0].startswith("5.1.") and lines[0].endswith("|Desktop")
+    policies = dict(line.split("=", 1) for line in lines[1:])
+    assert set(policies) == {
+        "MachinePolicy", "UserPolicy", "Process", "CurrentUser", "LocalMachine",
+    }
+    assert policies["Process"] == "Bypass"
 
 
 def test_113_preflight_never_invokes_release_artifact_or_install_commands():
