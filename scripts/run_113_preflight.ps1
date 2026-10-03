@@ -6,6 +6,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Backend = Join-Path $RepoRoot 'backend'
 $Python = Join-Path $RepoRoot 'venv\Scripts\python.exe'
 $CoreRegression = Join-Path $PSScriptRoot 'run_core_workflow_regression.ps1'
+$SessionBootstrap = Join-Path $PSScriptRoot 'run_113_session_bootstrap.ps1'
 $SystemDirectory = [System.Environment]::SystemDirectory
 $TrustedPowerShell = Join-Path $SystemDirectory 'WindowsPowerShell\v1.0\powershell.exe'
 $TrustedTaskkill = Join-Path $SystemDirectory 'taskkill.exe'
@@ -107,7 +108,7 @@ function Assert-TrackedTreeClean {
 Write-Host 'Sorigul #113 canonical pre-build rehearsal'
 Write-Host 'This script does not build Local/Core/MSI artifacts and does not install/uninstall Sorigul.'
 
-Write-Step '[1/6] Repository identity and tracked-tree preconditions'
+Write-Step '[1/7] Repository identity and tracked-tree preconditions'
 if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot 'backend\src\main.py') -PathType Leaf)) {
     throw "Could not confirm repository root: $RepoRoot"
 }
@@ -125,7 +126,7 @@ if ($Head -cne $Upstream) {
 Assert-TrackedTreeClean
 Write-Host "HEAD: $Head"
 
-Write-Step '[2/6] Trusted Windows executable boundary'
+Write-Step '[2/7] Trusted Windows executable boundary'
 Assert-TrustedWindowsExecutable -Path $TrustedPowerShell -Label 'Windows PowerShell 5'
 Assert-TrustedWindowsExecutable -Path $TrustedTaskkill -Label 'taskkill.exe'
 $PsIdentity = @(
@@ -139,7 +140,7 @@ if (-not $PsIdentity[0].EndsWith('|Desktop')) {
 }
 Write-Host "PowerShell: $($PsIdentity[0])"
 
-Write-Step '[3/6] Execution-policy snapshot (read-only)'
+Write-Step '[3/7] Execution-policy snapshot (read-only)'
 $PolicySnapshot = @(
     Invoke-TrustedPowerShellReadOnly -CommandText 'Get-ExecutionPolicy -List | ForEach-Object { "{0}={1}" -f $_.Scope, $_.ExecutionPolicy }'
 )
@@ -148,7 +149,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $PolicySnapshot | ForEach-Object { Write-Host $_ }
 
-Write-Step '[4/6] #161/#159 packaging regressions from canonical backend working directory'
+Write-Step '[4/7] #161/#159 packaging regressions from canonical backend working directory'
 $TargetedTests = @(
     'tests/test_release_packaging_contract.py',
     'tests/test_installer_powershell5_restricted_invocation.py',
@@ -158,7 +159,7 @@ Invoke-Checked -WorkingDirectory $Backend -Command $Python -Arguments (
     @('-m', 'pytest') + $TargetedTests + @('-q', '-s')
 )
 
-Write-Step '[5/6] Canonical full source regression'
+Write-Step '[5/7] Canonical full source regression'
 Invoke-Checked -WorkingDirectory $RepoRoot -Command $TrustedPowerShell -Arguments @(
     '-NoProfile',
     '-NonInteractive',
@@ -168,7 +169,13 @@ Invoke-Checked -WorkingDirectory $RepoRoot -Command $TrustedPowerShell -Argument
     $CoreRegression
 )
 
-Write-Step '[6/6] Final source identity and cleanliness'
+Write-Step '[6/7] Canonical Single Writer bootstrap probe (#164; no artifact session)'
+Invoke-Checked -WorkingDirectory $RepoRoot -Command $TrustedPowerShell -Arguments @(
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+    $SessionBootstrap, '-Mode', 'Probe', '-ExpectedHead', $Head
+)
+
+Write-Step '[7/7] Final source identity and cleanliness'
 $FinalHead = Get-GitSingleLine -Arguments @('rev-parse', 'HEAD')
 $FinalUpstream = Get-GitSingleLine -Arguments @('rev-parse', '@{u}')
 if ($FinalHead -cne $Head -or $FinalUpstream -cne $Head) {
@@ -179,4 +186,4 @@ Assert-TrackedTreeClean
 Write-Host ''
 Write-Host 'Sorigul #113 PRE-BUILD REHEARSAL: PASS' -ForegroundColor Green
 Write-Host "Frozen-source candidate: $Head"
-Write-Host 'Only after this PASS may a new #113 artifact run_id and Single Writer session be created.'
+Write-Host 'After this PASS use canonical session bootstrap; only SESSION_ACTIVE.json starts an artifact session.'

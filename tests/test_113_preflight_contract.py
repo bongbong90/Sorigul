@@ -192,7 +192,8 @@ def test_development_rules_lock_preflight_first_and_checkpoint_retry_semantics()
 
     for required in (
         "scripts/run_113_preflight.ps1",
-        "preflight PASS 후에만 새 artifact run_id",
+        "preflight PASS 후에만 새 artifact run_id 후보",
+        "SESSION_ACTIVE.json",
         "동일 HEAD + 동일 run_id + 동일 release-input identity",
         "harness/invocation failure",
         "source HEAD 또는 release input 변경",
