@@ -1,5 +1,8 @@
+import base64
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,6 +95,73 @@ def test_ps5_read_only_probes_preserve_quotes_across_native_boundary(tmp_path):
         "MachinePolicy", "UserPolicy", "Process", "CurrentUser", "LocalMachine",
     }
     assert policies["Process"] == "Bypass"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows PowerShell 5")
+@pytest.mark.parametrize("script_path", [
+    "scripts/run_113_preflight.ps1",
+    "scripts/run_core_workflow_regression.ps1",
+])
+@pytest.mark.parametrize("exit_code", [0, 23])
+def test_python_child_observes_restricted_and_parent_preference_is_restored(
+    tmp_path, script_path, exit_code
+):
+    script = read_repo(script_path)
+    start = script.index("function Invoke-Checked {")
+    helper = script[start:script.index("\n}\n", start) + 3]
+    powershell = (
+        Path(os.environ["SystemRoot"])
+        / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    encoded_policy = base64.b64encode(
+        "Get-ExecutionPolicy".encode("utf-16-le")
+    ).decode("ascii")
+    child = tmp_path / "observe child environment.py"
+    child.write_text(
+        "import json, os, subprocess, sys\n"
+        f"policy = subprocess.check_output([{str(powershell)!r}, "
+        f"'-NoProfile', '-NonInteractive', '-EncodedCommand', {encoded_policy!r}], "
+        "text=True).strip()\n"
+        "print(json.dumps({'preference': os.environ.get('PSExecutionPolicyPreference'), "
+        "'policy': policy}))\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "python invocation parent.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$Python = $env:SORIGUL_TEST_PYTHON\n"
+        f"{helper}\n"
+        "try {\n"
+        "    Invoke-Checked -WorkingDirectory $PSScriptRoot -Command $Python "
+        "-Arguments @($env:SORIGUL_TEST_CHILD)\n"
+        "    Write-Output 'COMMAND_OK'\n"
+        "} catch { Write-Output ('COMMAND_FAILED=' + $_.Exception.Message) }\n"
+        "Write-Output ('RESTORED=' + $env:PSExecutionPolicyPreference)\n",
+        encoding="utf-8-sig",
+    )
+    environment = os.environ.copy()
+    environment.update(
+        PSModulePath=str(powershell.parent / "Modules"),
+        SORIGUL_TEST_PYTHON=sys.executable,
+        SORIGUL_TEST_CHILD=str(child),
+    )
+    result = subprocess.run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+         "Bypass", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    assert json.loads(lines[0]) == {"preference": None, "policy": "Restricted"}
+    if exit_code == 0:
+        assert lines[1] == "COMMAND_OK"
+    else:
+        assert lines[1].startswith("COMMAND_FAILED=Command failed with exit code 23:")
+    assert lines[2] == "RESTORED=Bypass"
 
 
 def test_113_preflight_never_invokes_release_artifact_or_install_commands():

@@ -21,14 +21,21 @@ function Invoke-Checked {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $false)][string[]]$Arguments = @()
     )
+    $OriginalProcessPolicy = [Environment]::GetEnvironmentVariable('PSExecutionPolicyPreference', 'Process')
     Push-Location $WorkingDirectory
     try {
+        # The Bypass used to enter this script must not mask Restricted in
+        # Python's PS5 regression children (Windows normalizes env key casing).
+        if ($Command -ceq $Python) {
+            [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $null, 'Process')
+        }
         & $Command @Arguments
         if ($LASTEXITCODE -ne 0) {
             throw "Command failed with exit code $($LASTEXITCODE): $Command $($Arguments -join ' ')"
         }
     }
     finally {
+        [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $OriginalProcessPolicy, 'Process')
         Pop-Location
     }
 }
