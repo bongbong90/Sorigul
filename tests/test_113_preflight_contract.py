@@ -104,8 +104,9 @@ def test_ps5_read_only_probes_preserve_quotes_across_native_boundary(tmp_path):
     "scripts/run_core_workflow_regression.ps1",
 ])
 @pytest.mark.parametrize("exit_code", [0, 23])
+@pytest.mark.parametrize("module_path", [None, "native", "inherited"])
 def test_python_child_observes_restricted_and_parent_preference_is_restored(
-    tmp_path, script_path, exit_code
+    tmp_path, script_path, exit_code, module_path
 ):
     script = read_repo(script_path)
     start = script.index("function Invoke-Checked {")
@@ -115,7 +116,13 @@ def test_python_child_observes_restricted_and_parent_preference_is_restored(
         / "System32/WindowsPowerShell/v1.0/powershell.exe"
     )
     encoded_policy = base64.b64encode(
-        "Get-ExecutionPolicy".encode("utf-16-le")
+        ("$ErrorActionPreference='Stop'; "
+         "$policy = Get-ExecutionPolicy; "
+         "@{policy=$policy.ToString(); edition=$PSVersionTable.PSEdition; "
+         "version=$PSVersionTable.PSVersion.ToString(); "
+         "module_path=$env:PSModulePath; "
+         "security_module=(Get-Module Microsoft.PowerShell.Security).Path} "
+         "| ConvertTo-Json -Compress").encode("utf-16-le")
     ).decode("ascii")
     child = tmp_path / "observe child environment.py"
     child.write_text(
@@ -124,7 +131,7 @@ def test_python_child_observes_restricted_and_parent_preference_is_restored(
         f"'-NoProfile', '-NonInteractive', '-EncodedCommand', {encoded_policy!r}], "
         "text=True).strip()\n"
         "print(json.dumps({'preference': os.environ.get('PSExecutionPolicyPreference'), "
-        "'policy': policy}))\n"
+        "'module_path': os.environ.get('PSModulePath'), 'ps5': json.loads(policy)}))\n"
         f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
@@ -133,15 +140,30 @@ def test_python_child_observes_restricted_and_parent_preference_is_restored(
         "$ErrorActionPreference = 'Stop'\n"
         "$Python = $env:SORIGUL_TEST_PYTHON\n"
         f"{helper}\n"
+        # Load the parent's own cmdlets before injecting a polluted search path.
+        "Import-Module Microsoft.PowerShell.Management\n"
+        "Import-Module Microsoft.PowerShell.Utility\n"
+        "[Environment]::SetEnvironmentVariable('PSModulePath', "
+        "$env:SORIGUL_TEST_MODULE_PATH, 'Process')\n"
         "try {\n"
         "    Invoke-Checked -WorkingDirectory $PSScriptRoot -Command $Python "
         "-Arguments @($env:SORIGUL_TEST_CHILD)\n"
         "    Write-Output 'COMMAND_OK'\n"
         "} catch { Write-Output ('COMMAND_FAILED=' + $_.Exception.Message) }\n"
-        "Write-Output ('RESTORED=' + $env:PSExecutionPolicyPreference)\n",
+        "Write-Output ('RESTORED=' + $env:PSExecutionPolicyPreference)\n"
+        "Write-Output (ConvertTo-Json -Compress -InputObject @{"
+        "module_path=[Environment]::GetEnvironmentVariable('PSModulePath', 'Process')})\n",
         encoding="utf-8-sig",
     )
     environment = os.environ.copy()
+    original_module_path = {
+        None: None,
+        "native": str(powershell.parent / "Modules"),
+        "inherited": os.environ.get("PSModulePath", r"Z:\PS7-only modules;;"),
+    }[module_path]
+    environment.pop("SORIGUL_TEST_MODULE_PATH", None)
+    if original_module_path is not None:
+        environment["SORIGUL_TEST_MODULE_PATH"] = original_module_path
     environment.update(
         PSModulePath=str(powershell.parent / "Modules"),
         SORIGUL_TEST_PYTHON=sys.executable,
@@ -157,12 +179,22 @@ def test_python_child_observes_restricted_and_parent_preference_is_restored(
     )
     assert result.returncode == 0, result.stdout + result.stderr
     lines = result.stdout.splitlines()
-    assert json.loads(lines[0]) == {"preference": None, "policy": "Restricted"}
+    observed = json.loads(lines[0])
+    assert observed["preference"] is None
+    assert observed["module_path"] is None
+    ps5 = observed["ps5"]
+    assert ps5["policy"] == "Restricted"
+    assert ps5["edition"] == "Desktop" and ps5["version"].startswith("5.1.")
+    assert Path(ps5["security_module"]).is_relative_to(powershell.parent / "Modules")
+    assert str(powershell.parent / "Modules").lower() in ps5["module_path"].lower()
+    assert "microsoft.powershell_7" not in ps5["module_path"].lower()
+    assert r"\powershell\modules" not in ps5["module_path"].lower()
     if exit_code == 0:
         assert lines[1] == "COMMAND_OK"
     else:
         assert lines[1].startswith("COMMAND_FAILED=Command failed with exit code 23:")
     assert lines[2] == "RESTORED=Bypass"
+    assert json.loads(lines[3]) == {"module_path": original_module_path}
 
 
 def test_113_preflight_never_invokes_release_artifact_or_install_commands():

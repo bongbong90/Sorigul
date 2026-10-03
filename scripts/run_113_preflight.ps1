@@ -23,12 +23,15 @@ function Invoke-Checked {
         [Parameter(Mandatory = $false)][string[]]$Arguments = @()
     )
     $OriginalProcessPolicy = [Environment]::GetEnvironmentVariable('PSExecutionPolicyPreference', 'Process')
+    $OriginalModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
     Push-Location $WorkingDirectory
     try {
         # The Bypass used to enter this script must not mask Restricted in
         # Python's PS5 regression children (Windows normalizes env key casing).
         if ($Command -ceq $Python) {
             [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $null, 'Process')
+            # Let PS5 children construct native defaults without inherited PS7 modules.
+            [Environment]::SetEnvironmentVariable('PSModulePath', $null, 'Process')
         }
         & $Command @Arguments
         if ($LASTEXITCODE -ne 0) {
@@ -37,6 +40,7 @@ function Invoke-Checked {
     }
     finally {
         [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $OriginalProcessPolicy, 'Process')
+        [Environment]::SetEnvironmentVariable('PSModulePath', $OriginalModulePath, 'Process')
         Pop-Location
     }
 }
