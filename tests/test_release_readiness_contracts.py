@@ -173,7 +173,7 @@ def test_current_manifest_ownership_routes_local_identity_away_from_core():
 
 def test_current_release_gate_orders_preflight_before_fresh_artifacts_and_installed_cuda():
     status = read_repo("docs/release/CURRENT_RELEASE_STATUS.md")
-    steps = re.findall(r"^\\d+\\. (.+)$", status, re.MULTILINE)
+    steps = re.findall(r"^\d+\. (.+)$", status, re.MULTILINE)
     gates = (
         "Release Freeze:",
         "canonical #113 preflight rehearsal",
