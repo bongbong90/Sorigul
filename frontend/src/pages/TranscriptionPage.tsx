@@ -143,6 +143,10 @@ export function TranscriptionPage() {
   const activeJobStatus = job?.status
   const preflightLockRef = useRef(false)
   const backendStatusRef = useRef<BackendStatus>('STARTING')
+  const folderRef = useRef(folder)
+  const folderPickedRef = useRef(false)
+  const scanGenerationRef = useRef(0)
+  const scanControllerRef = useRef<AbortController | null>(null)
   const engineHydratedRef = useRef(false)
   const [preflightActive, setPreflightActive] = useState(false)
   const isPreflighting = preflightActive
@@ -188,7 +192,15 @@ export function TranscriptionPage() {
       } else {
         setSettings(loaded)
       }
-      if (effectiveFolder && effectiveFolder !== folder) setFolder(effectiveFolder)
+      // A picker choice remains authoritative even if its best-effort save
+      // failed or an older settings response arrives during reconnect.
+      if (!folderPickedRef.current && effectiveFolder && effectiveFolder !== folderRef.current) {
+        scanGenerationRef.current += 1
+        scanControllerRef.current?.abort()
+        folderRef.current = effectiveFolder
+        setFolder(effectiveFolder)
+        setFiles([]); setSelectedIds([]); setJob(undefined)
+      }
       setCourse((current) => current || loaded.last_course || '')
       setSubject((current) => current || loaded.last_subject || '')
       if (!engineHydratedRef.current) {
@@ -202,44 +214,62 @@ export function TranscriptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const loadFolder = useCallback(async (signal?: AbortSignal): Promise<ScannedFile[] | undefined> => {
-    if (!folder) {
-      backendStatusRef.current = 'CONNECTED'
-      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.')
-      try {
-        const activeRun = await api.activeJob(signal)
-        if (!signal?.aborted) setGlobalActiveJob(activeRun)
-      } catch { /* the health poll owns connectivity state */ }
-      return []
-    }
+  const loadFolder = useCallback(async (targetFolder: string, parentSignal?: AbortSignal): Promise<ScannedFile[] | undefined> => {
+    if (targetFolder !== folderRef.current || parentSignal?.aborted) return undefined
+    const generation = ++scanGenerationRef.current
+    scanControllerRef.current?.abort()
+    const controller = new AbortController()
+    scanControllerRef.current = controller
+    const signal = controller.signal
+    const abort = () => controller.abort()
+    parentSignal?.addEventListener('abort', abort, { once: true })
+    const isCurrent = () => !signal.aborted && generation === scanGenerationRef.current && targetFolder === folderRef.current
     try {
-      const [scanned, jobs, drive, activeRun] = await Promise.all([api.scan(folder, signal), api.jobs(signal), api.driveStatus(signal), api.activeJob(signal)])
+      if (!targetFolder) {
+        backendStatusRef.current = 'CONNECTED'
+        setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.')
+        try {
+          const activeRun = await api.activeJob(signal)
+          if (isCurrent()) setGlobalActiveJob(activeRun)
+        } catch { /* the health poll owns connectivity state */ }
+        return isCurrent() ? [] : undefined
+      }
+      const [scanned, jobs, drive, activeRun] = await Promise.all([api.scan(targetFolder, signal), api.jobs(signal), api.driveStatus(signal), api.activeJob(signal)])
       if (signal?.aborted) return undefined
-      const matching = jobs.filter((item) => item.folder === folder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
+      if (!isCurrent()) return undefined
+      const matching = jobs.filter((item) => item.folder === targetFolder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
       backendStatusRef.current = 'CONNECTED'
       setFiles(scanned); setJob(matching); setGlobalActiveJob(activeRun); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
       return scanned
     } catch (cause) {
-      if (isRequestAbort(cause)) return undefined
+      if (!isCurrent() || isRequestAbort(cause)) return undefined
       backendStatusRef.current = 'OFFLINE'
       setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
       return undefined
+    } finally {
+      parentSignal?.removeEventListener('abort', abort)
+      if (scanControllerRef.current === controller) scanControllerRef.current = null
     }
-  }, [folder])
+  }, [])
+
+  useEffect(() => () => {
+    scanGenerationRef.current += 1
+    scanControllerRef.current?.abort()
+  }, [])
 
   // #111 live folder reconcile: re-read disk truth only (same loadFolder
   // path as startup/manual). New MP3s appear unselected as WAITING rows;
   // selections whose file vanished are dropped, the rest are kept. Never
   // creates, starts, retries or re-transcribes a Job.
   const reconcileFolderChange = useCallback(async (signal: AbortSignal) => {
-    const scanned = await loadFolder(signal)
-    if (!scanned || signal.aborted) return
+    const scanned = await loadFolder(folder, signal)
+    if (!scanned || signal.aborted || folder !== folderRef.current) return
     const present = new Set(scanned.map((file) => file.id))
     setSelectedIds((current) => {
       const kept = current.filter((id) => present.has(id))
       return kept.length === current.length ? current : kept
     })
-  }, [loadFolder])
+  }, [folder, loadFolder])
 
   // A packaged Tauri cold start can have the frontend polling before the
   // backend sidecar is up, so settings/folder adoption must happen again
@@ -249,7 +279,12 @@ export function TranscriptionPage() {
   const reconnect = useCallback(async (signal?: AbortSignal) => {
     backendStatusRef.current = 'STARTING'
     setBackendStatus('STARTING')
-    try { await api.health(signal); await loadSettings(signal); await loadFolder(signal) }
+    try {
+      await api.health(signal)
+      if (signal?.aborted) return
+      await loadSettings(signal)
+      await loadFolder(folderRef.current, signal)
+    }
     catch (cause) {
       if (isRequestAbort(cause)) return
       backendStatusRef.current = 'OFFLINE'
@@ -295,15 +330,15 @@ export function TranscriptionPage() {
       try {
         const updated = await api.job(activeJobId, controller.signal)
         if (!ACTIVE_STATES.has(updated.status)) {
-          if (active) await loadFolder(controller.signal)
+          if (active && folder === folderRef.current) await loadFolder(folder, controller.signal)
           return
         }
-        if (active) {
+        if (active && folder === folderRef.current) {
           setJob(updated)
           setGlobalActiveJob((current) => current?.job_id === updated.job_id ? updated : current)
         }
       } catch (cause) {
-        if (active && !isRequestAbort(cause)) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
+        if (active && folder === folderRef.current && !isRequestAbort(cause)) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
       }
       if (active) timer = window.setTimeout(() => void pollJob(), 1500)
     }
@@ -313,7 +348,7 @@ export function TranscriptionPage() {
       if (timer !== undefined) window.clearTimeout(timer)
       controller?.abort()
     }
-  }, [activeJobId, activeJobStatus, loadFolder])
+  }, [activeJobId, activeJobStatus, folder, loadFolder])
 
   // The app-wide run is polled only when the current Job poll does not
   // already cover it: another folder's run, or a run whose terminal state is
@@ -385,13 +420,23 @@ export function TranscriptionPage() {
 
   async function changeFolder() {
     const value = await pickFolder(folder)
-    if (!value) return
-    saveFolder(value); setFolder(value); setSelectedIds([]); setJob(undefined)
+    if (!value || value === folderRef.current) return
+    scanGenerationRef.current += 1
+    scanControllerRef.current?.abort()
+    folderRef.current = value
+    folderPickedRef.current = true
+    setFiles([]); setSelectedIds([]); setJob(undefined)
+    setDialog(null); setPendingIds([])
     resetPreflight()
+    saveFolder(value); setFolder(value)
+    setMessage('새 폴더를 확인하고 있습니다.')
+    // Persistence must never delay or prevent this explicit user scan.
     if (settings) {
-      try { setSettings(await api.saveSettings({ ...settings, transcription_folder: value })) }
-      catch { /* best-effort; localStorage still has the current selection */ }
+      void api.saveSettings({ ...settings, transcription_folder: value }).then((saved) => {
+        if (folderRef.current === value) setSettings(saved)
+      }).catch(() => { /* best-effort; localStorage still has the current selection */ })
     }
+    await loadFolder(value)
   }
 
   function onCourseChange(value: string) {
@@ -434,6 +479,7 @@ export function TranscriptionPage() {
     setAdoptedClassification(null)
     setNormalization(undefined)
     setFilenameMode('review')
+    setFilenameValue('')
   }
 
   function filenamesFor(ids: string[]): Record<string, string> {
@@ -571,7 +617,7 @@ export function TranscriptionPage() {
     setNormalization(undefined)
 
     if (renamedAny) {
-      try { await loadFolder() } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
+      try { await loadFolder(folder) } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
     }
 
     // The Drive classifier now uses Job/file metadata (Phase 2 done), but
