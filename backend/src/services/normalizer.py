@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Tuple
 from pydantic import BaseModel
 
 # Windows-forbidden filename characters and ASCII control characters. Course
@@ -25,6 +25,15 @@ PAGE_MARKER_PATTERN = re.compile(r'\(\s*p\.?\s*\d+\s*(?:[~\-]\s*\d*)?\s*\)', re.
 BRACKET_WEEK_LESSON_PATTERN = re.compile(r'\[(\d+)-(\d+)\]')
 WEEK_AND_LESSON_PATTERN = re.compile(r'(\d+)\s*주차[^\d]*(\d+)\s*강')
 WEEK_PATTERN = re.compile(r'(\d+)\s*주차')
+
+# Manual-week fallback (#180). A provider such as Eduwill names a lecture only
+# by its course-wide counter ("2026_이영방_부동산학개론_기초이론_4강"), with
+# no week at all. That counter is never a week and never the lesson within a
+# week -- it only proves the file is a numbered lecture, so the user's typed
+# week may place it at the week's first/next free lesson. The token must stand
+# alone ("_4강", " 4강", "4강" at the end), and exactly one such token must
+# exist; "특강", "3강의", "3강 4강 합본" never qualify.
+GLOBAL_LECTURE_PATTERN = re.compile(r'(?:^|(?<=[\s_\[\(\-]))(\d+)\s*강(?=$|[\s_\]\)\-.,])')
 
 STANDARD_PATTERN = re.compile(
     r'^(?P<course>[^_]+)_(?P<subject>[^_]+)_(?P<week>\d+)주차_(?P<lesson>\d+)강$'
@@ -65,6 +74,28 @@ def detect_week_lesson(text: str) -> WeekLessonDetection:
     if week:
         return WeekLessonDetection(int(week.group(1)), None, DetectionMode.WEEK_ONLY)
     return WeekLessonDetection(None, None, DetectionMode.UNKNOWN)
+
+
+def has_global_lecture_counter(text: str) -> bool:
+    """True when `text` carries exactly one standalone course-wide "N강"
+    counter. Only meaningful once detect_week_lesson() found no week; the
+    number itself is discarded (#180)."""
+    return len(GLOBAL_LECTURE_PATTERN.findall(text)) == 1
+
+
+class ManualWeekValidationError(ValueError):
+    """Raised by validate_manual_week on a missing or non-positive week."""
+
+
+def validate_manual_week(value: Optional[int]) -> int:
+    """Validate the user-entered week (#180). The request models already
+    reject non-integers; this is the independent server-side check that a
+    week was actually given and is a positive integer."""
+    if value is None:
+        raise ManualWeekValidationError("주차를 입력해 주세요.")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ManualWeekValidationError("주차는 1 이상의 정수로 입력해 주세요.")
+    return value
 
 
 class ClassificationValidationError(ValueError):
@@ -132,9 +163,34 @@ class NormalizationPreview(BaseModel):
     # UNCHANGED: already the correct standard name, nothing to do.
     # MISMATCH: already a standard name, but its course/subject differ from
     #   what was typed for this job -- never auto-resolved (D24).
-    # INVALID_TARGET: week/lesson could not be found in the filename.
+    # WEEK_MISMATCH: the filename carries an explicit week that differs from
+    #   the manually entered week -- never auto-resolved either way (#180).
+    # INVALID_TARGET: week/lesson could not be found in the filename (and no
+    #   manual-week fallback applies).
     # CONFLICT: no free lesson number could be found within the search bound.
     result_type: str = "UNCHANGED"
+    # The manually entered week this preview was computed against (#180).
+    manual_week: Optional[str] = None
+    # MISMATCH/WEEK_MISMATCH only: the target an explicit "rename to the typed
+    # classification" choice would use -- typed course + typed subject +
+    # manual week, the source lesson as the preferred lesson (else the first
+    # free one), stepped past occupied stems. None when no free lesson exists.
+    typed_target_name: Optional[str] = None
+
+
+def _first_free_stem(
+    course: str, subject: str, week: int, lesson: int, existing_stems: Set[str]
+) -> Tuple[str, int]:
+    """The preferred (or first) lesson's stem, stepped forward past any
+    MP3/TXT/JSON/SRT stem already on disk or reserved earlier in the batch.
+    Returns the last candidate tried; the caller checks it is actually free."""
+    suggested_stem = f"{course}_{subject}_{week}주차_{lesson}강"
+    attempts = 0
+    while suggested_stem in existing_stems and attempts < MAX_LESSON_SEARCH_ATTEMPTS:
+        lesson += 1
+        suggested_stem = f"{course}_{subject}_{week}주차_{lesson}강"
+        attempts += 1
+    return suggested_stem, lesson
 
 
 class FilenameNormalizer:
@@ -144,32 +200,57 @@ class FilenameNormalizer:
         course: str,
         subject: str,
         existing_stems: Set[str] = frozenset(),
+        manual_week: Optional[int] = None,
     ) -> NormalizationPreview:
+        """Preview the standard name for one file.
+
+        `manual_week` is the user-entered week (#180). The Legacy detector
+        (detect_week_lesson) runs first and is never altered by it: an
+        explicit source week equal to the manual week behaves exactly as
+        before, a different one is a WEEK_MISMATCH. Only when the source has
+        no week at all does the manual week apply, and then only to a name
+        carrying a standalone course-wide "N강" counter.
+        """
         stem = Path(original_name).stem
         ext = Path(original_name).suffix or ".mp3"
+        manual_week_text = str(manual_week) if manual_week is not None else None
+
+        def typed_target(source_week: int, source_lesson: Optional[int]) -> Optional[str]:
+            target_week = manual_week if manual_week is not None else source_week
+            target_stem, _ = _first_free_stem(
+                course, subject, target_week,
+                source_lesson if source_lesson is not None else 1, existing_stems,
+            )
+            return None if target_stem in existing_stems else f"{target_stem}{ext}"
 
         standard_match = STANDARD_PATTERN.fullmatch(stem)
         if standard_match:
             embedded_course = standard_match.group("course")
             embedded_subject = standard_match.group("subject")
-            week = standard_match.group("week")
+            week = int(standard_match.group("week"))
             lesson = int(standard_match.group("lesson"))
             if embedded_course != course or embedded_subject != subject:
+                warnings = [
+                    f"현재 파일의 분류({embedded_course}/{embedded_subject})가 "
+                    f"입력한 과정/과목({course}/{subject})과 다릅니다."
+                ]
+                if manual_week is not None and week != manual_week:
+                    warnings.append(f"파일명은 {week}주차, 입력한 주차는 {manual_week}주차입니다.")
                 return NormalizationPreview(
                     original_name=original_name,
                     suggested_name=original_name,
                     detected_course=embedded_course,
                     detected_subject=embedded_subject,
-                    detected_week=week,
+                    detected_week=str(week),
                     detected_lesson=str(lesson),
-                    warnings=[
-                        f"현재 파일의 분류({embedded_course}/{embedded_subject})가 "
-                        f"입력한 과정/과목({course}/{subject})과 다릅니다."
-                    ],
+                    warnings=warnings,
                     conflicts=[],
                     can_apply=False,
                     result_type="MISMATCH",
+                    manual_week=manual_week_text,
+                    typed_target_name=typed_target(week, lesson),
                 )
+            explicit_week, explicit_lesson = week, lesson
         else:
             cleaned = FORBIDDEN_CHARS_PATTERN.sub('', stem)
             cleaned = cleaned.replace('+', ' ')
@@ -178,35 +259,56 @@ class FilenameNormalizer:
 
             detection = detect_week_lesson(cleaned)
             if detection.week is None:
-                return NormalizationPreview(
-                    original_name=original_name,
-                    suggested_name=None,
-                    detected_course=course,
-                    detected_subject=subject,
-                    detected_week=None,
-                    detected_lesson=None,
-                    warnings=["파일명에서 주차/강을 확인하지 못했습니다."],
-                    conflicts=[],
-                    can_apply=False,
-                    result_type="INVALID_TARGET",
-                )
+                if manual_week is None or not has_global_lecture_counter(cleaned):
+                    return NormalizationPreview(
+                        original_name=original_name,
+                        suggested_name=None,
+                        detected_course=course,
+                        detected_subject=subject,
+                        detected_week=None,
+                        detected_lesson=None,
+                        warnings=["파일명에서 주차/강을 확인하지 못했습니다."],
+                        conflicts=[],
+                        can_apply=False,
+                        result_type="INVALID_TARGET",
+                        manual_week=manual_week_text,
+                    )
+                # No-week global lecture counter: the typed week, first free
+                # lesson. The counter itself is discarded, never reused.
+                explicit_week, explicit_lesson = None, None
+                week, lesson = manual_week, 1
+            else:
+                explicit_week, explicit_lesson = detection.week, detection.preferred_lesson
+                week = detection.week
+                # Week-only names take the first free lesson of that week.
+                lesson = detection.preferred_lesson if detection.preferred_lesson is not None else 1
 
-            week = str(detection.week)
-            # Week-only names take the first free lesson of that week.
-            lesson = detection.preferred_lesson if detection.preferred_lesson is not None else 1
+        if explicit_week is not None and manual_week is not None and explicit_week != manual_week:
+            target = typed_target(explicit_week, explicit_lesson)
+            warnings = [f"파일명은 {explicit_week}주차, 입력한 주차는 {manual_week}주차입니다."]
+            if target is None:
+                warnings.append(f"입력한 {manual_week}주차에서 사용 가능한 강 번호를 찾지 못했습니다.")
+            return NormalizationPreview(
+                original_name=original_name,
+                suggested_name=original_name,
+                detected_course=course,
+                detected_subject=subject,
+                detected_week=str(explicit_week),
+                detected_lesson=str(explicit_lesson) if explicit_lesson is not None else None,
+                warnings=warnings,
+                conflicts=[],
+                can_apply=False,
+                result_type="WEEK_MISMATCH",
+                manual_week=manual_week_text,
+                typed_target_name=target,
+            )
 
-        # Resolve the target stem: the preferred (or first) lesson number,
-        # stepped forward past any MP3/TXT/JSON/SRT stem already on disk or
-        # reserved earlier in the batch -- this applies even when the file
-        # is already standard-named, so a batch of files that would collide
-        # on the same lesson number still gets a stable, conflict-free
+        # Resolve the target stem -- this applies even when the file is
+        # already standard-named, so a batch of files that would collide on
+        # the same lesson number still gets a stable, conflict-free
         # assignment (Section 19).
-        suggested_stem = f"{course}_{subject}_{week}주차_{lesson}강"
-        attempts = 0
-        while suggested_stem in existing_stems and attempts < MAX_LESSON_SEARCH_ATTEMPTS:
-            lesson += 1
-            suggested_stem = f"{course}_{subject}_{week}주차_{lesson}강"
-            attempts += 1
+        suggested_stem, lesson = _first_free_stem(course, subject, week, lesson, existing_stems)
+        week = str(week)
 
         if suggested_stem in existing_stems:
             return NormalizationPreview(
@@ -220,6 +322,7 @@ class FilenameNormalizer:
                 conflicts=[f"이름 충돌: {suggested_stem}{ext}"],
                 can_apply=False,
                 result_type="CONFLICT",
+                manual_week=manual_week_text,
             )
 
         if suggested_stem == stem:
@@ -234,6 +337,7 @@ class FilenameNormalizer:
                 conflicts=[],
                 can_apply=False,
                 result_type="UNCHANGED",
+                manual_week=manual_week_text,
             )
 
         return NormalizationPreview(
@@ -247,6 +351,7 @@ class FilenameNormalizer:
             conflicts=[],
             can_apply=True,
             result_type="NORMALIZED",
+            manual_week=manual_week_text,
         )
 
     def normalize_batch(
@@ -255,12 +360,15 @@ class FilenameNormalizer:
         course: str,
         subject: str,
         existing_stems: Set[str] = frozenset(),
+        manual_week: Optional[int] = None,
     ) -> List[NormalizationPreview]:
+        # Request order is the allocation order and the response is 1:1 with
+        # the input -- a global "N강" counter never re-sorts the batch (#180).
         results = []
         reserved = set(existing_stems)
 
         for name in original_names:
-            preview = self.normalize(name, course, subject, reserved)
+            preview = self.normalize(name, course, subject, reserved, manual_week)
             if preview.suggested_name:
                 reserved.add(Path(preview.suggested_name).stem)
             results.append(preview)

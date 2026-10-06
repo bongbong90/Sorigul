@@ -8,10 +8,13 @@ import { Input } from '../ui/Input'
 interface ClassificationSectionProps {
   course: string
   subject: string
+  week: string
   courseError?: string
   subjectError?: string
+  weekError?: string
   onCourseChange: (value: string) => void
   onSubjectChange: (value: string) => void
+  onWeekChange: (value: string) => void
   knownStage?: Stage
   overrideStage?: Stage
   needsStagePrompt: boolean
@@ -23,10 +26,13 @@ interface ClassificationSectionProps {
 export function ClassificationSection({
   course,
   subject,
+  week,
   courseError,
   subjectError,
+  weekError,
   onCourseChange,
   onSubjectChange,
+  onWeekChange,
   knownStage,
   overrideStage,
   needsStagePrompt,
@@ -41,7 +47,7 @@ export function ClassificationSection({
       <div className="section-heading-row">
         <div>
           <span className="eyebrow">전사 파일 분류</span>
-          <h2 className="text-section-heading">과정명과 과목명을 입력해 주세요</h2>
+          <h2 className="text-section-heading">과정명, 과목명, 주차를 입력해 주세요</h2>
         </div>
       </div>
       <div className="classification-grid">
@@ -62,6 +68,18 @@ export function ClassificationSection({
           error={Boolean(subjectError)}
           helperText={subjectError}
           onChange={(event: ChangeEvent<HTMLInputElement>) => onSubjectChange(event.target.value)}
+        />
+        {/* #180: digits only; the week is never persisted to settings. */}
+        <Input
+          label="주차"
+          placeholder="예: 1"
+          inputMode="numeric"
+          autoComplete="off"
+          value={week}
+          disabled={disabled}
+          error={Boolean(weekError)}
+          helperText={weekError}
+          onChange={(event: ChangeEvent<HTMLInputElement>) => onWeekChange(event.target.value)}
         />
       </div>
       {resolvedStage && !needsStagePrompt ? (

@@ -9,9 +9,11 @@ from src.services.classification import StageRequiredError, resolve_stage
 from src.services.normalizer import (
     ClassificationValidationError,
     FilenameNormalizer,
+    ManualWeekValidationError,
     NormalizationPreview,
     collect_existing_stems,
     validate_classification_text,
+    validate_manual_week,
 )
 from src.services.renamer import BundleRenamer, RenameStatus, UnsafeStemError, validate_safe_stem
 from src.services.job_manager import JobManager
@@ -307,24 +309,39 @@ def complete_drive_auth(req: DriveAuthCompleteRequest):
     except DriveError as exc:
         raise HTTPException(status_code=400, detail=exc.user_message)
 
+# The manually entered week (#180) is a strict integer on every request that
+# normalizes: "4.0", "4", "4주차" and booleans are rejected by the model, and
+# validate_manual_week independently rejects a missing or non-positive value
+# -- the frontend check is never trusted on its own.
+ManualWeekField = Field(default=None, strict=True)
+
+
+def _validated_classification(course: str, subject: str, week: Optional[int]):
+    try:
+        return (
+            validate_classification_text(course, "과정명"),
+            validate_classification_text(subject, "과목명"),
+            validate_manual_week(week),
+        )
+    except (ClassificationValidationError, ManualWeekValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class NormalizeRequest(BaseModel):
     folder: str
     filename: str
     course: str
     subject: str
+    week: Optional[int] = ManualWeekField
 
 @router.post("/normalize/preview", response_model=NormalizationPreview)
 def preview_normalization(req: NormalizeRequest):
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, week = _validated_classification(req.course, req.subject, req.week)
     normalizer = FilenameNormalizer()
     existing_stems = collect_existing_stems(
         Path(req.folder), exclude_stem=Path(req.filename).stem
     )
-    return normalizer.normalize(req.filename, course, subject, existing_stems)
+    return normalizer.normalize(req.filename, course, subject, existing_stems, week)
 
 
 class NormalizeBatchRequest(BaseModel):
@@ -332,22 +349,19 @@ class NormalizeBatchRequest(BaseModel):
     filenames: List[str]
     course: str
     subject: str
+    week: Optional[int] = ManualWeekField
 
 
 @router.post("/normalize/batch", response_model=List[NormalizationPreview])
 def preview_normalization_batch(req: NormalizeBatchRequest):
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, week = _validated_classification(req.course, req.subject, req.week)
     normalizer = FilenameNormalizer()
     # Existing on-disk stems are the collision truth, except a batch member's
     # own current stem -- it's a rename candidate, not a foreign collision.
     existing_stems = collect_existing_stems(Path(req.folder))
     batch_stems = {Path(name).stem for name in req.filenames}
     existing_stems -= batch_stems
-    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems)
+    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems, week)
 
 
 class RenameRequest(BaseModel):
@@ -389,12 +403,16 @@ class CreateJobRequest(BaseModel):
     upload_to_drive: bool = False
     course: str
     subject: str
+    # The manually entered week the preflight normalized against (#180). Not
+    # stored on the Job: the per-file FileMetadata week/lesson stay the
+    # authority, re-derived below from a fresh normalize with this week.
+    week: Optional[int] = ManualWeekField
     stage: Optional[Literal["1차", "2차"]] = None
     # Explicit per-file acknowledgement that the caller chose to proceed
     # under the file's original (unresolved) name -- the only resolution
     # that still leaves normalization/classification unresolved. Any target
-    # whose fresh normalize() result is MISMATCH/INVALID_TARGET/CONFLICT
-    # must appear here with "CONTINUE_ORIGINAL", or Job creation is
+    # whose fresh normalize() result is MISMATCH/WEEK_MISMATCH/INVALID_TARGET/
+    # CONFLICT must appear here with "CONTINUE_ORIGINAL", or Job creation is
     # rejected; this is the server-side backstop for "never create a Job
     # with an unresolved file" (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
     file_resolutions: Dict[str, Literal["CONTINUE_ORIGINAL"]] = Field(default_factory=dict)
@@ -406,11 +424,7 @@ def create_job(req: CreateJobRequest):
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")
 
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, manual_week = _validated_classification(req.course, req.subject, req.week)
 
     current_settings = settings_manager.get()
     try:
@@ -448,14 +462,16 @@ def create_job(req: CreateJobRequest):
         if scanned is None:
             continue
         existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
-        preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        preview = normalizer.normalize(
+            scanned.filename, course, subject, existing_stems, manual_week
+        )
         if preview.result_type == "NORMALIZED":
             raise HTTPException(
                 status_code=400,
                 detail="파일명 정규화를 먼저 적용해 주세요.",
             )
         if (
-            preview.result_type in {"MISMATCH", "INVALID_TARGET", "CONFLICT"}
+            preview.result_type in {"MISMATCH", "WEEK_MISMATCH", "INVALID_TARGET", "CONFLICT"}
             and req.file_resolutions.get(fid) != "CONTINUE_ORIGINAL"
         ):
             raise HTTPException(
@@ -467,9 +483,12 @@ def create_job(req: CreateJobRequest):
             if preview.result_type == "UNCHANGED" and preview.suggested_name
             else None
         )
+        # A WEEK_MISMATCH kept under its original name has no confirmed week:
+        # neither the source week nor the typed one is recorded (#180).
+        week_confirmed = preview.result_type != "WEEK_MISMATCH"
         file_metadata[fid] = FileMetadata(
-            week=preview.detected_week,
-            lesson=preview.detected_lesson,
+            week=preview.detected_week if week_confirmed else None,
+            lesson=preview.detected_lesson if week_confirmed else None,
             normalized_name=normalized_name,
         )
 
