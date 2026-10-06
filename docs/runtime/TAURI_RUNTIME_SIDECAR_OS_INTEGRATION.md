@@ -61,7 +61,7 @@ The frontend's existing offline/reconnect UX (`TranscriptionPage`/`SettingsPage`
 
 ## Process cleanup / orphan prevention / port handling
 
-Cleanup runs from exactly one place -- `RunEvent::ExitRequested` in `lib.rs::run()` -- reached by every legitimate exit path (tray "종료", or the last window closing with `close_behavior = exit`), so cleanup logic isn't duplicated or racy across handlers. `SidecarManager::cleanup()`:
+Cleanup runs from exactly one place -- `RunEvent::ExitRequested` in `lib.rs::run()` -- reached by every legitimate exit path (a confirmed-idle tray "종료" or `close_behavior = exit` window close), so cleanup logic isn't duplicated or racy across handlers. `SidecarManager::cleanup()`:
 
 - is a no-op if nothing is owned (reused-external case), and idempotent if called after an owned process is already gone;
 - on Windows, kills the owned process **and its child tree** via `System32\taskkill.exe /PID <pid> /T /F` (trusted absolute path from `GetSystemDirectoryW`, never a `PATH` lookup (#122); fixed argument list; if the trusted path cannot be resolved the owned child is killed directly and the Job Object drop takes the rest of the tree; no shell string concatenation -- same discipline as the shutdown executor) rather than a single-process `kill()`, since `uvicorn`/Python can spawn workers;
@@ -111,7 +111,7 @@ Each new completion event is shown in the Sorigul-owned completion toast -- the 
 Built once in `lib.rs::build_tray()` during `setup()` (never re-built, so no duplicate icons): one `TrayIconBuilder` with a 2-item menu ("앱 열기" / "종료"), using the app's configured window icon.
 
 - **앱 열기**: shows and focuses the `main` window.
-- **종료**: always performs a real exit -- owned-backend cleanup, then `app.exit(0)` -- regardless of the current `close_behavior` setting (matches the contract: Quit always quits).
+- **종료** (#174): regardless of `close_behavior`, runs the same single-pending close-guard check as an `exit` X close (`request_guarded_exit` -> `spawn_close_check`). Confirmed idle exits via `app.exit(0)` -> `RunEvent::ExitRequested` cleanup; active transcription/Drive work, or a guard that cannot be read (unreachable, HTTP error, malformed, timeout), refuses the exit, keeps everything running, hides the main window and shows the #128 notice. To quit during active work, Stop/Cancel it first. The tray handler never calls `cleanup()` or `app.exit` itself.
 - **close_behavior = tray**: the window's `CloseRequested` handler calls `api.prevent_close()` and hides the window; the backend keeps running.
 - **close_behavior = exit**: the handler does not prevent the close; the run loop's `RunEvent::ExitRequested` performs cleanup as the window (and app) actually close.
 

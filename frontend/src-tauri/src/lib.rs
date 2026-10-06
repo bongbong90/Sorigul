@@ -608,12 +608,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            "quit" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    state.sidecar.cleanup();
-                }
-                app.exit(0);
-            }
+            "quit" => request_guarded_exit(app),
             _ => {}
         })
         .build(app)?;
@@ -646,7 +641,20 @@ fn handle_second_instance(app: &AppHandle, _argv: Vec<String>, _cwd: String) {
     show_main_window(app);
 }
 
-/// Background close-guard check for a `close_behavior = "exit"` close.
+/// Tray "종료" (#174): the same active-work guard as an `exit` X close. It
+/// never cleans up or exits itself; only a confirmed-idle check does, via
+/// `app.exit(0)` -> RunEvent::ExitRequested. Repeated clicks share one check.
+fn request_guarded_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if let Some(generation) = state.close_check.on_exit_requested() {
+        spawn_close_check(app.clone(), generation);
+    }
+}
+
+/// Background close-guard check for a `close_behavior = "exit"` close or a
+/// tray "종료".
 /// Confirmed idle exits through `app.exit(0)`, so RunEvent::ExitRequested
 /// stays the single sidecar cleanup path. Active work or any doubt hides the
 /// window to the tray; the notice is best-effort and never weakens that.

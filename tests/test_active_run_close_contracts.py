@@ -67,9 +67,9 @@ def test_background_check_exits_only_via_the_central_cleanup_path():
 def test_tray_quit_and_open_keep_their_meaning():
     lib = read(TAURI / "src" / "lib.rs")
     tray = fn_body(lib, "fn build_tray(")
-    quit = tray[tray.index('"quit" =>') :]
-    assert quit.index("state.sidecar.cleanup();") < quit.index("app.exit(0);")
-    assert "close_check" not in tray, "explicit Quit is not the X-button policy"
+    # #174: tray "종료" shares the X-button guard (test_174_guarded_tray_exit_contracts.py).
+    assert '"quit" => request_guarded_exit(app),' in tray
+    assert '"open" => show_main_window(app),' in tray
     reopen = fn_body(lib, "fn show_main_window(")
     assert "close_check.window_reopened()" in reopen
     assert "window.show()" in reopen and "window.set_focus()" in reopen
