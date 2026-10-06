@@ -19,7 +19,25 @@
 
 **Personal Study Use Completion — Full Legacy Parity Remediation / Installed Validation**
 
-## Current execution order
+## Current execution order (Pre-Freeze, 2026-10-06 KST)
+
+1. **Source remediation — #167/#172/#170/#171/#173/#168/#174/#180:** SOURCE PASS.
+2. **Pre-Freeze Plan Reconciliation:** current product contract, execution plan, merge policy와 GitHub gate를 정합화한다(docs-only).
+3. **FULL #123:** full source regression.
+4. **Canonical `run_113_preflight` + bootstrap Probe:** 결과 검수 후에만 다음 단계로 간다.
+5. **NEW RELEASE FREEZE:** 기존 `780dbb1` #113 artifact는 historical evidence only다.
+6. **One fresh #113:** Local → Core → MSI → install.
+7. **#56/#63 full installed QA:** 같은 artifact에서 cold/warm Local startup을 measurement-only로 측정한다(threshold 없음, packaging 변경 없음).
+8. **#47 real Korean study MP3:** 같은 artifact로 실제 인터넷 강의 동시 재생 중 Local 전사를 검증한다.
+9. **#48/#60:** zero-cost-safe external validation. 확인할 수 없으면 기능 삭제 없이 PENDING.
+10. **#59 recovery.**
+11. **#58 shutdown:** 실제 shutdown은 그 시점의 즉시 명시적 사용자 승인 후에만 실행한다.
+12. **#114 final Study Workflow Regression.**
+13. **One consolidated integration PR merge:** constituent stacked PR은 개별 merge하지 않는다.
+
+FULL #123보다 먼저 #113 artifact build를 시작하지 않는다. #169 Local Runtime size optimization은 OPEN / NON-BLOCKING / POST-DEADLINE OPTIMIZATION이며 이 sequence의 blocker가 아니다. Process priority 변경과 Colab retry interval 변경은 채택하지 않았다([`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md) §9).
+
+## Historical execution order (superseded by the Pre-Freeze order above)
 
 1. **Governance/source of truth — #107/#112:** mandatory Git/GitHub lifecycle과 canonical current product contract를 잠근다.
 2. **Engine parity — #106:** Local OpenAI Whisper `medium`/Legacy-compatible fp16과 Colab `faster-whisper large-v3`/CUDA float16/CPU int8을 복구한다.
@@ -31,9 +49,9 @@
 8. **Recovery — #59:** backend failure 후 OFFLINE/reconnect/restart와 job/result 보존 정책을 잠그고 검증한다.
 9. **Shutdown — #58:** countdown/cancel을 먼저 검증하고 실제 shutdown은 그 시점의 즉시 명시적 사용자 승인 후에만 실행한다.
 10. **Final workflow — #114:** 하나의 installed artifact로 전체 study workflow를 실행하여 `STUDY WORKFLOW REGRESSION = PASS`를 달성한다.
-11. **Closeout/main merge — #54/#55/#7:** 문서·test command·Tracker를 동기화하고 PR base/diff를 확인한 뒤 bottom-up으로 merge한다.
+11. **Closeout/main merge — #54/#55/#7:** 문서·test command·Tracker를 동기화하고 PR base/diff를 확인한 뒤 merge한다. (merge 방식은 현재 single consolidated integration PR 정책으로 대체됨)
 
-각 gate가 실패하면 고친 뒤 통과하기 전까지 다음 단계로 진행하지 않는다. 새 독립 defect는 별도 Issue/commit/PR로 분리한다. #114 PASS 전에는 main merge하지 않으며 rebase와 force push를 사용하지 않는다.
+각 gate가 실패하면 고친 뒤 통과하기 전까지 다음 단계로 진행하지 않는다. 새 독립 defect는 별도 Issue/commit/PR로 분리한다. #114 PASS 전에는 main merge하지 않으며, main merge는 final source ancestry를 모두 포함하는 하나의 consolidated integration PR로만 한다. rebase, force push와 squash를 사용하지 않는다.
 
 ## Deadline
 

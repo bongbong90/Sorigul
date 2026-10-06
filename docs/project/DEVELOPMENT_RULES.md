@@ -73,9 +73,12 @@
 
 - work unit이 완료되어도 PR은 승인된 merge gate까지 OPEN으로 유지할 수 있다.
 - 현재 Sorigul은 [`SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md`](SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md)의 #114 final Study Workflow Regression이 PASS하기 전에는 `main`에 merge하지 않는다.
-- stacked work는 bottom-up으로 merge한다.
-- stack을 `rebase` 또는 force push로 재작성하지 않는다.
-- merge 전에 각 PR의 base, head, diff, validation evidence와 Issue/Tracker 연결을 다시 확인한다.
+- constituent stacked PR은 review/evidence surface로 유지한다. constituent stacked PR을 `main`에 하나씩 merge하지 않는다.
+- final source ancestry를 모두 포함하는 하나의 consolidated integration PR을 사용한다.
+- 그 consolidated integration PR만 #114 PASS와 final gate approval 후 `main`에 merge한다.
+- `rebase`, force push 또는 squash로 constituent ancestry를 재작성하지 않는다.
+- merge 직전에 GitHub merge 방식이 constituent ancestry를 보존하는지 재검증한다.
+- merge 전에 consolidated integration PR의 base, head, diff, ancestry, validation evidence와 Issue/Tracker 연결을 다시 확인한다.
 
 ## Product and storage boundaries
 

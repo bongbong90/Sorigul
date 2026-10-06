@@ -136,7 +136,7 @@ Planning target:
 - **2026-10-20:** installed daily-use beta — Local transcription and core desktop workflow usable on the user's PC
 - **2026-10-27:** release-candidate study build — all source remediation and installed integration complete; zero-cost external paths validated when safely available
 - **2026-10-30:** final STUDY USE workflow regression
-- **2026-10-31:** contingency / Git closeout / bottom-up merge window
+- **2026-10-31:** contingency / Git closeout / consolidated integration merge window
 
 This is a schedule constraint, not permission to cut required Legacy parity silently.
 
@@ -161,7 +161,7 @@ Critical-path order:
 9. #59 recovery policy
 10. #58 shutdown only with immediate explicit approval
 11. #114 final STUDY USE regression
-12. #54/#55 docs closeout and bottom-up merge
+12. #54/#55 docs closeout → #114 PASS + final gate approval → one consolidated integration PR merge
 
 Schedule rule:
 If a blocker threatens the 2026-10-31 deadline, record the blocker in GitHub immediately and work only the minimum safe fix needed to restore the approved contract. Do not substitute a different engine, paid service, destructive shortcut, or feature deletion to meet the date.
@@ -709,7 +709,7 @@ Issues:
 Then:
 - verify every stacked PR diff/base;
 - keep evidence commits;
-- bottom-up merge only after #114 PASS;
+- one consolidated integration PR merge only after #114 PASS and final gate approval (stacked PRs remain review/evidence surfaces, not merged individually);
 - no rebase/force push;
 - no public GitHub Release required.
 
@@ -841,7 +841,7 @@ By the end of that date Sorigul must be usable as the user's real study transcri
 - #54 README, #55 canonical test command, #7 final tracker sync
 - close completed Issues
 - verify stacked PR bases/diffs
-- bottom-up merge to main
+- one consolidated integration PR merge to main (after #114 PASS + final gate approval)
 - final installed smoke check
 - no new discretionary feature work
 
