@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { api, type JobModel } from '../api/client'
 import { setTrayProgress, type TrayProgressPayload } from '../lib/native'
 
 const TERMINAL_STATES = new Set(['DONE', 'FAILED', 'CRASHED', 'STOPPED', 'CANCELLED'])
+const TRAY_POLL_INTERVAL_MS = 1500
 
 function payloadFromJob(job: JobModel): TrayProgressPayload {
   return {
@@ -20,57 +21,67 @@ function updateTray(payload: TrayProgressPayload): void {
 }
 
 /**
- * Reuses the page's existing Job snapshots. The only request here is a
- * one-shot terminal lookup when an observed active Future disappears before
- * the selected folder Job carries its terminal state.
+ * App-lifetime tray observer (#173). Mount exactly once from App so route
+ * changes cannot detach it. The authoritative source is the backend's
+ * app-wide active Job (#126); when an observed active Job disappears, one
+ * terminal lookup supplies the real final state. Backend failures never infer
+ * IDLE/FAILED: the last confirmed tray state is kept.
  */
-export function useTrayProgress(globalActiveJob: JobModel | null, folderJob?: JobModel): void {
-  const lastObservedActiveJobIdRef = useRef<string | null>(null)
-  const terminalLookupJobIdRef = useRef<string | null>(null)
-  const resolvedTerminalJobIdRef = useRef<string | null>(null)
-
+export function useTrayProgress(): void {
   useEffect(() => {
-    if (globalActiveJob) {
-      if (lastObservedActiveJobIdRef.current !== globalActiveJob.job_id) {
-        resolvedTerminalJobIdRef.current = null
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let controller: AbortController | undefined
+    let observedJobId: string | null = null
+    let resolvedJobId: string | null = null
+    let lastSentKey: string | null = null
+
+    const send = (payload: TrayProgressPayload) => {
+      const key = JSON.stringify(payload)
+      if (key === lastSentKey) return
+      lastSentKey = key
+      updateTray(payload)
+    }
+
+    const poll = async (signal: AbortSignal) => {
+      const active = await api.activeJob(signal)
+      if (disposed) return
+      if (active) {
+        observedJobId = active.job_id
+        resolvedJobId = null
+        send(payloadFromJob(active))
+        return
       }
-      lastObservedActiveJobIdRef.current = globalActiveJob.job_id
-      updateTray(payloadFromJob(globalActiveJob))
-      return
-    }
-
-    const observedJobId = lastObservedActiveJobIdRef.current
-    if (!observedJobId) {
-      // A historical folder Job on cold start is not an active session.
-      updateTray({ status: 'IDLE', currentFile: null, currentProgress: null })
-      return
-    }
-
-    if (folderJob?.job_id === observedJobId && TERMINAL_STATES.has(folderJob.status)) {
-      resolvedTerminalJobIdRef.current = observedJobId
-      updateTray(payloadFromJob(folderJob))
-      return
-    }
-    if (
-      resolvedTerminalJobIdRef.current === observedJobId
-      || terminalLookupJobIdRef.current === observedJobId
-    ) return
-
-    terminalLookupJobIdRef.current = observedJobId
-    void api.job(observedJobId).then((terminalJob) => {
-      if (
-        lastObservedActiveJobIdRef.current !== observedJobId
-        || !TERMINAL_STATES.has(terminalJob.status)
-      ) return
-      resolvedTerminalJobIdRef.current = observedJobId
-      updateTray(payloadFromJob(terminalJob))
-    }).catch(() => {
-      // Do not infer failure from an offline backend. Keep the last confirmed
-      // active tooltip until a real Job snapshot is available.
-    }).finally(() => {
-      if (terminalLookupJobIdRef.current === observedJobId) {
-        terminalLookupJobIdRef.current = null
+      if (!observedJobId) {
+        // A historical folder Job on cold start is not an active session.
+        send({ status: 'IDLE', currentFile: null, currentProgress: null })
+        return
       }
-    })
-  }, [folderJob, globalActiveJob])
+      if (resolvedJobId === observedJobId) return
+      const lookupId = observedJobId
+      const terminal = await api.job(lookupId, signal)
+      if (disposed || observedJobId !== lookupId || !TERMINAL_STATES.has(terminal.status)) return
+      resolvedJobId = lookupId
+      send(payloadFromJob(terminal))
+    }
+
+    const tick = () => {
+      controller = new AbortController()
+      poll(controller.signal)
+        .catch(() => {
+          // Offline/starting backend: do not infer failure; keep the last
+          // confirmed tooltip and retry on the next tick.
+        })
+        .finally(() => {
+          if (!disposed) timer = setTimeout(tick, TRAY_POLL_INTERVAL_MS)
+        })
+    }
+    tick()
+
+    return () => {
+      disposed = true
+      if (timer !== undefined) clearTimeout(timer)
+      controller?.abort()
+    }
+  }, [])
 }
