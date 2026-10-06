@@ -512,6 +512,19 @@ export function TranscriptionPage() {
     void startAttempt(targets, false, 'selected')
   }
 
+  function dismissPendingAttempt() {
+    setDialog(null)
+    setPendingIds([])
+  }
+
+  function confirmPendingAttempt(force: boolean, scope: 'selected' | 'all_incomplete') {
+    // Consume the confirmation before preflight can pause for a filename
+    // decision. Keep its targets independent of the cleared React state.
+    const ids = [...pendingIds]
+    dismissPendingAttempt()
+    void startAttempt(ids, force, scope)
+  }
+
   function startAttempt(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
     if (globalRunActive) {
       setMessage(OTHER_RUN_ACTIVE_MESSAGE)
@@ -855,9 +868,9 @@ export function TranscriptionPage() {
           <div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
       </div></section>
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-        {dialog === 'start-all' ? <><h2 className="text-card-title" id="dialog-title">전체 파일을 전사할까요?</h2><p className="dialog-summary">전체 <strong>{rows.length}개</strong> 중 완료 <strong>{folderCompletedCount}개</strong>를 제외한 <strong>{pendingIds.length}개</strong> 파일을 전사합니다.</p><div className="dialog-actions"><Button variant="secondary" onClick={() => setDialog(null)}>취소</Button><Button onClick={() => void startAttempt(pendingIds, false, 'all_incomplete')}>실행</Button></div></> : null}
+        {dialog === 'start-all' ? <><h2 className="text-card-title" id="dialog-title">전체 파일을 전사할까요?</h2><p className="dialog-summary">전체 <strong>{rows.length}개</strong> 중 완료 <strong>{folderCompletedCount}개</strong>를 제외한 <strong>{pendingIds.length}개</strong> 파일을 전사합니다.</p><div className="dialog-actions"><Button variant="secondary" onClick={dismissPendingAttempt}>취소</Button><Button onClick={() => confirmPendingAttempt(false, 'all_incomplete')}>실행</Button></div></> : null}
         {dialog === 'empty-target' ? <><h2 className="text-card-title" id="dialog-title">처리할 파일이 없습니다</h2><p>선택한 파일이 모두 완료되었거나 실제 전사 대상이 0개입니다.</p><div className="dialog-actions"><Button onClick={() => setDialog(null)}>확인</Button></div></> : null}
-        {dialog === 'retranscribe' ? <><h2 className="text-card-title" id="dialog-title">다시 전사</h2><ul className="contract-list"><li>기존 정상 결과를 보존합니다.</li><li>새 결과 검증 성공 후에만 교체합니다.</li></ul><div className="dialog-actions"><Button variant="secondary" onClick={() => setDialog(null)}>취소</Button><Button onClick={() => void startAttempt(pendingIds, true, 'selected')}>다시 전사 시작</Button></div></> : null}
+        {dialog === 'retranscribe' ? <><h2 className="text-card-title" id="dialog-title">다시 전사</h2><ul className="contract-list"><li>기존 정상 결과를 보존합니다.</li><li>새 결과 검증 성공 후에만 교체합니다.</li></ul><div className="dialog-actions"><Button variant="secondary" onClick={dismissPendingAttempt}>취소</Button><Button onClick={() => confirmPendingAttempt(true, 'selected')}>다시 전사 시작</Button></div></> : null}
       </div></div> : null}
     </div>
   )
