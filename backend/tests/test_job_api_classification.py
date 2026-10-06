@@ -43,7 +43,7 @@ def test_create_job_all_incomplete_uses_eligible_target_denominator(tmp_path, mo
     job_manager = _configure_job_route(tmp_path, monkeypatch)
 
     job = create_job(CreateJobRequest(
-        folder=str(folder), scope="all_incomplete", course="개념완성", subject="민법",
+        folder=str(folder), scope="all_incomplete", course="개념완성", subject="민법", week=1,
     ))
 
     assert job_manager.get_job(job.job_id).total_files == 2
@@ -65,7 +65,7 @@ def test_create_job_selected_uses_eligible_target_denominator(tmp_path, monkeypa
 
     job = create_job(CreateJobRequest(
         folder=str(folder), scope="selected", file_ids=[selected_done, selected_incomplete],
-        course="개념완성", subject="민법",
+        course="개념완성", subject="민법", week=1,
     ))
 
     assert job_manager.get_job(job.job_id).total_files == 1
@@ -83,7 +83,7 @@ def test_create_job_force_retranscribe_includes_done_bundle(tmp_path, monkeypatc
 
     job = create_job(CreateJobRequest(
         folder=str(folder), scope="selected", file_ids=[done_id], force_retranscribe=True,
-        course="개념완성", subject="민법",
+        course="개념완성", subject="민법", week=1,
     ))
 
     assert job_manager.get_job(job.job_id).total_files == 1
@@ -177,7 +177,7 @@ def test_job_creation_records_normalized_name_only_when_already_standard(tmp_pat
     src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
     req = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법"
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법", week=1
     )
     job = create_job(req)
 
@@ -202,7 +202,7 @@ def test_job_creation_rejects_unknown_subject_without_stage_or_override(tmp_path
     src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
     req = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="특강"
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="특강", week=1
     )
     with pytest.raises(HTTPException):
         create_job(req)
@@ -305,7 +305,7 @@ def test_prejob_rename_then_create_job_populates_normalized_name(tmp_path):
     assert response.new_file_id == new_stem
 
     job = create_job(CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법", week=1,
     ))
 
     assert job.file_metadata[new_stem].normalized_name == new_stem
@@ -327,6 +327,7 @@ def test_normalize_batch_endpoint_reserves_unique_stems(tmp_path):
         filenames=["1강_[1주차]_a.mp3", "1강_[1주차]_b.mp3"],
         course="개념완성",
         subject="민법",
+        week=1,
     )
     results = preview_normalization_batch(req)
 
@@ -356,7 +357,7 @@ def test_job_creation_rejects_unresolved_mismatch_without_continue_original(tmp_
     src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
     req = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론",
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론", week=1,
     )
     with pytest.raises(HTTPException):
         create_job(req)
@@ -375,7 +376,7 @@ def test_job_creation_allows_explicit_continue_original_resolution(tmp_path):
     src.api.routes.settings_manager = SettingsManager(tmp_path / "settings.json")
 
     req = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론",
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="부동산학개론", week=1,
         file_resolutions={"기본이론_민법_1주차_1강": "CONTINUE_ORIGINAL"},
     )
     job = create_job(req)
@@ -398,14 +399,14 @@ def test_job_creation_rejects_normalized_without_rename(tmp_path):
 
     # A: reject direct create_job
     req = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법", week=1,
     )
     with pytest.raises(HTTPException, match="파일명 정규화를 먼저 적용해 주세요"):
         create_job(req)
 
     # C: reject even with CONTINUE_ORIGINAL
     req_c = CreateJobRequest(
-        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        folder=str(folder), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법", week=1,
         file_resolutions={"1강_[1주차]_원본": "CONTINUE_ORIGINAL"}
     )
     with pytest.raises(HTTPException, match="파일명 정규화를 먼저 적용해 주세요"):
@@ -430,6 +431,7 @@ def test_create_job_direct_colab_normalization(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
+        week=1,
         engine="direct_colab",
         colab_url="https://example.test/health"
     )
@@ -460,6 +462,7 @@ def test_create_job_invalid_colab_url(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
+        week=1,
         engine="direct_colab",
         colab_url="https://example.test/other"
     )
@@ -489,6 +492,7 @@ def test_create_job_local_engine(tmp_path):
         file_ids=["개념완성_민법_1주차_1강"],
         course="개념완성",
         subject="민법",
+        week=1,
         engine="local_whisper"
     )
 

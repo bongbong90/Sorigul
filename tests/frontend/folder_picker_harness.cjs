@@ -186,6 +186,8 @@ function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
     settings: (fn) => { settingsImpl = fn }, normalize: (fn) => { normalizeImpl = fn },
     rename: (fn) => { renameImpl = fn }, active: (value) => { activeJob = value },
     revision: (value) => { revision = value },
+    // #180: the manual week is required before Start and cleared on folder change.
+    week: async (value) => { component('ClassificationSection').onWeekChange(value); await settle() },
     hasTimer: (ms) => [...timers.values()].some((value) => value.ms === ms),
     tick: async (ms) => {
       const entry = [...timers.entries()].find(([, value]) => value.ms === ms)
@@ -221,10 +223,12 @@ cases.rows_counts = async () => {
   h.unmount()
 }
 cases.confirmation_counts = async () => {
-  const h = host(); await h.settle()
+  const h = host(); await h.settle(); await h.week('1')
   h.component('TranscriptionActions').onStart(); await h.settle()
   assert.match(h.text(h.dialog()), /전체 4개 중 완료 2개를 제외한 2개/)
   await h.pick('B'); assert.equal(h.dialog(), undefined)
+  assert.equal(h.component('ClassificationSection').week, '')
+  await h.week('1')
   h.component('TranscriptionActions').onStart(); await h.settle()
   assert.match(h.text(h.dialog()), /전체 3개 중 완료 1개를 제외한 2개/)
   h.unmount()
@@ -315,7 +319,7 @@ cases.preflight_reset = async () => {
   // lock is preserved; #171 modal/obstruction behavior is outside this fix.
   const picker = h.openPicker()
   h.normalize(async (_, names) => [{ result_type: 'MISMATCH', original_name: names[0], suggested_name: 'new.mp3', warnings: [], conflicts: [] }])
-  h.component('QueueTable').onToggle('A2'); await h.settle()
+  h.component('QueueTable').onToggle('A2'); await h.week('1')
   h.component('TranscriptionActions').onStart(); await h.settle()
   assert.equal(h.component('FilenameReview').preview.original_name, 'A2.mp3')
   h.component('FilenameReview').onEdit(); h.component('FilenameReview').onValueChange('edited.mp3'); await h.settle()
@@ -326,7 +330,8 @@ cases.preflight_reset = async () => {
   assert.equal(h.component('TranscriptionActions').canStart, true)
   h.component('FilenameReview').onContinueOriginal(); await h.settle()
   assert.equal(h.created.length, 0)
-  h.component('QueueTable').onToggle('B1'); await h.settle()
+  assert.equal(h.component('ClassificationSection').week, '')
+  h.component('QueueTable').onToggle('B1'); await h.week('1')
   h.component('TranscriptionActions').onStart(); await h.settle()
   // A fresh attempt invokes normalization again; no old attempt/resolution resumes.
   assert.ok(h.component('FilenameReview').preview); h.unmount()
@@ -345,7 +350,7 @@ cases.watcher_add_remove = async () => {
 cases.watcher_pause_unpause = async () => {
   const h = host(); await h.settle()
   const pending = deferred(); h.normalize(() => pending.promise)
-  h.component('QueueTable').onToggle('A2'); await h.settle()
+  h.component('QueueTable').onToggle('A2'); await h.week('1')
   h.component('TranscriptionActions').onStart(); await h.settle()
   const before = h.scans.length
   assert.equal(h.hasTimer(1000), false)

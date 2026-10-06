@@ -9,6 +9,7 @@ export type FileResolution =
   | 'AUTO_RENAME'
   | 'UNCHANGED'
   | 'USE_FILE_CLASSIFICATION'
+  // Renamed to typed course + typed subject + the attempt's manual week (#180).
   | 'RENAME_TO_TYPED'
   | 'CONTINUE_ORIGINAL'
 
@@ -16,9 +17,10 @@ export type PreviewDisposition = 'AUTO_RENAME' | 'NO_OP' | 'NEEDS_RESOLUTION'
 
 // Decide what a single target file's freshly-fetched normalization preview
 // means for the Start preflight: a safe rename to apply automatically, an
-// already-correct name needing nothing, or a MISMATCH/INVALID_TARGET/
-// CONFLICT that must block Start until the user makes an explicit choice
-// (D24 -- never silently rename/reclassify, never silently proceed).
+// already-correct name needing nothing, or a MISMATCH/WEEK_MISMATCH/
+// INVALID_TARGET/CONFLICT that must block Start until the user makes an
+// explicit choice (D24/#180 -- never silently rename/reclassify/re-week,
+// never silently proceed).
 export function classifyPreview(preview: NormalizationPreview): PreviewDisposition {
   if (preview.result_type === 'UNCHANGED') return 'NO_OP'
   if (preview.result_type === 'NORMALIZED' && preview.can_apply && preview.conflicts.length === 0) {
