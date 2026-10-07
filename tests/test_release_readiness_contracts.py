@@ -11,6 +11,7 @@ HISTORICAL_EVIDENCE = {
     "docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md",
     "docs/runtime/STUDY_USE_CURRENT_HEAD_INSTALLED_VALIDATION_2026-10-02.md",
     "docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-09-30.md",
+    "docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-10-06.md",
 }
 GENERATED_RESOURCES = {
     "binaries/sorigul-backend.exe": "binaries/sorigul-backend.exe",
