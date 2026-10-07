@@ -42,13 +42,17 @@ function Write-AtomicJson([string]$Path, $Value) {
         }
     } finally { if ([IO.File]::Exists($Temporary)) { [IO.File]::Delete($Temporary) } }
 }
-function Read-Json([string]$Path) {
+function Read-Json([string]$Path, [switch]$RetryMissing) {
     # Atomic replacement needs readers to permit delete/rename of the old inode.
+    # File.Replace has a transient not-found (Win32 2) gap; only a caller that
+    # reads a guard-rewritten file opts in. Missing evidence elsewhere fails fast.
     $Stream = $null
     for ($Attempt = 0; $Attempt -lt 10; $Attempt++) {
         try { $Stream = [IO.File]::Open($Path, 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)); break }
         catch [IO.IOException] {
-            if (($_.Exception.HResult -band 65535) -notin @(32, 33) -or $Attempt -eq 9) { throw }
+            $NativeCode = $_.Exception.HResult -band 65535
+            $Retryable = $NativeCode -in @(32, 33) -or ($RetryMissing -and $NativeCode -eq 2)
+            if (-not $Retryable -or $Attempt -eq 9) { throw }
             [Threading.Thread]::Sleep(20)
         }
     }
@@ -195,7 +199,7 @@ function Assert-Healthy($Config) {
     if ([IO.File]::Exists((Join-Path $Config.session 'SESSION_INVALID.json'))) { throw 'Guard invalidated session' }
     $Process = Get-GuardProcess $Config
     try {
-        $Heartbeat = Read-Json (Join-Path $Config.session 'LOCK_HEARTBEAT.json')
+        $Heartbeat = Read-Json (Join-Path $Config.session 'LOCK_HEARTBEAT.json') -RetryMissing
         if ($Heartbeat.token -cne $Config.token -or $Heartbeat.pid -ne $Process.Id -or
             ([DateTime]::UtcNow - [DateTime]::Parse($Heartbeat.at_utc)).TotalSeconds -gt 10 -or
             -not (Test-LockDenied $Config.lock_path)) { throw 'Guard heartbeat/lock health failed' }
