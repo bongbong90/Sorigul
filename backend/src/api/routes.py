@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -8,14 +9,17 @@ from src.services.classification import StageRequiredError, resolve_stage
 from src.services.normalizer import (
     ClassificationValidationError,
     FilenameNormalizer,
+    ManualWeekValidationError,
     NormalizationPreview,
     collect_existing_stems,
     validate_classification_text,
+    validate_manual_week,
 )
 from src.services.renamer import BundleRenamer, RenameStatus, UnsafeStemError, validate_safe_stem
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
+    ExecutionInvariantError,
     DefaultEngineResolver,
     TranscriptionRunner,
 )
@@ -37,10 +41,18 @@ from src.services.drive import (
     DriveUploadService,
     GoogleOAuthService,
 )
-from src.services.results import FolderScanResult, OpenFolderIntent, ResultsService, TextContent
+from src.services.results import (
+    FolderScanResult,
+    OpenFolderIntent,
+    ResultsService,
+    TextContent,
+    job_folder_open_intent,
+)
+from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Simple dependency injection
@@ -135,6 +147,20 @@ def scan_results(req: FolderScanRequest):
         raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
 
 
+class FolderRevisionRequest(BaseModel):
+    folder: str
+
+
+@router.post("/folders/revision", response_model=FolderRevision)
+def get_folder_revision(req: FolderRevisionRequest):
+    # Read-only live-change probe (#111): top-level metadata of the one
+    # selected folder. No scan context, Job, or result-bundle mutation.
+    try:
+        return folder_revision(req.folder)
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
+
+
 @router.get("/folders/{scan_id}/items/{item_id}/preview", response_model=TextContent)
 def preview_text(scan_id: str, item_id: str):
     return _read_result_text(scan_id, item_id, full=False)
@@ -195,6 +221,62 @@ def cancel_shutdown():
     return desktop_coordinator.cancel_shutdown()
 
 
+@router.post("/desktop/jobs/{job_id}/open-folder-intent", response_model=OpenFolderIntent)
+def open_job_folder_intent(job_id: str):
+    """Completion-notification "폴더 열기": the caller supplies only the opaque
+    job_id; the folder is taken from the stored Job, never from the request."""
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
+    try:
+        return job_folder_open_intent(job.folder)
+    except (FileNotFoundError, NotADirectoryError):
+        raise HTTPException(status_code=410, detail="전사 폴더를 찾을 수 없습니다.")
+    except (PermissionError, ValueError, OSError):
+        raise HTTPException(status_code=400, detail="폴더 열기 요청을 만들 수 없습니다.")
+
+
+class CloseGuard(BaseModel):
+    """Whether a window close must not terminate the app right now. Carries
+    no folder path, token, or remote id -- only what a notice needs."""
+
+    protect_exit: bool
+    activity: Literal["idle", "transcription", "drive"]
+    job_id: Optional[str] = None
+    current_file: Optional[str] = None
+    progress: Optional[float] = None
+
+
+@router.get("/desktop/close-guard", response_model=CloseGuard)
+def get_close_guard():
+    """Read-only snapshot of critical work (#128), each service checked under
+    its own lock. Transcription is read first: a run submits its automatic
+    Drive uploads before its Future finishes, so a run seen as done has
+    already registered any Drive work the next checks will see."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return CloseGuard(protect_exit=True, activity="transcription")
+    if active_id is not None:
+        job = job_manager.get_job(active_id)
+        return CloseGuard(
+            protect_exit=True,
+            activity="transcription",
+            job_id=active_id,
+            current_file=job.current_file if job else None,
+            progress=job.current_progress if job else None,
+        )
+    upload = drive_service.active_upload()
+    if upload is not None:
+        job_id, file_id = upload
+        return CloseGuard(
+            protect_exit=True, activity="drive", job_id=job_id, current_file=f"{file_id}.mp3"
+        )
+    if drive_execution_service.has_pending_work():
+        return CloseGuard(protect_exit=True, activity="drive")
+    return CloseGuard(protect_exit=False, activity="idle")
+
+
 @router.get("/drive/status")
 def get_drive_status():
     return {"auth_state": drive_auth.state, "scope": DRIVE_SCOPE}
@@ -227,24 +309,39 @@ def complete_drive_auth(req: DriveAuthCompleteRequest):
     except DriveError as exc:
         raise HTTPException(status_code=400, detail=exc.user_message)
 
+# The manually entered week (#180) is a strict integer on every request that
+# normalizes: "4.0", "4", "4주차" and booleans are rejected by the model, and
+# validate_manual_week independently rejects a missing or non-positive value
+# -- the frontend check is never trusted on its own.
+ManualWeekField = Field(default=None, strict=True)
+
+
+def _validated_classification(course: str, subject: str, week: Optional[int]):
+    try:
+        return (
+            validate_classification_text(course, "과정명"),
+            validate_classification_text(subject, "과목명"),
+            validate_manual_week(week),
+        )
+    except (ClassificationValidationError, ManualWeekValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class NormalizeRequest(BaseModel):
     folder: str
     filename: str
     course: str
     subject: str
+    week: Optional[int] = ManualWeekField
 
 @router.post("/normalize/preview", response_model=NormalizationPreview)
 def preview_normalization(req: NormalizeRequest):
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, week = _validated_classification(req.course, req.subject, req.week)
     normalizer = FilenameNormalizer()
     existing_stems = collect_existing_stems(
         Path(req.folder), exclude_stem=Path(req.filename).stem
     )
-    return normalizer.normalize(req.filename, course, subject, existing_stems)
+    return normalizer.normalize(req.filename, course, subject, existing_stems, week)
 
 
 class NormalizeBatchRequest(BaseModel):
@@ -252,22 +349,19 @@ class NormalizeBatchRequest(BaseModel):
     filenames: List[str]
     course: str
     subject: str
+    week: Optional[int] = ManualWeekField
 
 
 @router.post("/normalize/batch", response_model=List[NormalizationPreview])
 def preview_normalization_batch(req: NormalizeBatchRequest):
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, week = _validated_classification(req.course, req.subject, req.week)
     normalizer = FilenameNormalizer()
     # Existing on-disk stems are the collision truth, except a batch member's
     # own current stem -- it's a rename candidate, not a foreign collision.
     existing_stems = collect_existing_stems(Path(req.folder))
     batch_stems = {Path(name).stem for name in req.filenames}
     existing_stems -= batch_stems
-    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems)
+    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems, week)
 
 
 class RenameRequest(BaseModel):
@@ -309,12 +403,16 @@ class CreateJobRequest(BaseModel):
     upload_to_drive: bool = False
     course: str
     subject: str
+    # The manually entered week the preflight normalized against (#180). Not
+    # stored on the Job: the per-file FileMetadata week/lesson stay the
+    # authority, re-derived below from a fresh normalize with this week.
+    week: Optional[int] = ManualWeekField
     stage: Optional[Literal["1차", "2차"]] = None
     # Explicit per-file acknowledgement that the caller chose to proceed
     # under the file's original (unresolved) name -- the only resolution
     # that still leaves normalization/classification unresolved. Any target
-    # whose fresh normalize() result is MISMATCH/INVALID_TARGET/CONFLICT
-    # must appear here with "CONTINUE_ORIGINAL", or Job creation is
+    # whose fresh normalize() result is MISMATCH/WEEK_MISMATCH/INVALID_TARGET/
+    # CONFLICT must appear here with "CONTINUE_ORIGINAL", or Job creation is
     # rejected; this is the server-side backstop for "never create a Job
     # with an unresolved file" (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
     file_resolutions: Dict[str, Literal["CONTINUE_ORIGINAL"]] = Field(default_factory=dict)
@@ -326,11 +424,7 @@ def create_job(req: CreateJobRequest):
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")
 
-    try:
-        course = validate_classification_text(req.course, "과정명")
-        subject = validate_classification_text(req.subject, "과목명")
-    except ClassificationValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    course, subject, manual_week = _validated_classification(req.course, req.subject, req.week)
 
     current_settings = settings_manager.get()
     try:
@@ -368,14 +462,16 @@ def create_job(req: CreateJobRequest):
         if scanned is None:
             continue
         existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
-        preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        preview = normalizer.normalize(
+            scanned.filename, course, subject, existing_stems, manual_week
+        )
         if preview.result_type == "NORMALIZED":
             raise HTTPException(
                 status_code=400,
                 detail="파일명 정규화를 먼저 적용해 주세요.",
             )
         if (
-            preview.result_type in {"MISMATCH", "INVALID_TARGET", "CONFLICT"}
+            preview.result_type in {"MISMATCH", "WEEK_MISMATCH", "INVALID_TARGET", "CONFLICT"}
             and req.file_resolutions.get(fid) != "CONTINUE_ORIGINAL"
         ):
             raise HTTPException(
@@ -387,9 +483,12 @@ def create_job(req: CreateJobRequest):
             if preview.result_type == "UNCHANGED" and preview.suggested_name
             else None
         )
+        # A WEEK_MISMATCH kept under its original name has no confirmed week:
+        # neither the source week nor the typed one is recorded (#180).
+        week_confirmed = preview.result_type != "WEEK_MISMATCH"
         file_metadata[fid] = FileMetadata(
-            week=preview.detected_week,
-            lesson=preview.detected_lesson,
+            week=preview.detected_week if week_confirmed else None,
+            lesson=preview.detected_lesson if week_confirmed else None,
             normalized_name=normalized_name,
         )
 
@@ -419,6 +518,36 @@ def create_job(req: CreateJobRequest):
 @router.get("/jobs", response_model=List[JobModel])
 def list_jobs():
     return job_manager.list_jobs()
+
+OTHER_RUN_ACTIVE_MESSAGE = (
+    "다른 전사 작업이 이미 실행 중입니다. 기존 작업이 종료된 뒤 다시 시도해 주세요."
+)
+
+
+def _other_run_active(job_id: str) -> bool:
+    try:
+        active = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return True
+    return active is not None and active != job_id
+
+
+@router.get("/execution/active-job", response_model=Optional[JobModel])
+def get_active_execution_job():
+    """Read-only: the Job whose runner Future has not yet returned (the
+    authoritative single-run owner), or null when idle."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    if active_id is None:
+        return None
+    job = job_manager.get_job(active_id)
+    if job is None:
+        logger.error("Active transcription run has no persisted Job")
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    return job
+
 
 @router.get("/jobs/{job_id}", response_model=JobModel)
 def get_job(job_id: str):
@@ -525,10 +654,14 @@ def job_action(job_id: str, req: JobActionRequest):
         updated = job_manager.get_job(job_id)
 
     elif req.action == "retry":
-        # Reset failed/stopped/cancelled/crashed to waiting, checking filesystem truth
+        # Reset terminal failures, honoring forced replacement intent.
         current = job_manager.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job not found")
+        # Retry never prepares a second run while another Job executes; the
+        # Job keeps its terminal state. start() remains the atomic guard.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         # Retry opens only once the previous run persisted its terminal
         # state; a Stop/Cancel that is merely requested keeps it closed.
         if execution_service.is_active(job_id) or current.status in {
@@ -551,19 +684,24 @@ def job_action(job_id: str, req: JobActionRequest):
             retried_any = False
             for fid, fstatus in job.files.items():
                 if fstatus in {FileStatus.FAILED, FileStatus.STOPPED, FileStatus.CANCELLED, FileStatus.CRASHED}:
-                    if scanned_files.get(fid) == BundleStatus.DONE:
+                    # A forced replacement's old bundle is protected previous
+                    # output, not evidence that the replacement succeeded.
+                    if not job.force_retranscribe and scanned_files.get(fid) == BundleStatus.DONE:
                         job.files[fid] = FileStatus.DONE
                     else:
                         job.files[fid] = FileStatus.WAITING
                         retried_any = True
+            TranscriptionRunner._update_counts(job)
             if not retried_any:
                 if all(state == FileStatus.DONE for state in job.files.values()):
                     job.status = FileStatus.DONE
+                    job.error = None
                     job.events.append(JobEvent(level="info", category="Retry", message="재시도할 미완료 파일 없음"))
                     return
                 raise HTTPException(status_code=400, detail="No eligible files to retry.")
             job.status = FileStatus.WAITING
             job.error = None
+            job.batch_completed = False
             job.events.append(JobEvent(level="info", category="Retry", message="재시도 시작"))
 
         updated = job_manager.mutate_job(job_id, retry_mutation)
@@ -582,6 +720,9 @@ def start_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not execution_service.start(job_id):
+        # start() is the atomic single-run guard; this only picks the message.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         latest = job_manager.get_job(job_id)
         if latest is not None and latest.status == FileStatus.WAITING:
             raise HTTPException(

@@ -110,6 +110,27 @@ def test_colab_internal_units_are_not_user_visible_literals():
     assert not any(value in source for value in forbidden)
 
 
+def test_transcription_engine_labels_match_the_canonical_runtime_contract():
+    engine_source = read_repo("frontend/src/components/transcription/EngineSection.tsx")
+    page_source = read_repo("frontend/src/pages/TranscriptionPage.tsx")
+
+    assert "Whisper medium · 내 PC GPU 우선" in engine_source
+    assert "Whisper large-v3 · Colab GPU 우선" in engine_source
+    assert "Whisper medium (GPU)" not in engine_source
+    assert "Direct Colab" not in page_source
+    assert "Google Colab" in page_source
+
+
+def test_heavy_transcription_dependencies_stay_outside_core():
+    core_requirements = read_repo("backend/requirements.txt").lower()
+    colab_requirements = read_repo("colab/requirements.txt").lower()
+
+    for package in ("torch", "openai-whisper", "faster-whisper"):
+        assert package not in core_requirements
+    assert "faster-whisper==1.2.1" in colab_requirements.splitlines()
+    assert "openai-whisper" not in colab_requirements
+
+
 def test_overall_progress_uses_job_denominator():
     page_source = read_repo("frontend/src/pages/TranscriptionPage.tsx")
     actions_source = read_repo("frontend/src/components/transcription/TranscriptionActions.tsx")

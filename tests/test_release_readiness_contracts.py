@@ -9,6 +9,9 @@ HISTORICAL_EVIDENCE = {
     "docs/release/CORE_WORKFLOW_REFINEMENT_BUILD_VALIDATION.md",
     "docs/release/FINAL_FEATURE_PARITY_REGRESSION.md",
     "docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md",
+    "docs/runtime/STUDY_USE_CURRENT_HEAD_INSTALLED_VALIDATION_2026-10-02.md",
+    "docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-09-30.md",
+    "docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-10-06.md",
 }
 GENERATED_RESOURCES = {
     "binaries/sorigul-backend.exe": "binaries/sorigul-backend.exe",
@@ -140,12 +143,61 @@ def test_runtime_requirement_lines_are_exactly_pinned():
 
 def test_cuda_and_python_release_contracts_remain_exact():
     torch_requirements = read_repo("tools/requirements-torch-cuda.txt")
-    build_script = read_repo("scripts/build_backend_sidecar.ps1")
+    core_build_script = read_repo("scripts/build_backend_sidecar.ps1")
+    local_build_script = read_repo("scripts/build_local_whisper_runtime.ps1")
 
     assert "torch==2.13.0+cu130" in torch_requirements.splitlines()
-    assert 'EXPECTED_TORCH = "2.13.0+cu130"' in build_script
-    assert 'EXPECTED_CUDA = "13.0"' in build_script
-    assert 'StartsWith("3.13.")' in build_script
+    assert '$ExpectedTorch = "torch==2.13.0+cu130"' in local_build_script
+    assert '$ExpectedCuda = "13.0"' in local_build_script
+    assert 'StartsWith("3.13.")' in local_build_script
+    assert "requirements-torch-cuda.txt" not in core_build_script
+
+
+def test_current_manifest_ownership_routes_local_identity_away_from_core():
+    contract = read_repo("docs/project/CURRENT_PRODUCT_CONTRACT.md")
+    truth = SOURCE_OF_TRUTH.read_text(encoding="utf-8")
+
+    for requirement in (
+        "Core build manifest owns Core provenance only",
+        "Core manifest MUST NOT own `torch_requirement` / `expected_cuda`",
+        "Local Runtime manifest owns Local runtime identity",
+        'torch_requirement = "torch==2.13.0+cu130"',
+        'expected_cuda = "13.0"',
+        "Runtime discovery is the fail-closed consumer of Local-only metadata",
+        "Local/Core `source_head` pairing remains mandatory",
+    ):
+        assert requirement in contract
+    assert "in the **Local Runtime manifest**" in truth
+    assert "Historical pre-split Core" in truth
+    assert "is superseded by Current Product Contract §7" in truth
+
+
+def test_current_release_gate_orders_preflight_before_fresh_artifacts_and_installed_cuda():
+    status = read_repo("docs/release/CURRENT_RELEASE_STATUS.md")
+    steps = re.findall(r"^\d+\. (.+)$", status, re.MULTILINE)
+    gates = (
+        "canonical #113 preflight rehearsal",
+        "Release Freeze:",
+        "canonical session bootstrap:",
+        "fresh Local Runtime build",
+        "fresh Core build",
+        "fresh MSI",
+        "clean install",
+        "installed Core/Local provenance pairing",
+        "installed CUDA synthetic tensor",
+        "only then actual Local MP3 gate",
+    )
+    positions = [
+        next(i for i, step in enumerate(steps) if step.startswith(gate))
+        for gate in gates
+    ]
+
+    assert positions == sorted(positions)
+    assert "fresh current-HEAD CUDA sidecar" not in status
+    assert "PRE-BUILD SOURCE READY = REQUIRES PREFLIGHT" in status
+    assert "#55 canonical preflight orchestration" in status
+    assert "preflight rehearsal is deliberately outside the artifact session" in status
+    assert "under the same run_id" in status
 
 
 def test_no_paid_ci_workflow_exists():

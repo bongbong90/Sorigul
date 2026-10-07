@@ -4,16 +4,16 @@
 
 For current product decisions, use the following precedence:
 
-1. `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` is the top-level current product contract.
-2. Approved post-plan hardening amendments recorded in this document govern release safety,
-   validation, packaging isolation, and exact dependency/runtime constraints without reopening the
-   plan's product decisions.
-3. Current executable code together with current behavioral and release-readiness contract tests
-   is the implementation authority.
+1. More recent explicit user-approved product decisions recorded in a current locked document.
+2. `docs/project/CURRENT_PRODUCT_CONTRACT.md` and its supersession map.
+3. Actual ACTIVE Legacy runtime code and validation evidence.
+4. Historical planning and audit documents, including the original D01-D10 and D11+ decision records.
+5. Current Sorigul implementation.
 
 Historical evidence can explain a past result but cannot override the current product contract.
-`AMBIGUOUS` documents must not be used to make current implementation decisions. The matrix below
-contains no unresolved ambiguous authority.
+Current Sorigul code is not proof that a product difference was intended. `AMBIGUOUS` documents must
+not be used to make current implementation decisions. The matrix below contains no unresolved
+ambiguous authority.
 
 ## Approved post-plan hardening amendments
 
@@ -24,29 +24,37 @@ contains no unresolved ambiguous authority.
 - Python release tooling requires the Python 3.13 line. Runtime dependencies are exact-pinned from
   the verified local environment, except `python-multipart==0.0.32`, whose pin comes from official
   read-only PyPI metadata and is used only by the Colab artifact.
-- A packaged Local release requires `torch==2.13.0+cu130`, `torch.version.cuda == 13.0`, an available
-  CUDA device, and a successful real CUDA tensor computation. CPU fallback behavior in development
-  or historical artifacts is not acceptable release evidence.
+- A packaged Local release requires exact scalar strings `torch_requirement = "torch==2.13.0+cu130"`
+  and `expected_cuda = "13.0"` in the **Local Runtime manifest**, with JSON round-trip type/value
+  validation. Runtime discovery consumes these Local-only fields fail-closed, together with
+  runtime/protocol identity, artifact hashes, tracked clean provenance and Local/Core `source_head`
+  equality. Installed validation must prove `torch.version.cuda == 13.0`, an available CUDA device,
+  and a successful real CUDA tensor computation. CPU fallback behavior in development or historical
+  artifacts is not acceptable release evidence.
+- The **Core build manifest owns Core provenance only**; `torch_requirement` and `expected_cuda`
+  must be absent. The Windows installer consumes Core provenance/size/hash policy and must not
+  require or consume these Local-only fields or install Local Runtime. Historical pre-split Core
+  torch metadata acceptance (including #45) is superseded by Current Product Contract §7 and cannot
+  override this source routing. Fresh #113 must confirm Local scalar identity, Core field absence
+  and installed Core/Local provenance pairing before #45 can close.
 - `scripts/run_core_workflow_regression.ps1` is the canonical local, offline-capable, no-build source
   regression. It never installs dependencies or creates placeholder release artifacts.
 
-## Current product contract
+## Product-contract routing
 
-- **Navigation:** `전사`, `로그`, `Folders`, `설정`; there is no Dashboard.
-- **MP3:** top-level folder scan only. There is no import, upload, copy, or move UI.
-- **Classification:** course and subject are user metadata and are the classification truth.
-- **Filename:** normalization supplies week and lesson identity only; it is not course/subject truth.
-- **Drive:** upload only TXT, JSON, and SRT. MP3 is never uploaded.
-- **Local:** Whisper `medium`; a packaged release requires working CUDA.
-- **Colab:** Whisper `medium`, fixed internal 300-second units, and a user-started runtime only.
-- **Persistence:** `last_engine`, course, and subject may persist. Colab URL and Drive auto-upload do
-  not persist.
-- **Stop/Cancel:** no user-facing Resume. The interrupted current file starts again when retried.
-- **Results:** a valid TXT/JSON/SRT bundle is skipped. Retranscription is explicit only.
-- **Runtime:** Tauri v2, one-file packaged backend, bundled ffmpeg, and Windows Job Object ownership.
-- **Zero-cost:** the application never automatically selects, purchases, provisions, enables, or
-  upgrades a paid API, billable usage service, cloud resource, GPU/runtime, credit, subscription,
-  billing setting, or payment method. Unclear cost fails closed.
+`docs/project/CURRENT_PRODUCT_CONTRACT.md` is the single current product-contract entry point. It
+integrates preserved Legacy behavior, approved Intentional Changes, the lightweight and zero-cost
+constraints, the 2026-10-31 study-use deadline, and the Git/GitHub governance lock.
+
+Unclear cost fails closed: no paid resource or fallback is enabled when zero-cost status cannot be
+safely established.
+
+The most important engine guardrail is explicit: Local is OpenAI Whisper `medium`; Colab is
+`faster-whisper large-v3` with CUDA `float16` preferred and CPU `int8` fallback. The current Sorigul
+Colab `medium` implementation is a defect owned by #106, not product authority.
+
+This ledger classifies evidence; it does not duplicate or replace the product contract. The
+completion plan separately defines what is completed when.
 
 ## Quick Tunnel operational limit
 
@@ -62,7 +70,10 @@ Classification values are exact: `CURRENT CONTRACT`, `SUPERSEDED`, `HISTORICAL E
 
 | Path | Classification | Reason | Current replacement / authority |
 |---|---|---|---|
-| `docs/README.md` | CURRENT CONTRACT | Current documentation entry point. | This ledger. |
+| `README.md` | CURRENT CONTRACT | Repository entry point routes product decisions to the Current Product Contract. | Current Product Contract for product behavior. |
+| `colab/README.md` | CURRENT CONTRACT | Current Colab runtime usage and connection instructions. | Current Product Contract for engine/model behavior. |
+| `frontend/README.md` | CURRENT CONTRACT | Current frontend development commands with links to historical implementation records. | Current Product Contract for product behavior. |
+| `docs/README.md` | CURRENT CONTRACT | Current documentation routing entry point. | Current Product Contract and this ledger. |
 | `docs/backend/CORE_BACKEND_FILE_JOB_MIGRATION.md` | SUPERSEDED | Pre-refinement migration snapshot includes earlier filename assumptions. | Core workflow plan and current code/tests. |
 | `docs/backend/DRIVE_RESULTS_DESKTOP_UX_MIGRATION.md` | SUPERSEDED | Records the old four-file Drive bundle and filename-derived classification. | Core workflow plan D11/D15 and this ledger. |
 | `docs/backend/TRANSCRIPTION_ENGINE_MIGRATION.md` | STALE | Requires ffprobe and describes CPU fallback as sufficient without the release CUDA gate. | Core workflow plan D20 and current release status. |
@@ -81,21 +92,30 @@ Classification values are exact: `CURRENT CONTRACT`, `SUPERSEDED`, `HISTORICAL E
 | `docs/design/design.md` | CURRENT CONTRACT | Current visual foundation. | More specific current design documents. |
 | `docs/design/icon_system.md` | CURRENT CONTRACT | Current icon-system rules. | Current tracked icons and executable UI. |
 | `docs/design/typography.md` | CURRENT CONTRACT | Current typography rules. | Current CSS and executable UI. |
-| `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` | CURRENT CONTRACT | Highest current product contract. | This file itself. |
-| `docs/project/CURRENT_SOURCE_OF_TRUTH.md` | CURRENT CONTRACT | Current precedence, amendments, and complete document ledger. | This file itself. |
-| `docs/project/DEVELOPMENT_RULES.md` | CURRENT CONTRACT | Current engineering and repository hygiene rules. | Core workflow plan where product behavior is involved. |
+| `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` | CURRENT CONTRACT | Preserves the D11+ decision provenance and implementation planning record. | Current Product Contract for current behavior. |
+| `docs/project/CURRENT_PRODUCT_CONTRACT.md` | CURRENT CONTRACT | Canonical current product-contract entry point and supersession map. | This file itself. |
+| `docs/project/CURRENT_SOURCE_OF_TRUTH.md` | CURRENT CONTRACT | Current evidence precedence, amendments, and complete document ledger. | Current Product Contract for product behavior. |
+| `docs/project/DEVELOPMENT_RULES.md` | CURRENT CONTRACT | Mandatory Git/GitHub lifecycle and repository safety rules. | Current Product Contract where product behavior is involved. |
 | `docs/project/FEATURE_PARITY.md` | SUPERSEDED | Summary predates final release-only CUDA hardening and carries amended legacy language. | Core workflow plan and this ledger. |
 | `docs/project/FRONTEND_FOUNDATION.md` | STALE | Early foundation document leaves obsolete Dashboard/Results work outstanding. | Current UI freeze/specs and executable UI. |
 | `docs/project/LEGACY_FEATURE_PARITY_AUDIT.md` | HISTORICAL EVIDENCE ONLY | Immutable legacy evidence, including claims intentionally removed later. | Core workflow plan and this ledger. |
 | `docs/project/MIGRATION_CONTRACT.md` | SUPERSEDED | Earlier contract contains specifically superseded four-file and filename rules. | Core workflow refinement plan. |
 | `docs/project/MIGRATION_CONTRACT_REVIEW.md` | HISTORICAL EVIDENCE ONLY | Decision-review evidence for the earlier migration contract. | Core workflow plan and this ledger. |
-| `docs/project/PROJECT_CHARTER.md` | CURRENT CONTRACT | Current project purpose and implementation boundaries. | Core workflow plan for detailed product behavior. |
-| `docs/project/ROADMAP.md` | SUPERSEDED | Earlier phased roadmap is replaced by completed A-E remediation lineage. | Current release status. |
+| `docs/project/PROJECT_CHARTER.md` | CURRENT CONTRACT | Current study-use purpose and implementation boundaries. | Current Product Contract for detailed product behavior. |
+| `docs/project/ROADMAP.md` | CURRENT CONTRACT | Current execution order from governance through #114 and closeout. | Completion plan for detailed scheduling. |
+| `docs/project/SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md` | CURRENT CONTRACT | Defines completion order, gates, issue map, and 2026-10-31 schedule. | Current Product Contract for product behavior. |
 | `docs/release/CORE_WORKFLOW_REFINEMENT_BUILD_VALIDATION.md` | HISTORICAL EVIDENCE ONLY | Immutable Phase 5B artifact from an older source/artifact run. | Current release status and a future current-HEAD ledger. |
 | `docs/release/CURRENT_RELEASE_STATUS.md` | CURRENT CONTRACT | Living release/source state; explicitly not historical evidence. | This file itself. |
 | `docs/release/FINAL_FEATURE_PARITY_REGRESSION.md` | HISTORICAL EVIDENCE ONLY | Immutable prior regression evidence. | Canonical current source regression and current release status. |
 | `docs/release/RELEASE_CHECKLIST.md` | STALE | Claims installer/release verdict completion while current-HEAD artifact gates remain unrun. | Current release status and post-E gate order. |
 | `docs/release/RELEASE_NOTES_0.1.0.md` | HISTORICAL EVIDENCE ONLY | Notes for an earlier 0.1.0 state, not a current verdict. | Current release status. |
 | `docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md` | HISTORICAL EVIDENCE ONLY | Immutable installed-runtime evidence for an earlier artifact. | Current release status and future current-HEAD validation. |
+| `docs/runtime/STUDY_USE_CURRENT_HEAD_INSTALLED_VALIDATION_2026-10-02.md` | HISTORICAL EVIDENCE ONLY | Fixed-state validation evidence for one stopped #113 attempt; does not define current product behavior, and later #154/#113 results can supersede its gate outcome. | Current Product Contract for product behavior; subsequent #154/#113 results for gate status. |
+| `docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-09-29.md` | HISTORICAL EVIDENCE ONLY | #123 (5F) source-level Legacy/current-contract regression at fixed HEAD `71d6920`; verdict FAIL (#124 P1). | Re-run after the pre-artifact burn-down; #113 current-HEAD gate. |
+| `docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-09-29_LEGACY_INVENTORY.md` | HISTORICAL EVIDENCE ONLY | Per-file classification of all 337 tracked Legacy files at `fbc86313` for #123. | Current Product Contract for product behavior. |
+| `docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-09-30.md` | HISTORICAL EVIDENCE ONLY | #123 fresh source-regression PASS at fixed audit HEAD `c8c08b39`; historical validation evidence that does not approve later source or artifact changes. | Current Product Contract for product behavior; fresh gates for later source/artifact changes. |
+| `docs/runtime/STUDY_USE_FULL_SOURCE_CONTRACT_REGRESSION_2026-10-06.md` | HISTORICAL EVIDENCE ONLY | #123 final source-regression PASS at fixed audit HEAD `cd1cc550`; fixed validation evidence, not current product authority. | `docs/project/CURRENT_PRODUCT_CONTRACT.md` for product behavior; current #7/#116/#185 gate state for later validation and candidate identity. |
+| `docs/runtime/STUDY_USE_INSTALLED_SYNTHETIC_VALIDATION_2026-09-28.md` | HISTORICAL EVIDENCE ONLY | Issue #46 installed synthetic PASS for a fixed earlier source/artifact set. | #113 future current-HEAD installed gate. |
+| `docs/runtime/STUDY_USE_KOREAN_REAL_SPEECH_FIXTURE_VALIDATION_2026-09-28.md` | HISTORICAL EVIDENCE ONLY | Controlled fixture/stress PASS; explicitly leaves #47 real study audio pending. | #47 real personal Local study gate. |
 | `docs/runtime/TAURI_RUNTIME_SIDECAR_OS_INTEGRATION.md` | HISTORICAL EVIDENCE ONLY | Past runtime integration implementation/validation record. | Current code, behavioral tests, and post-E gate order. |
 | `docs/runtime/WINDOWS_APP_ICON_BRANDING.md` | HISTORICAL EVIDENCE ONLY | Past icon generation and native verification record. | Current tracked icons and current contract tests. |

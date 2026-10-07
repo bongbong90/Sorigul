@@ -293,7 +293,10 @@ def test_real_health_verifier(monkeypatch):
         def __init__(self):
             self.status = 200
         def read(self):
-            return b"{\"status\":\"ok\"}"
+            return (
+                b'{"status":"ok","engine":"faster-whisper","model":"large-v3",'
+                b'"device":"cpu","compute_type":"int8"}'
+            )
         def __enter__(self):
             return self
         def __exit__(self, *args):

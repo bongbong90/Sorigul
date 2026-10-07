@@ -100,6 +100,38 @@
   background: var(--color-surface-soft);
 }
 
+.engine-colab-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-control);
+}
+
+.engine-colab-setup-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-component);
+}
+
+.engine-colab-steps {
+  margin: 0;
+  padding-inline-start: var(--space-component);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.engine-colab-commands {
+  margin: 0;
+  padding: var(--space-control);
+  overflow-x: auto;
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  white-space: pre;
+}
+
 .engine-status-row,
 .engine-status-copy,
 .engine-state,
@@ -181,6 +213,7 @@
   }
 
   .engine-status-row,
+  .engine-colab-setup-row,
   .engine-manual-controls {
     align-items: stretch;
     flex-direction: column;

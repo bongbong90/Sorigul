@@ -55,8 +55,14 @@ export interface NormalizationPreview {
   warnings: string[]
   conflicts: string[]
   can_apply: boolean
-  // NORMALIZED | UNCHANGED | MISMATCH | INVALID_TARGET | CONFLICT
+  // NORMALIZED | UNCHANGED | MISMATCH | WEEK_MISMATCH | INVALID_TARGET | CONFLICT
   result_type: string
+  // The manually entered week the preview was computed against (#180).
+  manual_week: string | null
+  // MISMATCH/WEEK_MISMATCH: the backend-allocated target for an explicit
+  // "rename to typed course + subject + manual week" choice; null when no
+  // free lesson exists.
+  typed_target_name: string | null
 }
 
 export interface FileMetadata {
@@ -117,6 +123,11 @@ export interface FolderScanResult {
   filter: FolderFilter
   items: FolderItem[]
   counts: Record<FolderFilter, number>
+}
+
+export interface FolderRevision {
+  revision: string
+  file_count: number
 }
 
 export interface TextContent {
@@ -286,13 +297,13 @@ export const api = {
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  normalize: (folder: string, filename: string, course: string, subject: string) =>
+  normalize: (folder: string, filename: string, course: string, subject: string, week: number) =>
     request<NormalizationPreview>('/normalize/preview', {
-      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filename, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
-  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string) =>
+  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string, week: number) =>
     request<NormalizationPreview[]>('/normalize/batch', {
-      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   rename: (folder: string, oldStem: string, newStem: string) =>
     request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
@@ -310,9 +321,13 @@ export const api = {
     upload_to_drive?: boolean
     course: string
     subject: string
+    week: number
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  // Authoritative single-run owner (#126): the Job whose runner has not yet
+  // returned, across every folder and engine; null when idle.
+  activeJob: (signal?: AbortSignal) => request<JobModel | null>('/execution/active-job', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>
     request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/action`, {
@@ -330,13 +345,18 @@ export const api = {
   completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
     method: 'POST', body: JSON.stringify({ code }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
-  folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
-    method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  folders: (folder: string, filter: FolderFilter, signal?: AbortSignal) => request<FolderScanResult>('/folders/scan', {
+    method: 'POST', body: JSON.stringify({ folder, filter }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  textPreview: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
-  fullText: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`),
+  // #111 live-change probe: opaque top-level metadata revision of the one
+  // selected folder. Read-only; callers refresh via scan/folders on change.
+  folderRevision: (folder: string, signal?: AbortSignal) => request<FolderRevision>('/folders/revision', {
+    method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL,
+  }),
+  textPreview: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`, { signal }),
+  fullText: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`, { signal }),
   openFolderIntent: (scanId: string, itemId?: string) => {
     const query = itemId ? `?item_id=${encodeURIComponent(itemId)}` : ''
     return request<{ action: 'OPEN_FOLDER'; folder: string; item_filename?: string }>(
