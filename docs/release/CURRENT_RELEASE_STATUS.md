@@ -14,6 +14,39 @@ This is the living current release ledger, not a historical validation artifact.
 
 `PRE-BUILD SOURCE READY = REQUIRES PREFLIGHT`
 
+## #189 approved protected-directory classification (2026-10-14 KST)
+
+B implementation is approved on `fix/189-protected-dir-mtime-classification`, based on
+Integration HEAD `28ba869bec598e8d436d0877d13a28194c305aff`. The only permitted difference
+is `write_ticks` on non-reparse directory entries at
+`%LOCALAPPDATA%\com.sorigul.desktop\EBWebView` or below it. All protected entry paths,
+counts, file/directory types, reparse flags, attributes, file sizes/timestamps and existing
+settings/jobs SHA256 must match, with no other captured differences. File changes,
+additions/deletions, other protected-folder changes and existing auth/settings failures
+continue to block activation or HARD STOP an active session.
+
+Activation and each canonical Status use the same comparator. `PROTECTED_DIFF.json`
+retains exact root/entry/field before/after differences and stage history. A permitted
+`DIR_MTIME_ONLY` result is not `ZERO_CHANGE_PASS`: final Acceptance must state that an
+allowed metadata difference was observed, even if a later comparison is `NO_CHANGE`.
+Uncaptured file content/properties remain NOT VERIFIED; collection scope is unchanged.
+
+#113 remains OPEN / HARD STOP. Run `Sorigul_20261013_28ba869_5d228713b92d` and its
+historical CASE C evidence are preserved, never retrospectively PASS. Standalone 43ms
+cause forensics remain deferred. Target: 2026-10-25 stabilization / 2026-10-26 study use.
+
+This work stops after synthetic regression, commit/push, Integration-targeted PR and
+GitHub readback. PR review and Integration incorporation remain pending; no auto-merge.
+The existing installation, user data and Runtime are retained. No Local/Core/MSI build,
+uninstall/install, installed acceptance or Fresh #113 is performed in this work unit.
+
+After Integration review/incorporation, establish the new exact Source HEAD, canonical
+preflight and new Release Freeze. Before the conditionally approved clean-install
+ProductCode removal: prepare Fresh #113, verify Desktop/Backend/Owned Child 0 and TCP
+8000 FREE, confirm the exact installed ProductCode, no related writers or in-progress
+MSI transaction, and preservation of settings/auth/MP3/results and existing Runtime.
+Log removal with administrator privileges; any unmet condition or unexpected state is STOP.
+
 The current source cannot be called release-ready until one fresh Local Runtime / Core / MSI set
 from the frozen Release Candidate HEAD passes clean install, installed Core/Local provenance
 pairing and installed CUDA synthetic validation, followed by the real Local gate. Prior isolated
