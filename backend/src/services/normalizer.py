@@ -4,6 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Set, Tuple
 from pydantic import BaseModel
+from src.services.classification import filename_subject
 
 # Windows-forbidden filename characters and ASCII control characters. Course
 # and subject are free-typed by the user (CORE_WORKFLOW_REFINEMENT_PLAN.md
@@ -211,6 +212,7 @@ class FilenameNormalizer:
         no week at all does the manual week apply, and then only to a name
         carrying a standalone course-wide "N강" counter.
         """
+        subject = filename_subject(subject)
         stem = Path(original_name).stem
         ext = Path(original_name).suffix or ".mp3"
         manual_week_text = str(manual_week) if manual_week is not None else None

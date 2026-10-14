@@ -25,6 +25,7 @@ from src.domain.models import (
     JobModel,
 )
 from src.services.job_manager import JobManager
+from src.services.classification import KNOWN_SUBJECT_STAGE, drive_subject, filename_subject
 from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.scanner import FileScanner
 from src.services.windows_system import resolve_system32_executable
@@ -104,13 +105,13 @@ class DriveClassifier:
 
         if has_full_metadata:
             course = job.course
-            subject = job.subject
+            subject = drive_subject(job.subject)
             stage = job.stage
             week = int(file_metadata.week)
             lesson = int(file_metadata.lesson)
 
             subject_folder = f"[{stage}] {subject}"
-            week_subject = "중개사법" if subject == "공인중개사법" else subject
+            week_subject = filename_subject(subject)
             week_folder = f"{course}_{week_subject}_{week}주차"
 
             return DriveClassification(
@@ -130,19 +131,19 @@ class DriveClassifier:
         course = match.group("course")
         raw_subject = match.group("subject")
 
-        from src.services.classification import KNOWN_SUBJECT_STAGE
         stage = KNOWN_SUBJECT_STAGE.get(raw_subject)
 
         if course not in COURSES or not stage:
             raise DriveError("DRIVE_CLASSIFICATION_FAILED", "과정 또는 과목을 Google Drive에서 분류할 수 없습니다.")
         week = int(match.group("week"))
         lesson = int(match.group("lesson"))
-        subject_folder = f"[{stage}] {raw_subject}"
-        week_subject = "중개사법" if raw_subject == "공인중개사법" else raw_subject
+        subject = drive_subject(raw_subject)
+        subject_folder = f"[{stage}] {subject}"
+        week_subject = filename_subject(subject)
         week_folder = f"{course}_{week_subject}_{week}주차"
         return DriveClassification(
             course=course,
-            subject=raw_subject,
+            subject=subject,
             week=week,
             lesson=lesson,
             folders=(exam_root, "전사자료", course, subject_folder, week_folder),
