@@ -49,13 +49,36 @@ def test_legacy_broker_subject_drive_fallback(subject, tmp_path):
     assert classified.folders[-2:] == ("[2차] 공인중개사법", "기초이론_중개사법_1주차")
 
 
-def test_existing_long_filename_requires_explicit_resolution():
+@pytest.mark.parametrize("subject", ["공인중개사법", "중개사법"])
+def test_existing_long_filename_is_preserved_and_valid_for_new_job(subject, tmp_path, monkeypatch):
     original = "기초이론_공인중개사법_1주차_1강.mp3"
-    preview = FilenameNormalizer().normalize(original, "기초이론", "공인중개사법", manual_week=1)
-    assert preview.result_type == "MISMATCH"
+    preview = FilenameNormalizer().normalize(original, "기초이론", subject, manual_week=1)
+    assert preview.result_type == "UNCHANGED"
     assert not preview.can_apply
     assert preview.suggested_name == original
-    assert preview.typed_target_name == "기초이론_중개사법_1주차_1강.mp3"
+    assert preview.typed_target_name is None
+    from src.api import routes
+    from src.services.settings import SettingsManager
+    monkeypatch.setattr(routes, "job_manager", JobManager(str(tmp_path / "jobs.json")))
+    monkeypatch.setattr(routes, "settings_manager", SettingsManager(tmp_path / "settings.json"))
+    (tmp_path / original).write_bytes(b"synthetic")
+    stem = original[:-4]
+    job = routes.create_job(routes.CreateJobRequest(folder=str(tmp_path), scope="selected", file_ids=[stem], course="기초이론", subject=subject, week=1))
+    assert job.file_metadata[stem].normalized_name == stem
+    assert DriveClassifier().classify(job, stem, "test").folders[-2:] == ("[2차] 공인중개사법", "기초이론_중개사법_1주차")
+    assert (tmp_path / original).read_bytes() == b"synthetic"
+
+
+def test_existing_long_standard_with_other_course_still_requires_review():
+    preview = FilenameNormalizer().normalize("기초이론_공인중개사법_1주차_1강.mp3", "기본이론", "중개사법", manual_week=1)
+    assert preview.result_type == "MISMATCH"
+    assert preview.typed_target_name == "기본이론_중개사법_1주차_1강.mp3"
+
+
+def test_existing_long_standard_week_mismatch_still_requires_review():
+    preview = FilenameNormalizer().normalize("기초이론_공인중개사법_1주차_1강.mp3", "기초이론", "중개사법", manual_week=2)
+    assert preview.result_type == "WEEK_MISMATCH"
+    assert preview.typed_target_name == "기초이론_중개사법_2주차_1강.mp3"
 
 
 @pytest.mark.parametrize("ext", [".mp3", ".txt", ".json", ".srt"])

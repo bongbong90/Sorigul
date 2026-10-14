@@ -231,7 +231,7 @@ class FilenameNormalizer:
             embedded_subject = standard_match.group("subject")
             week = int(standard_match.group("week"))
             lesson = int(standard_match.group("lesson"))
-            if embedded_course != course or embedded_subject != subject:
+            if embedded_course != course or filename_subject(embedded_subject) != subject:
                 warnings = [
                     f"현재 파일의 분류({embedded_course}/{embedded_subject})가 "
                     f"입력한 과정/과목({course}/{subject})과 다릅니다."
@@ -303,6 +303,19 @@ class FilenameNormalizer:
                 result_type="WEEK_MISMATCH",
                 manual_week=manual_week_text,
                 typed_target_name=target,
+            )
+
+        # #192 grandfather an existing long-form standard name. The exact
+        # approved aliases describe the same classification: adopting it
+        # must remain valid and must never bulk-rename existing standard
+        # files. Newly allocated names still use the short token below.
+        if standard_match and embedded_subject == "공인중개사법" and stem not in existing_stems:
+            return NormalizationPreview(
+                original_name=original_name, suggested_name=original_name,
+                detected_course=course, detected_subject=embedded_subject,
+                detected_week=str(week), detected_lesson=str(lesson),
+                result_type="UNCHANGED", can_apply=False,
+                manual_week=manual_week_text,
             )
 
         # Resolve the target stem -- this applies even when the file is
