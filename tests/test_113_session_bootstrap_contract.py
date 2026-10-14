@@ -497,3 +497,199 @@ def test_start_status_stop_recover_from_transient_heartbeat_missing_window(sandb
     assert not (session / "SESSION_INVALID.json").exists()
     assert_pid_gone(owner["pid"])
     assert_lock_reacquirable(sandbox)
+
+
+def protected_snapshots(tmp_path, fault):
+    """Synthetic captured metadata only; never read the user's profile."""
+    import copy
+    root = str(tmp_path / "LOCALAPPDATA" / "com.sorigul.desktop")
+    directory = dict(directory=True, reparse=False, attributes="Directory", write_ticks=100)
+    file = dict(directory=False, reparse=False, attributes="Archive", write_ticks=100, size=8)
+    before = [dict(root=root, exists=True, policy="synthetic", entries=[
+        dict(path="EBWebView", **directory),
+        dict(path="EBWebView\\Default", **directory),
+        dict(path="EBWebView\\Default\\cache.bin", **file),
+        dict(path="EBWebViewSibling", **directory),
+    ]), dict(root=str(tmp_path / "LOCALAPPDATA" / "Sorigul"), exists=True,
+             policy="synthetic", entries=[dict(path="auth", **directory),
+                 dict(path="settings.json", sha256="a" * 64, **file),
+                 dict(path="jobs.json", sha256="b" * 64, **file)])]
+    after = copy.deepcopy(before)
+    entries = after[0]["entries"]
+    if fault in ("dir", "dir_child", "mixed", "attribute", "type", "reparse", "path", "unknown_field"):
+        entries[0]["write_ticks"] += 432254
+    if fault == "dir_child":
+        entries[1]["write_ticks"] += 432254
+    elif fault in ("file_mtime", "mixed"):
+        entries[2]["write_ticks"] += 1
+    elif fault == "file_size":
+        entries[2]["size"] += 1
+    elif fault == "add":
+        entries.append(dict(path="EBWebView\\new.bin", **file))
+    elif fault == "delete":
+        entries.pop(2)
+    elif fault == "other_dir":
+        after[1]["entries"][0]["write_ticks"] += 1
+    elif fault == "prefix_sibling":
+        entries[3]["write_ticks"] += 1
+    elif fault in ("settings_hash", "jobs_hash"):
+        after[1]["entries"][1 if fault == "settings_hash" else 2]["sha256"] = "c" * 64
+    elif fault == "attribute":
+        entries[0]["attributes"] = "Directory, Hidden"
+    elif fault == "type":
+        entries[0]["directory"] = False
+    elif fault == "reparse":
+        entries[0]["reparse"] = True
+    elif fault == "path":
+        entries[0]["path"] = "EBWebView\\renamed"
+    elif fault == "unknown_field":
+        entries[0]["new_property"] = "unapproved"
+    elif fault == "root_path":
+        after[0]["root"] += "Sibling"
+    elif fault == "root_delete":
+        after.pop()
+    elif fault == "root_exists":
+        after[0]["exists"] = False
+    elif fault in ("traversal", "reparse_mtime", "wrong_root"):
+        if fault == "traversal":
+            before[0]["entries"][0]["path"] = entries[0]["path"] = "EBWebView\\..\\auth"
+        elif fault == "reparse_mtime":
+            before[0]["entries"][0]["reparse"] = entries[0]["reparse"] = True
+        else:
+            before[0]["root"] = after[0]["root"] = str(tmp_path / "APPDATA" / "com.sorigul.desktop")
+        entries[0]["write_ticks"] += 1
+    return before, after
+
+
+def protected_harness(tmp_path, before, after, stages):
+    environment = os.environ.copy()
+    environment["LOCALAPPDATA"] = str(tmp_path / "LOCALAPPDATA")
+    environment["TEMP"] = environment["TMP"] = str(tmp_path)
+    session = tmp_path / "synthetic evidence"
+    session.mkdir(exist_ok=True)
+    (session / "PROTECTED_USER_DATA_BASELINE.json").write_text(json.dumps({"roots": before}), encoding="utf-8")
+    (session / "after.json").write_text(json.dumps({"roots": after}), encoding="utf-8")
+    source = SCRIPT.read_text(encoding="utf-8")
+    functions = source[source.index("function Write-AtomicJson("):source.index("\nif ($Mode -eq 'Freeze')")]
+    harness = tmp_path / "protected comparison 한글.ps1"
+    harness.write_text(
+        "param([string]$Session)\nSet-StrictMode -Version Latest\n$ErrorActionPreference='Stop'\n"
+        "$Utf8=New-Object Text.UTF8Encoding($false)\n" + functions +
+        "\nfunction Get-ProtectedBaseline { return (Read-Json (Join-Path $Session 'after.json')).roots }\n"
+        "$Config=[pscustomobject]@{session=$Session}\n" +
+        "\n".join(f"$null=Assert-ProtectedBaseline $Config '{stage}'" for stage in stages) + "\n",
+        encoding="utf-8-sig")
+    result = run_ps5([str(PS5), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                      "-File", str(harness), str(session)], environment=environment)
+    evidence = json.loads((session / "PROTECTED_DIFF.json").read_text(encoding="utf-8-sig"))
+    return result, evidence
+
+
+@WINDOWS
+@pytest.mark.parametrize("stage", ["ACTIVATION", "STATUS"])
+@pytest.mark.parametrize("fault", [
+    "none", "dir", "dir_child", "file_mtime", "file_size", "add", "delete", "other_dir",
+    "prefix_sibling", "settings_hash", "jobs_hash", "attribute", "type", "reparse", "path",
+    "mixed", "root_path", "root_delete", "root_exists", "unknown_field", "traversal",
+    "reparse_mtime", "wrong_root",
+])
+def test_189_protected_classification_and_exact_evidence(tmp_path, stage, fault):
+    before, after = protected_snapshots(tmp_path, fault)
+    result, evidence = protected_harness(tmp_path, before, after, [stage])
+    expected = "NO_CHANGE" if fault == "none" else "DIR_MTIME_ONLY" if fault in ("dir", "dir_child") else "HARD_STOP"
+    assert evidence["classification"] == expected
+    assert (result.returncode == 0) == (expected != "HARD_STOP"), result.stdout + result.stderr
+    comparison = evidence["comparisons"][0]
+    assert comparison["stage"] == stage
+    assert comparison["classification"] == expected
+    assert "NOT VERIFIED" in evidence["acceptance"]
+    assert "ZERO_CHANGE_PASS" not in json.dumps(evidence)
+    if expected == "DIR_MTIME_ONLY":
+        assert evidence["allowed_metadata_difference_observed"] is True
+        assert "metadata difference observed" in evidence["acceptance"]
+        assert {diff["field"] for diff in comparison["differences"]} == {"write_ticks"}
+        first = comparison["differences"][0]
+        assert first["root"] == before[0]["root"]
+        assert first["entry"] == "EBWebView"
+        assert first["before"] == 100 and first["after"] == 432354
+        assert all(diff["allowed"] for diff in comparison["differences"])
+    elif expected == "HARD_STOP":
+        assert any(not diff["allowed"] for diff in comparison["differences"])
+
+
+@WINDOWS
+def test_189_exception_history_survives_no_change_and_later_stop(tmp_path):
+    before, after = protected_snapshots(tmp_path, "dir")
+    result, evidence = protected_harness(tmp_path, before, after, ["ACTIVATION"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    result, evidence = protected_harness(tmp_path, before, before, ["STATUS"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert evidence["classification"] == "NO_CHANGE"
+    assert evidence["allowed_metadata_difference_observed"] is True
+    assert "metadata difference observed" in evidence["acceptance"]
+    _, changed = protected_snapshots(tmp_path, "jobs_hash")
+    result, evidence = protected_harness(tmp_path, before, changed, ["STATUS"])
+    assert result.returncode != 0
+    assert [item["classification"] for item in evidence["comparisons"]] == ["DIR_MTIME_ONLY", "NO_CHANGE", "HARD_STOP"]
+    assert evidence["allowed_metadata_difference_observed"] is True
+
+
+@WINDOWS
+@pytest.mark.parametrize("fault", ["dir", "file"])
+def test_189_native_activation_and_status_use_same_classifier(sandbox, fault):
+    root, script, environment, _ = sandbox
+    webview = Path(environment["LOCALAPPDATA"]) / "com.sorigul.desktop" / "EBWebView"
+    webview.mkdir(parents=True)
+    cache = webview / "cache.bin"
+    cache.write_bytes(b"synthetic")
+    target = webview if fault == "dir" else cache
+    setter = "Directory" if fault == "dir" else "File"
+    # Inject only in this disposable source, after baseline capture and before activation.
+    source = script.read_text(encoding="utf-8")
+    activation = "$Protected = Assert-ProtectedBaseline $Config 'ACTIVATION'"
+    source = source.replace(activation,
+        f"[IO.{setter}]::SetLastWriteTimeUtc('{str(target).replace(chr(39), chr(39) * 2)}', [DateTime]::UtcNow.AddMinutes(1))\n                " + activation)
+    script.write_text(source, encoding="utf-8-sig")
+    git(root, "add", "scripts/" + SCRIPT.name)
+    git(root, "commit", "-m", "Synthetic #189 activation difference")
+    git(root, "push")
+    result = invoke(sandbox, "Start", *start_args(sandbox))
+    session = marker(sandbox, "PROTECTED_DIFF.json")[0].parent
+    evidence = json.loads((session / "PROTECTED_DIFF.json").read_text())
+    if fault == "file":
+        assert_no_activation(sandbox, result)
+        assert evidence["classification"] == "HARD_STOP"
+        assert_lock_reacquirable(sandbox)
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert evidence["classification"] == "DIR_MTIME_ONLY"
+    try:
+        status = invoke(sandbox, "Status", "-SessionPath", session)
+        assert status.returncode == 0, status.stdout + status.stderr
+        assert "PROTECTED DATA = DIR_MTIME_ONLY" in status.stdout
+        assert "metadata difference observed" in status.stdout
+        evidence = json.loads((session / "PROTECTED_DIFF.json").read_text())
+        assert [item["stage"] for item in evidence["comparisons"]] == ["ACTIVATION", "STATUS"]
+        # A real synthetic file change at a later stage is still HARD STOP.
+        cache.write_bytes(b"changed synthetic file")
+        status = invoke(sandbox, "Status", "-SessionPath", session)
+        assert status.returncode != 0
+        invalid = json.loads((session / "SESSION_INVALID.json").read_text())
+        assert invalid["state"] == "HARD_STOP"
+        evidence = json.loads((session / "PROTECTED_DIFF.json").read_text())
+        assert evidence["classification"] == "HARD_STOP"
+        assert evidence["allowed_metadata_difference_observed"] is True
+    finally:
+        # Invalidated synthetic sessions need the existing owned-guard cleanup helper.
+        config = json.loads((session / "SESSION_BOOTSTRAPPING.json").read_text(encoding="utf-8-sig"))
+        (session / "STOP_REQUEST.json").write_text(json.dumps({"token": config["token"]}), encoding="utf-8")
+        owner = json.loads((session / "GUARD_OWNER.json").read_text(encoding="utf-8-sig"))
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                assert_pid_gone(owner["pid"])
+                break
+            except AssertionError:
+                time.sleep(0.1)
+        assert_pid_gone(owner["pid"])
+        assert_lock_reacquirable(sandbox)

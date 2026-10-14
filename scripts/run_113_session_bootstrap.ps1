@@ -182,6 +182,75 @@ function Get-ProtectedBaseline {
     }
     return $Roots
 }
+function Add-ProtectedFieldDiffs($Before, $After, [string]$Root, [string]$Entry, [string]$Scope, $Diffs, [string[]]$Exclude = @()) {
+    $Names = @(@($Before.PSObject.Properties.Name) + @($After.PSObject.Properties.Name) | Sort-Object -Unique -CaseSensitive)
+    foreach ($Name in $Names) {
+        if ($Name -cin $Exclude) { continue }
+        $Old = $Before.PSObject.Properties[$Name]
+        $New = $After.PSObject.Properties[$Name]
+        if ($null -eq $Old -or $null -eq $New -or
+            (ConvertTo-Json -InputObject $Old.Value -Depth 30 -Compress) -cne (ConvertTo-Json -InputObject $New.Value -Depth 30 -Compress)) {
+            $Diffs.Add([pscustomobject][ordered]@{ root = $Root; entry = $Entry; scope = $Scope; field = $Name; before_present = ($null -ne $Old); after_present = ($null -ne $New); before = $(if ($null -ne $Old) { $Old.Value }); after = $(if ($null -ne $New) { $New.Value }); allowed = $false })
+        }
+    }
+}
+function Compare-ProtectedBaseline($Before, $After) {
+    # Normalize native ordered dictionaries and persisted JSON to the same shape.
+    # PS5 ConvertFrom-Json emits an array as one object; explicitly enumerate it.
+    $OldRoots = @((ConvertTo-Json -InputObject @($Before) -Depth 30 -Compress) | ConvertFrom-Json | ForEach-Object { $_ })
+    $NewRoots = @((ConvertTo-Json -InputObject @($After) -Depth 30 -Compress) | ConvertFrom-Json | ForEach-Object { $_ })
+    $Diffs = New-Object 'Collections.Generic.List[object]'
+    $WebViewRoot = Join-Path $env:LOCALAPPDATA 'com.sorigul.desktop'
+    for ($R = 0; $R -lt [Math]::Max($OldRoots.Count, $NewRoots.Count); $R++) {
+        if ($R -ge $OldRoots.Count -or $R -ge $NewRoots.Count) {
+            $Diffs.Add([pscustomobject]@{ scope = "roots[$R]"; field = 'root_presence'; before = ($R -lt $OldRoots.Count); after = ($R -lt $NewRoots.Count); allowed = $false })
+            continue
+        }
+        $OldRoot = $OldRoots[$R]; $NewRoot = $NewRoots[$R]
+        Add-ProtectedFieldDiffs $OldRoot $NewRoot $OldRoot.root '' "roots[$R]" $Diffs @('entries')
+        $OldEntries = @($OldRoot.entries); $NewEntries = @($NewRoot.entries)
+        for ($E = 0; $E -lt [Math]::Max($OldEntries.Count, $NewEntries.Count); $E++) {
+            if ($E -ge $OldEntries.Count -or $E -ge $NewEntries.Count) {
+                $Diffs.Add([pscustomobject]@{ root = $OldRoot.root; scope = "roots[$R].entries[$E]"; field = 'entry_presence'; before = $(if ($E -lt $OldEntries.Count) { $OldEntries[$E] }); after = $(if ($E -lt $NewEntries.Count) { $NewEntries[$E] }); allowed = $false })
+                continue
+            }
+            $OldEntry = $OldEntries[$E]; $NewEntry = $NewEntries[$E]
+            $Start = $Diffs.Count
+            Add-ProtectedFieldDiffs $OldEntry $NewEntry $OldRoot.root $OldEntry.path "roots[$R].entries[$E]" $Diffs
+            for ($D = $Start; $D -lt $Diffs.Count; $D++) {
+                $Diff = $Diffs[$D]
+                # Literal component boundary; no prefix siblings, traversal or reparse entries.
+                $SafePath = $OldEntry.path -cmatch '^EBWebView(\\[^\\/:]+)*$' -and
+                    @($OldEntry.path -split '\\' | Where-Object { $_ -in @('.', '..') }).Count -eq 0
+                $Diff.allowed = $Diff.field -ceq 'write_ticks' -and $Diff.before_present -and $Diff.after_present -and
+                    $OldRoot.root -ceq $WebViewRoot -and $OldRoot.exists -eq $true -and $SafePath -and
+                    $OldEntry.directory -is [bool] -and $OldEntry.directory -and
+                    $OldEntry.reparse -is [bool] -and -not $OldEntry.reparse -and
+                    $OldEntry.PSObject.Properties.Name -ccontains 'attributes'
+            }
+        }
+    }
+    $Blocking = @($Diffs.ToArray() | Where-Object { -not $_.allowed })
+    $Classification = if ($Diffs.Count -eq 0) { 'NO_CHANGE' } elseif ($Blocking.Count -eq 0) { 'DIR_MTIME_ONLY' } else { 'HARD_STOP' }
+    return [pscustomobject]@{ classification = $Classification; differences = @($Diffs.ToArray()); allowed_metadata_difference_observed = ($Classification -eq 'DIR_MTIME_ONLY'); evidence_scope = 'Captured metadata and existing settings/jobs SHA256 only; uncaptured content/properties NOT VERIFIED' }
+}
+function Assert-ProtectedBaseline($Config, [string]$Stage) {
+    $BaselinePath = Join-Path $Config.session 'PROTECTED_USER_DATA_BASELINE.json'
+    $Result = Compare-ProtectedBaseline (Read-Json $BaselinePath).roots @(Get-ProtectedBaseline)
+    $DiffPath = Join-Path $Config.session 'PROTECTED_DIFF.json'
+    $History = @(); $Observed = $false
+    if ([IO.File]::Exists($DiffPath)) {
+        $Prior = Read-Json $DiffPath
+        $History = @($Prior.comparisons); $Observed = $Prior.allowed_metadata_difference_observed
+    }
+    $Observed = $Observed -or $Result.allowed_metadata_difference_observed
+    $Acceptance = if ($Observed) { 'Allowed EBWebView directory write_ticks metadata difference observed; see PROTECTED_DIFF.json. Uncaptured content/properties NOT VERIFIED.' } else { 'No differences in captured protected metadata/settings-jobs SHA256. Uncaptured content/properties NOT VERIFIED.' }
+    if ($Result.classification -eq 'HARD_STOP') { $Acceptance = 'Protected differences require HARD STOP; see PROTECTED_DIFF.json. Uncaptured content/properties NOT VERIFIED.'; if ($Observed) { $Acceptance += ' Earlier allowed EBWebView directory write_ticks metadata difference observed.' } }
+    $Comparison = [pscustomobject]@{ stage = $Stage; at_utc = [DateTime]::UtcNow.ToString('o'); classification = $Result.classification; differences = $Result.differences }
+    Write-AtomicJson $DiffPath @{ classification = $Result.classification; allowed_metadata_difference_observed = $Observed; acceptance = $Acceptance; evidence_scope = $Result.evidence_scope; comparisons = @($History) + @($Comparison) }
+    if ($Result.classification -eq 'HARD_STOP') { throw "Protected baseline changed ($Stage): HARD STOP; see PROTECTED_DIFF.json" }
+    return [pscustomobject]@{ classification = $Result.classification; allowed_metadata_difference_observed = $Observed; acceptance = $Acceptance }
+}
 function Test-LockDenied([string]$Path) {
     $Stream = $null
     try { $Stream = [IO.File]::Open($Path, 'OpenOrCreate', 'ReadWrite', 'None'); return $false }
@@ -282,7 +351,7 @@ if ($Mode -eq 'Guard') {
                 Assert-ProcessPort
                 $BaselinePath = Join-Path $SessionPath 'PROTECTED_USER_DATA_BASELINE.json'
                 if ((Get-Sha256 $BaselinePath) -cne $Activation.baseline_sha256) { throw 'Protected baseline identity changed' }
-                if ((Get-ProtectedBaseline | ConvertTo-Json -Depth 30 -Compress) -cne ((Read-Json $BaselinePath).roots | ConvertTo-Json -Depth 30 -Compress)) { throw 'Protected baseline changed before activation' }
+                $Protected = Assert-ProtectedBaseline $Config 'ACTIVATION'
                 Write-AtomicJson $ActivePath @{ state = 'ACTIVE'; run_id = $Config.run_id; token = $Config.token; guard_pid = $PID; source_head = $Config.head; branch = $Config.branch; at_utc = [DateTime]::UtcNow.ToString('o'); baseline_sha256 = $Activation.baseline_sha256; release_input_sha256 = $Config.release_input_sha256 }
             }
             # A crashed bootstrap parent cannot leave a provisional guard behind.
@@ -314,7 +383,11 @@ if ($Mode -in @('Status', 'Stop')) {
             $null = Assert-Source $Config -Live
             if ([IO.File]::Exists((Join-Path $SessionPath 'SESSION_ACTIVE.json'))) {
                 Assert-ReleaseInputs $Config
+                $Active = Read-Json (Join-Path $SessionPath 'SESSION_ACTIVE.json')
+                if ((Get-Sha256 (Join-Path $SessionPath 'PROTECTED_USER_DATA_BASELINE.json')) -cne $Active.baseline_sha256) { throw 'Protected baseline identity changed' }
+                $Protected = Assert-ProtectedBaseline $Config 'STATUS'
                 $null = Assert-Healthy $Config
+                Write-Host "PROTECTED DATA = $($Protected.classification); ACCEPTANCE: $($Protected.acceptance)"
                 Write-Host '#113 ARTIFACT SESSION = ACTIVE'
             } else { Write-Host 'BOOTSTRAPPING / ARTIFACT SESSION NOT STARTED' }
         }
