@@ -6,15 +6,20 @@ import { Button } from '../ui/Button'
 import { COLAB_BOOTSTRAP_COMMANDS, COLAB_NEW_NOTEBOOK_URL } from '../../lib/colabSetup'
 import { openInBrowser } from '../../lib/native'
 
-interface EngineSectionProps {
+export interface EngineConnection {
   engine: 'local_whisper' | 'direct_colab'
   onChangeEngine: (engine: 'local_whisper' | 'direct_colab') => void
   connectedBaseUrl: string | null
   onBaseUrlChange: (url: string | null) => void
-  disabled: boolean
 }
 
-export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBaseUrlChange, disabled }: EngineSectionProps) {
+interface EngineSectionProps extends EngineConnection {
+  disabled: boolean
+  compact?: boolean
+  onManage?: () => void
+}
+
+export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBaseUrlChange, disabled, compact = false, onManage }: EngineSectionProps) {
   const [colabState, setColabState] = useState<RendezvousState['state']>('WAITING')
   const [requestId, setRequestId] = useState<string | null>(null)
   const [showManual, setShowManual] = useState(false)
@@ -257,7 +262,8 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
         </label>
       </div>
 
-      {engine === 'direct_colab' && (
+      {compact && engine === 'direct_colab' ? <div className="inline-actions"><span>Google Colab · {connectedBaseUrl ? '연결됨' : '연결 필요'}</span><Button variant="secondary" onClick={onManage}>Colab 연결 설정</Button></div> : null}
+      {!compact && engine === 'direct_colab' && (
         <div className="engine-colab-panel">
           <div className="engine-colab-setup">
             <div className="engine-colab-setup-row">

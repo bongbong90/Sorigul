@@ -48,7 +48,7 @@ export function CurrentTaskSection({
     : (progress ?? 0)
 
   return (
-    <Card className="current-task-section">
+    <Card className={`current-task-section${filename ? '' : ' current-task-idle'}`}>
       <div className="current-task-content">
         <div className="current-task-details">
           <div className="current-task-label">
@@ -72,7 +72,7 @@ export function CurrentTaskSection({
         </div>
       </div>
 
-      <Progress value={progressValue} label="현재 파일 전사 진행률" />
+      {filename ? <Progress value={progressValue} label="현재 파일 전사 진행률" /> : null}
     </Card>
   )
 }

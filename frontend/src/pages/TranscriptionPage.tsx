@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import { AlertTriangle, CheckCircle2, Cloud, FilePenLine, RefreshCw, WifiOff } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FilePenLine, RefreshCw, WifiOff } from 'lucide-react'
 import {
   api,
   getSavedFolder,
@@ -28,9 +28,10 @@ import { ClassificationSection } from '../components/transcription/Classificatio
 import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transcription/CurrentTaskSection'
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
-import { EngineSection } from '../components/transcription/EngineSection'
+import { EngineSection, type EngineConnection } from '../components/transcription/EngineSection'
+import { HeaderActions } from '../components/layout/HeaderActions'
 
-import { TranscriptionActions } from '../components/transcription/TranscriptionActions'
+import { OverallProgress, TranscriptionActions } from '../components/transcription/TranscriptionActions'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -98,7 +99,7 @@ function rowsFrom(files: ScannedFile[], job?: JobModel): QueueRow[] {
   })
 }
 
-export function TranscriptionPage() {
+export function TranscriptionPage({ active = true, connection, onOpenSettings }: { active?: boolean; connection?: EngineConnection; onOpenSettings?: () => void } = {}) {
   const [folder, setFolder] = useState(getSavedFolder)
   const [files, setFiles] = useState<ScannedFile[]>([])
   // `job` is the current folder's queue Job; `globalActiveJob` is the
@@ -112,8 +113,12 @@ export function TranscriptionPage() {
   const [driveAuth, setDriveAuth] = useState('UNAUTHENTICATED')
   const [dialog, setDialog] = useState<DialogKind>(null)
 
-  const [engine, setEngine] = useState<'local_whisper' | 'direct_colab'>('local_whisper')
-  const [connectedBaseUrl, setConnectedBaseUrl] = useState<string | null>(null)
+  const [fallbackEngine, setFallbackEngine] = useState<'local_whisper' | 'direct_colab'>('local_whisper')
+  const [fallbackBaseUrl, setFallbackBaseUrl] = useState<string | null>(null)
+  const engine = connection?.engine ?? fallbackEngine
+  const setEngine = connection?.onChangeEngine ?? setFallbackEngine
+  const connectedBaseUrl = connection ? connection.connectedBaseUrl : fallbackBaseUrl
+  const setConnectedBaseUrl = connection?.onBaseUrlChange ?? setFallbackBaseUrl
 
 
   const [pendingIds, setPendingIds] = useState<string[]>([])
@@ -761,17 +766,6 @@ export function TranscriptionPage() {
     await runJobAction(job, actionName)
   }
 
-  async function uploadDrive(retry = false) {
-    if (!job) return
-    const targets = Object.entries(job.files).filter(([id, state]) => state === 'DONE' && (!selectedIds.length || selectedSet.has(id))).map(([id]) => id)
-    if (!targets.length) { setMessage('Drive에 업로드할 로컬 완료 파일이 없습니다.'); return }
-    for (const id of targets) {
-      try { await api.uploadDrive(job.job_id, id, retry || job.drive[id]?.status === 'FAILED') }
-      catch (cause) { setMessage(getUserMessage(cause)) }
-    }
-    setJob(await api.job(job.job_id))
-  }
-
   // The four ways a paused MISMATCH/INVALID_TARGET/CONFLICT resolution can
   // be picked, each recording a FileResolution and resuming the same
   // attempt (runPreflight) from where it left off. Every rename here remaps
@@ -891,7 +885,6 @@ export function TranscriptionPage() {
   }
 
   const crashed = rows.some((row) => row.status === 'CRASHED')
-  const driveEntries = job ? Object.entries(job.drive).filter(([, state]) => state.status !== 'DISABLED') : []
   return (
     <div className="transcription-page">
       <RuntimeBanner status={backendStatus} message={message} onReconnect={() => void reconnect()} />
@@ -915,19 +908,21 @@ export function TranscriptionPage() {
         disabled={isProcessing || isPreflighting}
       />
       {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" disabled={otherActiveRun !== null} onClick={() => { if (!isPreflighting) void action('retry') }}>다시 시도</Button></div> : null}
-      <TranscriptionActions progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting && !globalRunActive} canStop={canControl} canCancel={canControl} canRetry={otherActiveRun === null} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
+      <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || globalRunActive || isProcessing} compact onManage={onOpenSettings} />
+      <div className="run-upload-options">
+        <label><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /> 전사 완료 후 Drive 자동 업로드 <span className="text-caption">TXT/JSON/SRT · {driveAuth === 'CONNECTED' ? 'Drive 연결됨' : '인증 필요'}</span></label>
+        <Button variant="secondary" onClick={onOpenSettings}>연결 및 업로드 설정</Button>
+        {uploadToDrive ? <DrivePathPreview course={course} subject={subject} week={week} settings={settings} /> : null}
+      </div>
+      <HeaderActions active={active}>
+        <TranscriptionActions canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting && !globalRunActive} canStop={canControl} canCancel={canControl} canRetry={otherActiveRun === null} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
+      </HeaderActions>
+      <OverallProgress progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} engine={job?.engine} />
+      {job?.error ? <div className="status-banner status-banner-warning" role="alert"><AlertTriangle aria-hidden="true" /><span>{job.error}</span><Button variant="secondary" onClick={onOpenSettings}>연결 상태 확인</Button></div> : null}
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
       <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} actionsDisabled={globalRunActive} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} onEditWeek={onEditWeekForCurrent} />
-      <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
-        <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || globalRunActive || (job != null &&['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
-        <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
-        <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
-          <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>
-          {uploadToDrive ? <DrivePathPreview course={course} subject={subject} week={week} settings={settings} /> : null}
-          <div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
-      </div></section>
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
         {dialog === 'start-all' ? <><h2 className="text-card-title" id="dialog-title">전체 파일을 전사할까요?</h2><p className="dialog-summary">전체 <strong>{rows.length}개</strong> 중 완료 <strong>{folderCompletedCount}개</strong>를 제외한 <strong>{pendingIds.length}개</strong> 파일을 전사합니다.</p><div className="dialog-actions"><Button variant="secondary" onClick={dismissPendingAttempt}>취소</Button><Button onClick={() => confirmPendingAttempt(false, 'all_incomplete')}>실행</Button></div></> : null}
         {dialog === 'empty-target' ? <><h2 className="text-card-title" id="dialog-title">처리할 파일이 없습니다</h2><p>선택한 파일이 모두 완료되었거나 실제 전사 대상이 0개입니다.</p><div className="dialog-actions"><Button onClick={() => setDialog(null)}>확인</Button></div></> : null}
@@ -959,6 +954,7 @@ function DrivePathPreview({ course, subject, week, settings }: { course: string;
   const stage = knownStageFor(trimmedSubject) ?? overrideStageFor(trimmedSubject, settings.subject_stage_overrides) ?? '?'
   const weekValue = validateWeekInput(week).value
   const weekSubject = trimmedSubject === '공인중개사법' ? '중개사법' : trimmedSubject
+  const folderSubject = trimmedSubject === '중개사법' ? '공인중개사법' : trimmedSubject
 
   return (
     <div className="setting-note">
@@ -966,7 +962,7 @@ function DrivePathPreview({ course, subject, week, settings }: { course: string;
         {driveRoot}
 {'\n/ '}전사자료
 {'\n/ '}{trimmedCourse}
-{'\n/ '}[{stage}] {trimmedSubject}
+{'\n/ '}[{stage}] {folderSubject}
 {'\n/ '}{weekValue !== undefined ? `${trimmedCourse}_${weekSubject}_${weekValue}주차` : '주차를 입력하면 주차 폴더가 표시됩니다.'}
       </div>
     </div>
@@ -995,6 +991,7 @@ function FilenameReview({
   preview, mode, value, onValueChange, onContinueOriginal, onEdit, onApply,
   onUseFileClassification, onRenameToTyped, onEditWeek,
 }: FilenameReviewProps) {
+  if (!preview) return null
   const invalid = /[<>:"/\\|?*]/.test(value.replace(/\.mp3$/i, '')) || !value.toLowerCase().endsWith('.mp3')
   const mismatch = preview?.result_type === 'MISMATCH'
   const weekMismatch = preview?.result_type === 'WEEK_MISMATCH'

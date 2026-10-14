@@ -2,9 +2,6 @@ import { Play, RotateCcw, Square, X } from 'lucide-react'
 import { Button } from '../ui/Button'
 
 interface TranscriptionActionsProps {
-  progressDoneCount: number | null
-  progressTotalCount: number | null
-  selectedCount: number
   canStart: boolean
   canStop: boolean
   canCancel: boolean
@@ -17,9 +14,6 @@ interface TranscriptionActionsProps {
 }
 
 export function TranscriptionActions({
-  progressDoneCount,
-  progressTotalCount,
-  selectedCount,
   canStart,
   canStop,
   canCancel,
@@ -52,13 +46,16 @@ export function TranscriptionActions({
           </Button>
         ) : null}
       </div>
-
-      <div className="overall-progress" aria-label="전체 진행률" aria-live="polite">
-        <span className="text-caption">전체 진행률 · {selectedCount}개 선택</span>
-        <strong className="text-section-heading text-numeric">
-          {progressDoneCount !== null && progressTotalCount !== null ? `${progressDoneCount} / ${progressTotalCount} 완료` : '—'}
-        </strong>
-      </div>
     </div>
   )
+}
+
+export function OverallProgress({ progressDoneCount, progressTotalCount, selectedCount, engine }: {
+  progressDoneCount: number | null; progressTotalCount: number | null; selectedCount: number; engine?: string
+}) {
+  return <div className="overall-progress" aria-label="전체 진행률" aria-live="polite">
+    <span className="text-caption">전체 진행률 · {selectedCount}개 선택</span>
+    <strong className="text-section-heading text-numeric">{progressDoneCount !== null && progressTotalCount !== null ? `${progressDoneCount} / ${progressTotalCount} 완료` : '현재 작업 없음'}</strong>
+    {engine ? <span className="text-caption">실제 엔진 · {engine === 'direct_colab' ? 'Google Colab' : 'Local'}</span> : null}
+  </div>
 }

@@ -357,6 +357,14 @@ class LocalWhisperEngine:
             self._verified_runtime = verified
             return verified
 
+    def runtime_status(self) -> dict:
+        """Read-only identity/hash probe; never starts a worker or loads a model."""
+        try:
+            self._runtime()
+            return {"available": True, "code": None, "message": "Runtime 파일과 앱 빌드 호환성 확인 완료. GPU 준비는 전사 시작 시 확인합니다."}
+        except EngineError as error:
+            return {"available": False, "code": error.code, "message": error.user_message}
+
     def transcribe(
         self,
         source_path: Path,
