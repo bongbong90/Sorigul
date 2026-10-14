@@ -113,6 +113,12 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - file/job completion notification을 제공한다.
 - notification에서 result folder를 open/reveal할 수 있어야 한다.
 - Tray, close-to-tray/exit behavior를 유지한다.
+  #195 사용자 승인(2026-10-15): 신규/close_behavior가 없는 설정의 기본값은
+  `exit`이며 Backend가 유휴를 확인한 X는 완전 종료한다. 기존에 저장된 `tray`와
+  `exit`는 그대로 보존한다. 과거 기본 Tray와 명시적 선택은 구분 불가하므로
+  저장된 Tray의 자동 마이그레이션을 금지한다. Native의 초기 캐시는 설정 확인
+  전 안전한 Tray를 유지하고, 실제 저장값만 동기화한다. 활성 전사/Drive 또는
+  상태 확인 불가 시 작업 보호와 중앙 cleanup 경로(#128/#174)를 유지한다.
 - Tray tooltip은 현재 전사 상태를 honest하게 표시한다: 실제 current progress, current file, terminal state만 사용하며 fabricated progress/ETA는 금지한다. (#127 A2)
 - Folders 목록은 사용자 조작으로 오름차순/내림차순 정렬한다. Legacy ACTIVE와 동일하게 **파일명/유형만 sortable**이며 상태/수정일은 non-sortable이다. (#127 A3)
 - TXT preview/full view는 **display only** bounded encoding fallback을 사용한다: `utf-8-sig → utf-8 → cp949 → euc-kr → utf-8 errors=replace`. Sorigul이 생성하는 TXT는 계속 UTF-8이며 source TXT를 rewrite/transcode하지 않는다. (#127 A5)

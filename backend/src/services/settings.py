@@ -47,7 +47,9 @@ class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
-    close_behavior: CloseBehavior = CloseBehavior.TRAY
+    # #195: new/missing settings exit when idle; saved tray/exit values are
+    # loaded unchanged. Never migrate a saved tray value of unknown origin.
+    close_behavior: CloseBehavior = CloseBehavior.EXIT
     shutdown: ShutdownMode = ShutdownMode.DISABLED
     transcription_folder: Optional[str] = None
     last_course: Optional[str] = None

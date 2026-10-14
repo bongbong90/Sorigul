@@ -9,7 +9,7 @@ import { Card } from '../components/ui/Card'
 
 const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
-  close_behavior: 'tray', shutdown: 'disabled',
+  close_behavior: 'exit', shutdown: 'disabled',
   transcription_folder: null, last_course: null, last_subject: null,
   last_engine: 'local_whisper', subject_stage_overrides: {},
   drive_exam_root: '2026 제37회 공인중개사 자격시험',
@@ -84,9 +84,9 @@ export function SettingsPage() {
   // Tauri caches close_behavior synchronously so the window "close" handler
   // never has to make a blocking HTTP call.
   useEffect(() => {
-    if (!isTauri()) return
+    if (!isTauri() || backend !== 'CONNECTED') return
     void invoke('set_close_behavior', { behavior: settings.close_behavior }).catch(() => {})
-  }, [settings.close_behavior])
+  }, [settings.close_behavior, backend])
 
   // Native shutdown boundary: only fires from the ready_to_shutdown phase,
   // re-confirms with a fresh read right before executing (stale-poll/cancel
