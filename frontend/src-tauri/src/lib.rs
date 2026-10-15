@@ -1,5 +1,10 @@
+mod close_guard;
+mod completion_toast;
 mod shutdown;
 mod sidecar;
+mod tray_tooltip;
+#[cfg(target_os = "windows")]
+mod windows_system;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,11 +13,25 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 
+use close_guard::{
+    close_guard_url, fetch_close_guard, notice_body, CloseCheck, CloseOutcome, CloseRequestAction,
+};
+
+use completion_toast::{
+    bottom_right_position, is_opaque_job_id, CompletionToastPayload, CompletionToastRequest,
+    CompletionToastState, COMPLETION_TOAST_EVENT, COMPLETION_TOAST_LABEL, COMPLETION_TOAST_MARGIN,
+    COMPLETION_TOAST_TIMEOUT,
+};
 use shutdown::{RealShutdownExecutor, ShutdownGate};
 use sidecar::{HttpHealthProbe, SidecarManager, SidecarStatus, SpawnSpec};
+use tray_tooltip::{
+    format_tray_tooltip, update_tooltip_if_changed, TrayProgressPayload, IDLE_TRAY_TOOLTIP,
+};
 
 const BACKEND_PORT: u16 = 8000;
+const TRAY_ID: &str = "sorigul-main-tray";
 
 #[cfg(target_os = "windows")]
 const PATH_LIST_SEPARATOR: &str = ";";
@@ -24,6 +43,9 @@ struct AppState {
     sidecar_status: Mutex<SidecarStatusPayload>,
     shutdown_gate: ShutdownGate,
     close_behavior: Mutex<String>,
+    close_check: CloseCheck,
+    completion_toast: Mutex<CompletionToastState>,
+    last_tray_tooltip: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -118,6 +140,27 @@ fn reset_shutdown_gate(state: State<AppState>) {
     state.shutdown_gate.reset();
 }
 
+#[tauri::command]
+fn set_tray_progress(
+    app: AppHandle,
+    state: State<AppState>,
+    payload: TrayProgressPayload,
+) -> Result<(), String> {
+    let tooltip = format_tray_tooltip(&payload);
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "TRAY_NOT_AVAILABLE".to_string())?;
+    let mut last_tooltip = state
+        .last_tray_tooltip
+        .lock()
+        .map_err(|_| "TRAY_TOOLTIP_STATE_UNAVAILABLE".to_string())?;
+    update_tooltip_if_changed(&mut last_tooltip, &tooltip, |value| {
+        tray.set_tooltip(Some(value))
+    })
+    .map_err(|error| format!("TRAY_TOOLTIP_UPDATE_FAILED: {error}"))?;
+    Ok(())
+}
+
 /// Opens the backend-validated folder (or reveals a specific item within it)
 /// in Windows Explorer. The frontend passes only opaque identifiers (scan_id,
 /// optional item_id); this command fetches the validated path from the backend
@@ -136,15 +179,61 @@ fn open_folder_by_intent(scan_id: String, item_id: Option<String>) -> Result<(),
             .map(|id| format!("?item_id={id}"))
             .unwrap_or_default()
     );
+    let intent = fetch_folder_intent(&url)?;
+    open_in_explorer(&intent.folder, intent.item_filename.as_deref())
+        .map_err(|err| format!("EXPLORER_OPEN_FAILED: {err}"))
+}
 
+/// Completion toast "폴더 열기" (Issue #110). The toast holds only the opaque
+/// job_id; the backend resolves and validates that Job's transcription
+/// folder, and only then is Explorer launched. Runs off the main thread
+/// because the backend round-trip is blocking.
+#[tauri::command(async)]
+fn open_notification_folder(app: AppHandle, job_id: String) -> Result<(), String> {
+    let url = notification_folder_intent_url(&job_id)?;
+    open_validated_folder(&url, open_in_explorer)?;
+    dismiss_completion_toast_window(&app);
+    Ok(())
+}
+
+fn notification_folder_intent_url(job_id: &str) -> Result<String, String> {
+    if !is_opaque_job_id(job_id) {
+        return Err("INVALID_JOB_ID".into());
+    }
+    Ok(format!(
+        "http://127.0.0.1:{BACKEND_PORT}/api/desktop/jobs/{job_id}/open-folder-intent"
+    ))
+}
+
+/// Opens only the folder of a backend intent (never an item inside it).
+/// `open` is injectable so tests can prove a bad intent never reaches it.
+fn open_validated_folder(
+    url: &str,
+    open: impl FnOnce(&str, Option<&str>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let intent = fetch_folder_intent(url)?;
+    open(&intent.folder, None).map_err(|err| format!("EXPLORER_OPEN_FAILED: {err}"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FolderIntent {
+    folder: String,
+    item_filename: Option<String>,
+}
+
+/// POSTs to a fixed local backend intent endpoint and extracts the two
+/// validated fields. Any transport, status or shape problem is an error, so
+/// Explorer is never launched on a partial or foreign response.
+fn fetch_folder_intent(url: &str) -> Result<FolderIntent, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(5))
         .build();
 
-    let response = agent
-        .post(&url)
-        .call()
-        .map_err(|err| format!("BACKEND_UNREACHABLE: {err}"))?;
+    let response = match agent.post(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, _)) => return Err(format!("BACKEND_ERROR: HTTP {code}")),
+        Err(err) => return Err(format!("BACKEND_UNREACHABLE: {err}")),
+    };
 
     if response.status() != 200 {
         return Err(format!("BACKEND_ERROR: HTTP {}", response.status()));
@@ -158,11 +247,103 @@ fn open_folder_by_intent(scan_id: String, item_id: Option<String>) -> Result<(),
     // We do minimal parsing here -- we only extract the two fields we need,
     // never forwarding any other data to the OS command.
     let folder = extract_json_string(&body, "folder")
+        .filter(|folder| !folder.trim().is_empty())
         .ok_or_else(|| "INTENT_PARSE_ERROR: missing folder".to_string())?;
     let item_filename = extract_json_string(&body, "item_filename");
+    Ok(FolderIntent {
+        folder,
+        item_filename,
+    })
+}
 
-    open_in_explorer(&folder, item_filename.as_deref())
-        .map_err(|err| format!("EXPLORER_OPEN_FAILED: {err}"))
+/// Called by the main window's notification hook for every new completion
+/// event. Replaces the single toast's content, shows it bottom-right without
+/// taking focus, and (re)starts the auto-hide timeout. An error here tells
+/// the caller to use the plain OS notification fallback instead.
+#[tauri::command]
+fn show_completion_toast(
+    app: AppHandle,
+    state: State<AppState>,
+    request: CompletionToastRequest,
+) -> Result<(), String> {
+    let request = request.validate()?;
+    let window = app
+        .get_webview_window(COMPLETION_TOAST_LABEL)
+        .ok_or_else(|| "TOAST_WINDOW_UNAVAILABLE".to_string())?;
+    let payload = state.completion_toast.lock().unwrap().present(request);
+
+    let shown = app
+        .emit_to(COMPLETION_TOAST_LABEL, COMPLETION_TOAST_EVENT, &payload)
+        .map_err(|err| format!("TOAST_EMIT_FAILED: {err}"))
+        .and_then(|()| {
+            place_completion_toast(&app, &window);
+            window
+                .show()
+                .map_err(|err| format!("TOAST_SHOW_FAILED: {err}"))
+        });
+    if let Err(err) = shown {
+        state.completion_toast.lock().unwrap().dismiss();
+        let _ = window.hide();
+        return Err(err);
+    }
+
+    let generation = payload.generation;
+    std::thread::spawn(move || {
+        std::thread::sleep(COMPLETION_TOAST_TIMEOUT);
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        if state.completion_toast.lock().unwrap().expire(generation) {
+            if let Some(window) = app.get_webview_window(COMPLETION_TOAST_LABEL) {
+                let _ = window.hide();
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Toast window mount: the current content, so an event emitted before its
+/// listener was ready is never lost.
+#[tauri::command]
+fn get_completion_toast(state: State<AppState>) -> Option<CompletionToastPayload> {
+    state.completion_toast.lock().unwrap().snapshot()
+}
+
+/// Toast "확인".
+#[tauri::command]
+fn dismiss_completion_toast(app: AppHandle) {
+    dismiss_completion_toast_window(&app);
+}
+
+fn dismiss_completion_toast_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.completion_toast.lock().unwrap().dismiss();
+    }
+    if let Some(window) = app.get_webview_window(COMPLETION_TOAST_LABEL) {
+        let _ = window.hide();
+    }
+}
+
+/// Bottom-right of the work area of the monitor the main window is on
+/// (hidden-to-tray included), else the primary monitor. Best effort: if no
+/// monitor is resolvable the toast keeps its previous position.
+fn place_completion_toast(app: &AppHandle, toast: &tauri::WebviewWindow) {
+    let monitor = app
+        .get_webview_window("main")
+        .and_then(|main| main.current_monitor().ok().flatten())
+        .or_else(|| toast.primary_monitor().ok().flatten());
+    let (Some(monitor), Ok(size)) = (monitor, toast.outer_size()) else {
+        return;
+    };
+    let area = monitor.work_area();
+    let margin = (COMPLETION_TOAST_MARGIN * monitor.scale_factor()).round() as i32;
+    let (x, y) = bottom_right_position(
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        (size.width, size.height),
+        margin,
+    );
+    let _ = toast.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
 /// Opens a folder in Windows Explorer, optionally revealing a specific file.
@@ -171,22 +352,7 @@ fn open_folder_by_intent(scan_id: String, item_id: Option<String>) -> Result<(),
 fn open_in_explorer(folder: &str, item_filename: Option<&str>) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let target = match item_filename {
-            Some(name) => {
-                let mut p = std::path::PathBuf::from(folder);
-                p.push(name);
-                p.to_string_lossy().into_owned()
-            }
-            None => folder.to_owned(),
-        };
-
-        std::process::Command::new("explorer.exe")
-            .arg(&target)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
+        explorer_command(folder, item_filename)?.spawn()?;
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -196,6 +362,33 @@ fn open_in_explorer(folder: &str, item_filename: Option<&str>) -> std::io::Resul
         std::process::Command::new("xdg-open").arg(folder).spawn()?;
         Ok(())
     }
+}
+
+/// `<Windows>\explorer.exe <target>` by trusted absolute path (#122); never
+/// resolved through `PATH`. Built separately so tests inspect it unlaunched.
+#[cfg(target_os = "windows")]
+fn explorer_command(
+    folder: &str,
+    item_filename: Option<&str>,
+) -> std::io::Result<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let target = match item_filename {
+        Some(name) => {
+            let mut p = std::path::PathBuf::from(folder);
+            p.push(name);
+            p.to_string_lossy().into_owned()
+        }
+        None => folder.to_owned(),
+    };
+
+    let explorer = windows_system::SystemUtility::Explorer
+        .path()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::NotFound, err))?;
+    let mut command = std::process::Command::new(explorer);
+    command.arg(&target).creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
 }
 
 /// Minimal JSON string extractor -- avoids pulling in a full JSON crate
@@ -404,22 +597,18 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-    let tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(
             app.default_window_icon()
                 .cloned()
                 .expect("default window icon configured"),
         )
+        .tooltip(IDLE_TRAY_TOOLTIP)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            "quit" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    state.sidecar.cleanup();
-                }
-                app.exit(0);
-            }
+            "quit" => request_guarded_exit(app),
             _ => {}
         })
         .build(app)?;
@@ -434,10 +623,66 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn show_main_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.close_check.window_reopened();
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Runs in the FIRST instance when Sorigul is launched again (#168). The
+/// second process never reaches `setup` (no tray, no backend) and exits
+/// inside the single-instance plugin; here the existing main window is only
+/// shown and focused -- hidden-to-tray included. The second launch's argv/cwd
+/// are deliberately ignored: no file open, folder change or command dispatch.
+fn handle_second_instance(app: &AppHandle, _argv: Vec<String>, _cwd: String) {
+    show_main_window(app);
+}
+
+/// Tray "종료" (#174): the same active-work guard as an `exit` X close. It
+/// never cleans up or exits itself; only a confirmed-idle check does, via
+/// `app.exit(0)` -> RunEvent::ExitRequested. Repeated clicks share one check.
+fn request_guarded_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if let Some(generation) = state.close_check.on_exit_requested() {
+        spawn_close_check(app.clone(), generation);
+    }
+}
+
+/// Background close-guard check for a `close_behavior = "exit"` close or a
+/// tray "종료".
+/// Confirmed idle exits through `app.exit(0)`, so RunEvent::ExitRequested
+/// stays the single sidecar cleanup path. Active work or any doubt hides the
+/// window to the tray; the notice is best-effort and never weakens that.
+fn spawn_close_check(app: AppHandle, generation: u64) {
+    std::thread::spawn(move || {
+        let result = fetch_close_guard(&close_guard_url());
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let outcome = state.close_check.finish(generation, result);
+        match outcome {
+            CloseOutcome::ConfirmedExit => app.exit(0),
+            CloseOutcome::Superseded => {}
+            CloseOutcome::ProtectedHide(_) | CloseOutcome::SafeHide => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                if let Some(body) = notice_body(&outcome) {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Sorigul")
+                        .body(body)
+                        .show();
+                }
+            }
+        }
+    });
 }
 
 pub fn run() {
@@ -446,6 +691,10 @@ pub fn run() {
     let sidecar_for_setup = sidecar.clone();
 
     let app = tauri::Builder::default()
+        // Must stay the first plugin: a second launch exits inside this
+        // plugin's setup before any other plugin, the tray or the backend
+        // sidecar is initialised (#168).
+        .plugin(tauri_plugin_single_instance::init(handle_second_instance))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -454,12 +703,20 @@ pub fn run() {
             sidecar_status: Mutex::new(SidecarStatusPayload::starting()),
             shutdown_gate: ShutdownGate::new(),
             close_behavior: Mutex::new("tray".into()),
+            close_check: CloseCheck::default(),
+            completion_toast: Mutex::new(CompletionToastState::default()),
+            last_tray_tooltip: Mutex::new(Some(IDLE_TRAY_TOOLTIP.to_string())),
         })
         .invoke_handler(tauri::generate_handler![
             set_close_behavior,
             native_shutdown,
             reset_shutdown_gate,
+            set_tray_progress,
             open_folder_by_intent,
+            open_notification_folder,
+            show_completion_toast,
+            get_completion_toast,
+            dismiss_completion_toast,
             get_sidecar_status,
             retry_sidecar_startup,
         ])
@@ -469,18 +726,46 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == COMPLETION_TOAST_LABEL {
+                // The toast is never closed on its own (e.g. Alt+F4): it only
+                // hides, so it stays reusable and close-to-tray is unaffected.
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    dismiss_completion_toast_window(window.app_handle());
+                }
+                return;
+            }
+            if let WindowEvent::Destroyed = event {
+                // Main window destroyed on a real exit: take the hidden toast
+                // down with it so no orphan toast window remains. A protected
+                // close only hides main, so the toast is left alone.
+                if let Some(toast) = window
+                    .app_handle()
+                    .get_webview_window(COMPLETION_TOAST_LABEL)
+                {
+                    let _ = toast.destroy();
+                }
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 let Some(state) = app.try_state::<AppState>() else {
                     return;
                 };
                 let behavior = state.close_behavior.lock().unwrap().clone();
-                if behavior == "tray" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                // Always prevent first: with "exit" the app ends only after
+                // the backend confirms no active work (#128), and that check
+                // never runs on this callback.
+                api.prevent_close();
+                match state.close_check.on_close_requested(&behavior) {
+                    (CloseRequestAction::HideNow, _) => {
+                        let _ = window.hide();
+                    }
+                    (CloseRequestAction::CheckCriticalWork, generation) => {
+                        spawn_close_check(app.clone(), generation);
+                    }
+                    (CloseRequestAction::AlreadyChecking, _) => {}
                 }
-                // "exit": let the close proceed; RunEvent::ExitRequested
-                // below performs the owned-backend cleanup centrally.
             }
         })
         .build(tauri::generate_context!())
@@ -496,8 +781,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_json_string, packaged_spawn_spec_from_resource_dir, SidecarStatus,
-        SidecarStatusPayload,
+        extract_json_string, notification_folder_intent_url, open_validated_folder,
+        packaged_spawn_spec_from_resource_dir, SidecarStatus, SidecarStatusPayload,
     };
 
     #[test]
@@ -647,6 +932,121 @@ mod tests {
     }
 
     #[test]
+    fn notification_intent_url_is_fixed_localhost_backend_route() {
+        assert_eq!(
+            notification_folder_intent_url("0f8fad5b-d9cb-469f-a165-70867728950e").unwrap(),
+            "http://127.0.0.1:8000/api/desktop/jobs/0f8fad5b-d9cb-469f-a165-70867728950e/open-folder-intent"
+        );
+    }
+
+    #[test]
+    fn notification_intent_url_refuses_non_opaque_job_ids() {
+        for bad in [
+            "",
+            "../folders/x",
+            "a?folder=C:\\x",
+            "a#b",
+            "http://evil",
+            "C:\\Users",
+        ] {
+            assert_eq!(
+                notification_folder_intent_url(bad),
+                Err("INVALID_JOB_ID".to_string()),
+                "{bad}"
+            );
+        }
+    }
+
+    /// One-shot local HTTP stub: answers the first request with `response`.
+    fn stub_backend(response: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}/api/desktop/jobs/x/open-folder-intent")
+    }
+
+    fn http(status: &str, body: &str) -> &'static str {
+        Box::leak(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        )
+    }
+
+    fn never_opened(
+        opened: &std::cell::Cell<bool>,
+    ) -> impl FnOnce(&str, Option<&str>) -> std::io::Result<()> + '_ {
+        move |_, _| {
+            opened.set(true);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn valid_intent_opens_only_the_backend_folder() {
+        let url = stub_backend(http(
+            "200 OK",
+            r#"{"action":"OPEN_FOLDER","folder":"C:\\전사자료\\개념완성_민법","item_filename":"x.txt"}"#,
+        ));
+        let mut seen = None;
+        open_validated_folder(&url, |folder, item| {
+            seen = Some((folder.to_owned(), item.map(str::to_owned)));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, Some(("C:\\전사자료\\개념완성_민법".to_owned(), None)));
+    }
+
+    #[test]
+    fn backend_404_and_410_never_launch_explorer() {
+        for status in ["404 Not Found", "410 Gone"] {
+            let url = stub_backend(http(status, r#"{"detail":"x"}"#));
+            let opened = std::cell::Cell::new(false);
+            let err = open_validated_folder(&url, never_opened(&opened)).unwrap_err();
+            assert!(err.starts_with("BACKEND_ERROR: HTTP 4"), "{err}");
+            assert!(!opened.get());
+        }
+    }
+
+    #[test]
+    fn invalid_intent_response_never_launches_explorer() {
+        for body in [
+            r#"{"detail":"no folder here"}"#,
+            r#"{"action":"OPEN_FOLDER","folder":null}"#,
+            r#"{"action":"OPEN_FOLDER","folder":"   "}"#,
+            "not json",
+        ] {
+            let url = stub_backend(http("200 OK", body));
+            let opened = std::cell::Cell::new(false);
+            let err = open_validated_folder(&url, never_opened(&opened)).unwrap_err();
+            assert!(err.starts_with("INTENT_PARSE_ERROR"), "{body}: {err}");
+            assert!(!opened.get());
+        }
+    }
+
+    #[test]
+    fn unavailable_backend_is_a_safe_error() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let url = format!("http://127.0.0.1:{port}/api/desktop/jobs/x/open-folder-intent");
+        let opened = std::cell::Cell::new(false);
+        let err = open_validated_folder(&url, never_opened(&opened)).unwrap_err();
+        assert!(err.starts_with("BACKEND_UNREACHABLE"), "{err}");
+        assert!(!opened.get());
+    }
+
+    #[test]
     fn path_traversal_string_is_extracted_verbatim_not_executed() {
         // The parser just extracts the string; it does not validate path safety.
         // That validation is the backend's responsibility. We confirm the value
@@ -658,5 +1058,29 @@ mod tests {
             extract_json_string(body, "folder"),
             Some("..\\..\\Windows\\System32".to_owned())
         );
+    }
+
+    /// Both `open_folder_by_intent` and `open_notification_folder` reach
+    /// Explorer only through `open_in_explorer` -> `explorer_command`.
+    /// Inspected only; Explorer is never launched here.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_command_uses_trusted_windows_directory_and_single_target_arg() {
+        let command = super::explorer_command("C:\\Lectures\\Week 1", Some("a b.txt")).unwrap();
+        let program = std::path::Path::new(command.get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(
+            program,
+            super::windows_system::SystemUtility::Explorer
+                .path()
+                .unwrap()
+        );
+        assert!(!program
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .eq_ignore_ascii_case("System32"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["C:\\Lectures\\Week 1\\a b.txt"]);
     }
 }

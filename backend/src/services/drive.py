@@ -25,8 +25,10 @@ from src.domain.models import (
     JobModel,
 )
 from src.services.job_manager import JobManager
+from src.services.classification import KNOWN_SUBJECT_STAGE, drive_subject, filename_subject
 from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.scanner import FileScanner
+from src.services.windows_system import resolve_system32_executable
 
 
 logger = logging.getLogger(__name__)
@@ -103,13 +105,13 @@ class DriveClassifier:
 
         if has_full_metadata:
             course = job.course
-            subject = job.subject
+            subject = drive_subject(job.subject)
             stage = job.stage
             week = int(file_metadata.week)
             lesson = int(file_metadata.lesson)
 
             subject_folder = f"[{stage}] {subject}"
-            week_subject = "중개사법" if subject == "공인중개사법" else subject
+            week_subject = filename_subject(subject)
             week_folder = f"{course}_{week_subject}_{week}주차"
 
             return DriveClassification(
@@ -129,19 +131,19 @@ class DriveClassifier:
         course = match.group("course")
         raw_subject = match.group("subject")
 
-        from src.services.classification import KNOWN_SUBJECT_STAGE
         stage = KNOWN_SUBJECT_STAGE.get(raw_subject)
 
         if course not in COURSES or not stage:
             raise DriveError("DRIVE_CLASSIFICATION_FAILED", "과정 또는 과목을 Google Drive에서 분류할 수 없습니다.")
         week = int(match.group("week"))
         lesson = int(match.group("lesson"))
-        subject_folder = f"[{stage}] {raw_subject}"
-        week_subject = "중개사법" if raw_subject == "공인중개사법" else raw_subject
+        subject = drive_subject(raw_subject)
+        subject_folder = f"[{stage}] {subject}"
+        week_subject = filename_subject(subject)
         week_folder = f"{course}_{week_subject}_{week}주차"
         return DriveClassification(
             course=course,
-            subject=raw_subject,
+            subject=subject,
             week=week,
             lesson=lesson,
             folders=(exam_root, "전사자료", course, subject_folder, week_folder),
@@ -443,7 +445,7 @@ class OAuthAttempt:
 def _resolve_current_windows_sid(run=None) -> str:
     runner = run or subprocess.run
     result = runner(
-        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        [str(resolve_system32_executable("whoami.exe")), "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
         check=True,
@@ -469,7 +471,7 @@ def enforce_private_file_permissions(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(path),
                     "/inheritance:r",
                     "/grant:r",
@@ -514,7 +516,7 @@ def write_private_file(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(temp_path),
                     "/inheritance:r",
                     "/grant:r",
@@ -752,6 +754,16 @@ class DriveUploadService:
             with self._in_flight_lock:
                 self._in_flight.discard(key)
 
+    def active_upload(self) -> Optional[Tuple[str, str]]:
+        """One (job_id, file_id) whose upload call is executing, or None.
+        Read-only; covers manual and automatic uploads alike."""
+        with self._in_flight_lock:
+            return next(iter(sorted(self._in_flight)), None)
+
+    def has_in_flight(self) -> bool:
+        with self._in_flight_lock:
+            return bool(self._in_flight)
+
     def mark_failed(self, job_id: str, file_id: str, message: str):
         """Best-effort Drive FAILED marker for an upload that ended with an
         unexpected error. Never touches the Local transcription state."""
@@ -909,6 +921,11 @@ class DriveExecutionService:
         with self._lock:
             future = self._futures.get((job_id, file_id))
             return future is not None and not future.done()
+
+    def has_pending_work(self) -> bool:
+        """True while any automatic upload is queued or running."""
+        with self._lock:
+            return any(not future.done() for future in self._futures.values())
 
     def after_pending_uploads(self, job_id: str, callback: Callable[[], None]):
         """Runs ``callback`` once every upload already scheduled for this Job
