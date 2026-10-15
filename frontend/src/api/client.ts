@@ -119,6 +119,11 @@ export interface FolderScanResult {
   counts: Record<FolderFilter, number>
 }
 
+export interface FolderRevision {
+  revision: string
+  file_count: number
+}
+
 export interface TextContent {
   filename: string
   text: string
@@ -313,6 +318,9 @@ export const api = {
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  // Authoritative single-run owner (#126): the Job whose runner has not yet
+  // returned, across every folder and engine; null when idle.
+  activeJob: (signal?: AbortSignal) => request<JobModel | null>('/execution/active-job', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>
     request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/action`, {
@@ -330,13 +338,18 @@ export const api = {
   completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
     method: 'POST', body: JSON.stringify({ code }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
-  folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
-    method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  folders: (folder: string, filter: FolderFilter, signal?: AbortSignal) => request<FolderScanResult>('/folders/scan', {
+    method: 'POST', body: JSON.stringify({ folder, filter }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  textPreview: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
-  fullText: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`),
+  // #111 live-change probe: opaque top-level metadata revision of the one
+  // selected folder. Read-only; callers refresh via scan/folders on change.
+  folderRevision: (folder: string, signal?: AbortSignal) => request<FolderRevision>('/folders/revision', {
+    method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL,
+  }),
+  textPreview: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`, { signal }),
+  fullText: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`, { signal }),
   openFolderIntent: (scanId: string, itemId?: string) => {
     const query = itemId ? `?item_id=${encodeURIComponent(itemId)}` : ''
     return request<{ action: 'OPEN_FOLDER'; folder: string; item_filename?: string }>(

@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,6 +17,7 @@ from src.services.renamer import BundleRenamer, RenameStatus, UnsafeStemError, v
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
+    ExecutionInvariantError,
     DefaultEngineResolver,
     TranscriptionRunner,
 )
@@ -37,10 +39,18 @@ from src.services.drive import (
     DriveUploadService,
     GoogleOAuthService,
 )
-from src.services.results import FolderScanResult, OpenFolderIntent, ResultsService, TextContent
+from src.services.results import (
+    FolderScanResult,
+    OpenFolderIntent,
+    ResultsService,
+    TextContent,
+    job_folder_open_intent,
+)
+from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Simple dependency injection
@@ -135,6 +145,20 @@ def scan_results(req: FolderScanRequest):
         raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
 
 
+class FolderRevisionRequest(BaseModel):
+    folder: str
+
+
+@router.post("/folders/revision", response_model=FolderRevision)
+def get_folder_revision(req: FolderRevisionRequest):
+    # Read-only live-change probe (#111): top-level metadata of the one
+    # selected folder. No scan context, Job, or result-bundle mutation.
+    try:
+        return folder_revision(req.folder)
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
+
+
 @router.get("/folders/{scan_id}/items/{item_id}/preview", response_model=TextContent)
 def preview_text(scan_id: str, item_id: str):
     return _read_result_text(scan_id, item_id, full=False)
@@ -193,6 +217,62 @@ def get_shutdown_state():
 @router.post("/desktop/shutdown/cancel")
 def cancel_shutdown():
     return desktop_coordinator.cancel_shutdown()
+
+
+@router.post("/desktop/jobs/{job_id}/open-folder-intent", response_model=OpenFolderIntent)
+def open_job_folder_intent(job_id: str):
+    """Completion-notification "폴더 열기": the caller supplies only the opaque
+    job_id; the folder is taken from the stored Job, never from the request."""
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
+    try:
+        return job_folder_open_intent(job.folder)
+    except (FileNotFoundError, NotADirectoryError):
+        raise HTTPException(status_code=410, detail="전사 폴더를 찾을 수 없습니다.")
+    except (PermissionError, ValueError, OSError):
+        raise HTTPException(status_code=400, detail="폴더 열기 요청을 만들 수 없습니다.")
+
+
+class CloseGuard(BaseModel):
+    """Whether a window close must not terminate the app right now. Carries
+    no folder path, token, or remote id -- only what a notice needs."""
+
+    protect_exit: bool
+    activity: Literal["idle", "transcription", "drive"]
+    job_id: Optional[str] = None
+    current_file: Optional[str] = None
+    progress: Optional[float] = None
+
+
+@router.get("/desktop/close-guard", response_model=CloseGuard)
+def get_close_guard():
+    """Read-only snapshot of critical work (#128), each service checked under
+    its own lock. Transcription is read first: a run submits its automatic
+    Drive uploads before its Future finishes, so a run seen as done has
+    already registered any Drive work the next checks will see."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return CloseGuard(protect_exit=True, activity="transcription")
+    if active_id is not None:
+        job = job_manager.get_job(active_id)
+        return CloseGuard(
+            protect_exit=True,
+            activity="transcription",
+            job_id=active_id,
+            current_file=job.current_file if job else None,
+            progress=job.current_progress if job else None,
+        )
+    upload = drive_service.active_upload()
+    if upload is not None:
+        job_id, file_id = upload
+        return CloseGuard(
+            protect_exit=True, activity="drive", job_id=job_id, current_file=f"{file_id}.mp3"
+        )
+    if drive_execution_service.has_pending_work():
+        return CloseGuard(protect_exit=True, activity="drive")
+    return CloseGuard(protect_exit=False, activity="idle")
 
 
 @router.get("/drive/status")
@@ -420,6 +500,36 @@ def create_job(req: CreateJobRequest):
 def list_jobs():
     return job_manager.list_jobs()
 
+OTHER_RUN_ACTIVE_MESSAGE = (
+    "다른 전사 작업이 이미 실행 중입니다. 기존 작업이 종료된 뒤 다시 시도해 주세요."
+)
+
+
+def _other_run_active(job_id: str) -> bool:
+    try:
+        active = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return True
+    return active is not None and active != job_id
+
+
+@router.get("/execution/active-job", response_model=Optional[JobModel])
+def get_active_execution_job():
+    """Read-only: the Job whose runner Future has not yet returned (the
+    authoritative single-run owner), or null when idle."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    if active_id is None:
+        return None
+    job = job_manager.get_job(active_id)
+    if job is None:
+        logger.error("Active transcription run has no persisted Job")
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    return job
+
+
 @router.get("/jobs/{job_id}", response_model=JobModel)
 def get_job(job_id: str):
     job = job_manager.get_job(job_id)
@@ -529,6 +639,10 @@ def job_action(job_id: str, req: JobActionRequest):
         current = job_manager.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job not found")
+        # Retry never prepares a second run while another Job executes; the
+        # Job keeps its terminal state. start() remains the atomic guard.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         # Retry opens only once the previous run persisted its terminal
         # state; a Stop/Cancel that is merely requested keeps it closed.
         if execution_service.is_active(job_id) or current.status in {
@@ -582,6 +696,9 @@ def start_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not execution_service.start(job_id):
+        # start() is the atomic single-run guard; this only picks the message.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         latest = job_manager.get_job(job_id)
         if latest is not None and latest.status == FileStatus.WAITING:
             raise HTTPException(

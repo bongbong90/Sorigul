@@ -1,5 +1,7 @@
 # Sorigul Migration Contract Review
 
+> **Current routing notice (2026-09-29):** 이 문서는 D01-D10 decision provenance를 보존한다. 현재 제품 행동의 entry point와 전체 supersession map은 [`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md)다.
+
 ## 1. Purpose
 이 문서는 Legacy Feature Parity Audit에서 발견된 Legacy PySide와 신규 Tauri/FastAPI 간의 기능 충돌 및 미결 사항을 구조화하고, 사용자가 내린 최종 제품 결정을 기록하는 Decision Review 문서다.
 선택 당시 검토한 대안과 영향도(기능/UI/Backend/회귀)는 근거로 보존하며, 확정 계약은 `MIGRATION_CONTRACT.md`에 잠근다.
