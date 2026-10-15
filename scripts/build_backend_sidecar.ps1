@@ -15,6 +15,22 @@ $SelfTestTimeoutSeconds = 300
 $CoreArtifactSizeLimitMiB = 250 # First-split regression ceiling, not a final product contract.
 $CoreSidecarSizeLimitBytes = $CoreArtifactSizeLimitMiB * 1MB
 
+function Resolve-TrustedTaskkill {
+    # Resolve from the OS-backed system directory only; never PATH or env vars.
+    $SystemDirectory = [System.Environment]::SystemDirectory
+    if ([string]::IsNullOrWhiteSpace($SystemDirectory) -or
+        -not [System.IO.Path]::IsPathRooted($SystemDirectory) -or
+        -not (Test-Path -LiteralPath $SystemDirectory -PathType Container)) {
+        throw "TRUSTED_SYSTEM_DIRECTORY_UNAVAILABLE"
+    }
+    $TaskkillPath = Join-Path $SystemDirectory "taskkill.exe"
+    if (-not [System.IO.Path]::IsPathRooted($TaskkillPath) -or
+        -not (Test-Path -LiteralPath $TaskkillPath -PathType Leaf)) {
+        throw "TRUSTED_TASKKILL_UNAVAILABLE"
+    }
+    return $TaskkillPath
+}
+
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
@@ -269,6 +285,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         Remove-Item -LiteralPath $SelfTestLog -Force
     }
 
+    $TaskkillPath = Resolve-TrustedTaskkill
     Write-Step "Running isolated candidate self-test (timeout: $SelfTestTimeoutSeconds seconds)"
     $SelfTestProcess = Start-Process `
         -FilePath $CandidateExe `
@@ -287,7 +304,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
     }
     if ($SelfTestTimedOut) {
         Write-Error "PACKAGED_SELFTEST_TIMEOUT" -ErrorAction Continue
-        & taskkill.exe /PID $SelfTestProcess.Id /T /F | Out-Host
+        & $TaskkillPath /PID $SelfTestProcess.Id /T /F | Out-Host
         $TaskKillExit = $LASTEXITCODE
         $Stopped = $SelfTestProcess.WaitForExit(10000)
         if ($TaskKillExit -ne 0 -or -not $Stopped) {
