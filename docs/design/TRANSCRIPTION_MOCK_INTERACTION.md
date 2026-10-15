@@ -1,8 +1,8 @@
 # Sorigul Transcription Screen — Mock Interaction
 
-**Status: PARTIAL**
+**Status: PASS — CONTRACT GAP CLOSED**
 
-> **Contract alignment:** 아래의 선택 필요 Start와 Stop→`CANCELLED` 동작은 당시 mock 구현 기록이며 현재 제품 계약이 아니다. `MIGRATION_CONTRACT.md`에 따라 no-selection Start는 전체 범위 확인으로 이어지고, 실행 중 Stop은 `STOPPED`, 대기·작업 Cancel은 `CANCELLED`로 구분한다. 이 작업에서는 mock component를 변경하지 않으며 UI Feature Gap Closure에서 정렬한다.
+> **Contract alignment:** UI Feature Gap Closure에서 no-selection confirmation, DONE skip, secondary `다시 전사`, `FAILED`/partial failure/Retry, `STOPPED`, `CANCELLED`, `CRASHED`, filename correction, Colab/Drive/runtime 상태를 실제 mock component에 반영했다. 3–12절의 과거 partial 구현 설명과 검증 이력은 변경 전 증거로 읽고, 현재 계약은 13절과 `MIGRATION_CONTRACT.md`를 따른다.
 
 ## 1. 목적
 
@@ -100,14 +100,22 @@ File System 접근은 없다.
 - 1024×768: page overflow/Sidebar 침범 없음, 긴 filename ellipsis PASS
 - 금지 source/API, 직접 SVG path, 추가 dependency 없음
 
-## 13. Contract gaps for UI Feature Gap Closure
+## 13. Contract resolution
 
 - no-selection Start는 비활성화하지 않고 완료 bundle을 제외한 전체 범위를 확인한다.
 - Stop은 `STOPPED`, Cancel은 `CANCELLED`로 구분한다.
 - `FAILED`, `STOPPED`, `CANCELLED`, `CRASHED`는 완료 bundle을 보존한 채 미완료 파일만 Retry한다.
 - 일반 Start와 Retry는 `DONE`을 skip하며, 완료 파일은 보조 `다시 전사`로만 다시 처리한다.
 
-3–12절의 기존 mock 동작과 검증 결과는 구현 증거로 보존한다. 위 gap은 제품 정책의 미정 사항이 아니라 후속 UI 변경 대상이다.
+위 동작은 실제 mock component에 반영되었다. 추가로 독립 Log Screen, 실제 디스크 의미를 표현하는 Folders Screen, Notification/Tray/Shutdown 설정, Backend error UX를 구현했다. 실제 Backend, File System, Whisper, Colab, Google Drive, Tauri API는 연결하지 않았다.
+
+검증:
+
+- `npm run lint`: PASS
+- `npm run typecheck`: PASS
+- `npm run build`: PASS
+- 1440×900 / 1024×768 전사·로그·Folders·설정 layout: PASS
+- 1024×768 no-selection confirmation dialog 실제 click/capture: PASS
 
 ## 14. 다음 Phase
 
