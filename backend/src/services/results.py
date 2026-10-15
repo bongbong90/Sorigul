@@ -174,3 +174,16 @@ class ResultsService:
     def _trim_contexts(self):
         while len(self._contexts) > 32:
             self._contexts.pop(next(iter(self._contexts)))
+
+
+def job_folder_open_intent(job_folder: str) -> OpenFolderIntent:
+    """Folder-open intent for a completion notification's Job.
+
+    The folder comes only from the backend-owned JobModel, never from the
+    caller. It must still exist as a directory; a moved/deleted folder raises
+    FileNotFoundError / NotADirectoryError instead of producing an intent.
+    """
+    root = Path(job_folder).expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise NotADirectoryError("JOB_FOLDER_NOT_DIRECTORY")
+    return OpenFolderIntent(folder=str(root))
