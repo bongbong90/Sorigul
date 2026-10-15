@@ -7,9 +7,9 @@ Supports:
                                            no Drive upload, no transcription)
 
 `--self-test` exists so a build script can verify a freshly produced
-executable actually carries a working runtime (FastAPI, uvicorn, Google Drive
-client libraries, whisper, torch, ffmpeg) without paying the cost, or the
-side effects, of really starting the server or touching a network/model.
+executable actually carries the Core runtime (FastAPI, uvicorn, Google Drive
+client libraries, ffmpeg) without paying the cost, or the side effects, of
+really starting the server or touching a network.
 """
 
 import argparse
@@ -34,11 +34,6 @@ REQUIRED_SELF_TEST_CHECKS = (
     "fastapi_app_import",
     "uvicorn_import",
     "google_drive_runtime_import",
-    "whisper_import",
-    "torch_import",
-    "torch_cuda_build",
-    "torch_cuda_available",
-    "torch_cuda_compute",
     "bundled_ffmpeg_execution",
     "audio_metadata_service_import",
     "runtime_path_initialization",
@@ -98,44 +93,6 @@ def _isolated_self_test_app_data(
             raise SelfTestAppDataCleanupError(
                 f"SELF_TEST_APP_DATA_CLEANUP_FAILED: {exc}"
             ) from exc
-
-
-def _cuda_build_detail(torch_module) -> str:
-    cuda_version = torch_module.version.cuda
-    if cuda_version is None:
-        raise RuntimeError(f"CPU-only torch build: {torch_module.__version__}")
-    return f"torch={torch_module.__version__}, cuda={cuda_version}"
-
-
-def _cuda_available_detail(torch_module) -> str:
-    device_count = torch_module.cuda.device_count()
-    if not torch_module.cuda.is_available() or device_count < 1:
-        raise RuntimeError(
-            "CUDA runtime unavailable"
-            f" (torch={torch_module.__version__}, cuda={torch_module.version.cuda},"
-            f" devices={device_count})"
-        )
-    device_name = torch_module.cuda.get_device_name(0)
-    if not device_name:
-        raise RuntimeError("CUDA device name unavailable")
-    return f"torch={torch_module.__version__}, cuda={torch_module.version.cuda}, device={device_name}"
-
-
-def _cuda_compute_detail(torch_module) -> str:
-    """Run a tiny real CUDA kernel and verify its result on the host."""
-    left = torch_module.tensor(
-        [[1.0, 2.0], [3.0, 4.0]], device="cuda", dtype=torch_module.float32
-    )
-    right = torch_module.tensor(
-        [[5.0, 6.0], [7.0, 8.0]], device="cuda", dtype=torch_module.float32
-    )
-    result = torch_module.matmul(left, right)
-    torch_module.cuda.synchronize()
-    actual = result.cpu().tolist()
-    expected = [[19.0, 22.0], [43.0, 50.0]]
-    if actual != expected:
-        raise RuntimeError(f"unexpected CUDA matrix product: {actual!r}")
-    return "2x2 CUDA matrix multiply verified"
 
 
 def _bundled_ffmpeg_detail(
@@ -220,27 +177,6 @@ def _self_test() -> int:
         import google_auth_oauthlib.flow  # noqa: F401
         import googleapiclient.discovery  # noqa: F401
 
-    def check_whisper() -> None:
-        import whisper  # noqa: F401
-
-    def check_torch() -> None:
-        import torch  # noqa: F401
-
-    def check_torch_cuda_build() -> None:
-        import torch
-
-        _cuda_build_detail(torch)
-
-    def check_torch_cuda_available() -> None:
-        import torch
-
-        _cuda_available_detail(torch)
-
-    def check_torch_cuda_compute() -> None:
-        import torch
-
-        _cuda_compute_detail(torch)
-
     def check_bundled_ffmpeg() -> None:
         _bundled_ffmpeg_detail()
 
@@ -276,11 +212,6 @@ def _self_test() -> int:
                 ("fastapi_app_import", check_fastapi_app),
                 ("uvicorn_import", check_uvicorn),
                 ("google_drive_runtime_import", check_google_drive_runtime),
-                ("whisper_import", check_whisper),
-                ("torch_import", check_torch),
-                ("torch_cuda_build", check_torch_cuda_build),
-                ("torch_cuda_available", check_torch_cuda_available),
-                ("torch_cuda_compute", check_torch_cuda_compute),
                 ("bundled_ffmpeg_execution", check_bundled_ffmpeg),
                 ("audio_metadata_service_import", check_audio_metadata),
                 ("runtime_path_initialization", check_runtime_paths),

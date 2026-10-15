@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src import sidecar_main
+from src import local_runtime_main, sidecar_main
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +52,7 @@ class FakeTorch:
 def test_cuda_compute_runs_on_cuda_synchronizes_and_validates_result():
     torch = FakeTorch([[19.0, 22.0], [43.0, 50.0]])
 
-    detail = sidecar_main._cuda_compute_detail(torch)
+    detail = local_runtime_main._cuda_compute_detail(torch)
 
     assert detail == "2x2 CUDA matrix multiply verified"
     assert len(torch.tensor_calls) == 2
@@ -64,7 +64,7 @@ def test_cuda_compute_rejects_unexpected_result():
     torch = FakeTorch([[0.0, 0.0], [0.0, 0.0]])
 
     with pytest.raises(RuntimeError, match="unexpected CUDA matrix product"):
-        sidecar_main._cuda_compute_detail(torch)
+        local_runtime_main._cuda_compute_detail(torch)
 
 
 def test_self_test_progress_records_start_then_pass_and_fail(monkeypatch):
@@ -153,10 +153,11 @@ def test_bundled_ffmpeg_timeout_is_a_check_failure(monkeypatch):
         sidecar_main._bundled_ffmpeg_detail(sidecar, run=run)
 
 
-def test_required_self_test_contract_has_exactly_twelve_checks():
-    assert len(sidecar_main.REQUIRED_SELF_TEST_CHECKS) == 12
+def test_required_core_self_test_contract_has_exactly_seven_checks():
+    assert len(sidecar_main.REQUIRED_SELF_TEST_CHECKS) == 7
     assert sidecar_main.REQUIRED_SELF_TEST_CHECKS[0] == "self_test_app_data_isolation"
-    assert "torch_cuda_compute" in sidecar_main.REQUIRED_SELF_TEST_CHECKS
+    assert "torch_cuda_compute" not in sidecar_main.REQUIRED_SELF_TEST_CHECKS
+    assert "whisper_import" not in sidecar_main.REQUIRED_SELF_TEST_CHECKS
     assert "bundled_ffmpeg_execution" in sidecar_main.REQUIRED_SELF_TEST_CHECKS
 
 
@@ -318,8 +319,6 @@ def test_manifest_contains_release_identity_without_personal_data_fields():
         "source_head",
         "generated_at_utc",
         "tracked_tree_clean",
-        "torch_requirement",
-        "expected_cuda",
         "sidecar_size",
         "sidecar_sha256",
         "ffmpeg_size",
@@ -333,42 +332,28 @@ def test_manifest_contains_release_identity_without_personal_data_fields():
         assert forbidden not in script.lower()
 
 
-def test_manifest_requirement_is_a_unique_pure_string_and_round_trip_validated():
-    script = (REPO_ROOT / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+def test_local_manifest_requirement_is_a_scalar_string_and_round_trip_validated():
+    script = (REPO_ROOT / "scripts/build_local_whisper_runtime.ps1").read_text(encoding="utf-8")
 
-    assert "[System.IO.File]::ReadAllLines($TorchRequirementPath)" in script
-    assert "Get-Content -LiteralPath (Join-Path $RepoRoot" not in script
-    assert "$TorchRequirementLines.Count -eq 0" in script
-    assert "$TorchRequirementLines.Count -ne 1" in script
-    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_MISSING" in script
-    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_AMBIGUOUS" in script
-    assert "$TorchRequirement = [string]$TorchRequirementLines[0]" in script
-    assert "$TorchRequirement -is [string]" in script
-    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_NOT_SCALAR" in script
-    assert '$TorchRequirement -cne "torch==2.13.0+cu130"' in script
-    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_MISMATCH" in script
+    assert '$ExpectedTorch = "torch==2.13.0+cu130"' in script
+    assert '$ExpectedCuda = "13.0"' in script
     assert "$ManifestJson | ConvertFrom-Json" in script
     assert "$RoundTrippedManifest.torch_requirement -is [string]" in script
-    assert '$RoundTrippedManifest.expected_cuda -cne "13.0"' in script
-    assert "$RoundTrippedManifest.source_head -cne $SourceHead" in script
-    assert "BUILD_MANIFEST_SERIALIZATION_INVALID" in script
-    assert "$ManifestJson," in script
+    assert "$RoundTrippedManifest.torch_requirement -cne $ExpectedTorch" in script
+    assert "$RoundTrippedManifest.expected_cuda -cne $ExpectedCuda" in script
+    assert "LOCAL_RUNTIME_MANIFEST_INVALID" in script
 
 
 def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
     installer = (REPO_ROOT / "scripts/build_windows_installer.ps1").read_text(encoding="utf-8")
 
-    validation = installer.index("BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID")
+    validation = installer.index("BUILD_MANIFEST_SOURCE_HEAD_MISMATCH")
     frontend = installer.index('Write-Step "Building frontend production bundle"')
     tauri = installer.index('Write-Step "Building Windows MSI')
 
     assert validation < frontend < tauri
-    assert "$Manifest.torch_requirement -is [string]" in installer
-    assert '$Manifest.torch_requirement -cne "torch==2.13.0+cu130"' in installer
-    assert "BUILD_MANIFEST_TORCH_REQUIREMENT_INVALID" in installer
-    assert "$Manifest.expected_cuda -is [string]" in installer
-    assert '$Manifest.expected_cuda -cne "13.0"' in installer
-    assert "BUILD_MANIFEST_CUDA_EXPECTATION_INVALID" in installer
+    assert "$CoreMsiSizeLimitBytes = 250MB" in installer
+    assert "CORE_MSI_SIZE_REGRESSION" in installer
     assert "$CurrentSourceHeadOutput = @(& git rev-parse HEAD)" in installer
     assert "$CurrentSourceHeadOutput.Count -ne 1" in installer
     assert "$Manifest.source_head -cne $CurrentSourceHead" in installer

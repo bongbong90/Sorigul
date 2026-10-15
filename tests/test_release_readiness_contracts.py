@@ -140,12 +140,14 @@ def test_runtime_requirement_lines_are_exactly_pinned():
 
 def test_cuda_and_python_release_contracts_remain_exact():
     torch_requirements = read_repo("tools/requirements-torch-cuda.txt")
-    build_script = read_repo("scripts/build_backend_sidecar.ps1")
+    core_build_script = read_repo("scripts/build_backend_sidecar.ps1")
+    local_build_script = read_repo("scripts/build_local_whisper_runtime.ps1")
 
     assert "torch==2.13.0+cu130" in torch_requirements.splitlines()
-    assert 'EXPECTED_TORCH = "2.13.0+cu130"' in build_script
-    assert 'EXPECTED_CUDA = "13.0"' in build_script
-    assert 'StartsWith("3.13.")' in build_script
+    assert '$ExpectedTorch = "torch==2.13.0+cu130"' in local_build_script
+    assert '$ExpectedCuda = "13.0"' in local_build_script
+    assert 'StartsWith("3.13.")' in local_build_script
+    assert "requirements-torch-cuda.txt" not in core_build_script
 
 
 def test_no_paid_ci_workflow_exists():
