@@ -106,9 +106,20 @@ def test_core_build_has_no_local_install_and_scans_archive():
     assert "requirements-whisper.txt" not in core
     assert "CUDA_RELEASE_RUNTIME_UNAVAILABLE" not in core
     assert "PyInstaller.utils.cliutils.archive_viewer" in core
-    for pattern in ("torch", "cuda", "whisper"):
+    for pattern in (
+        "torch",
+        "cuda",
+        "torch_cuda",
+        "cublas",
+        "cudnn",
+        "cufft",
+        "cusparse",
+        "cusolver",
+    ):
         assert f'"{pattern}"' in core
-    assert "$CoreSidecarSizeLimitBytes = 250MB" in core
+    assert '"(^|[\\\\/., ])whisper($|[\\\\/., ])"' in core
+    assert "$CoreArtifactSizeLimitMiB = 250" in core
+    assert "$CoreSidecarSizeLimitBytes = $CoreArtifactSizeLimitMiB * 1MB" in core
     install_order = [
         local.index(path)
         for path in (

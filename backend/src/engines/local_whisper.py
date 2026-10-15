@@ -29,6 +29,7 @@ TORCH_REQUIREMENT = "torch==2.13.0+cu130"
 EXPECTED_CUDA = "13.0"
 RUNTIME_EXECUTABLE = "sorigul-local-whisper.exe"
 RUNTIME_MANIFEST = "runtime-manifest.json"
+CORE_BUILD_MANIFEST = "sorigul-build-manifest.json"
 LOCAL_RUNTIME_TIMEOUT_SECONDS = 6 * 60 * 60
 LOCAL_RUNTIME_POLL_INTERVAL_SECONDS = 0.2
 LOCAL_RUNTIME_REAP_TIMEOUT_SECONDS = 10
@@ -43,6 +44,7 @@ _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 class VerifiedRuntime:
     executable: Path
     fingerprint: tuple[int, int, int, int, int, int]
+    source_head: str
 
 
 def default_runtime_dir() -> Path:
@@ -67,7 +69,43 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_runtime(runtime_dir: Path) -> VerifiedRuntime:
+def _valid_source_head(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _packaged_core_source_head() -> Optional[str]:
+    if not getattr(sys, "frozen", False):
+        return None
+    manifest_path = Path(sys.executable).resolve().parent.parent / CORE_BUILD_MANIFEST
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _engine_error(
+            "LOCAL_RUNTIME_PROVENANCE_UNAVAILABLE",
+            "Local Whisper 실행 환경의 출처를 확인하지 못했습니다.",
+            f"invalid Core build manifest {manifest_path}: {exc}",
+        ) from exc
+    if (
+        not isinstance(manifest, dict)
+        or not _valid_source_head(manifest.get("source_head"))
+        or type(manifest.get("tracked_tree_clean")) is not bool
+        or manifest["tracked_tree_clean"] is not True
+    ):
+        raise _engine_error(
+            "LOCAL_RUNTIME_PROVENANCE_UNAVAILABLE",
+            "Local Whisper 실행 환경의 출처를 확인하지 못했습니다.",
+            f"invalid Core build provenance in {manifest_path}",
+        )
+    return manifest["source_head"]
+
+
+def verify_runtime(
+    runtime_dir: Path, *, expected_source_head: Optional[str] = None
+) -> VerifiedRuntime:
     manifest_path = runtime_dir / RUNTIME_MANIFEST
     executable = runtime_dir / RUNTIME_EXECUTABLE
     if not manifest_path.is_file() or not executable.is_file():
@@ -117,6 +155,24 @@ def verify_runtime(runtime_dir: Path) -> VerifiedRuntime:
                 f"invalid {key}",
             )
 
+    source_head = manifest.get("source_head")
+    if (
+        not _valid_source_head(source_head)
+        or type(manifest.get("tracked_tree_clean")) is not bool
+        or manifest["tracked_tree_clean"] is not True
+    ):
+        raise _engine_error(
+            "LOCAL_RUNTIME_INVALID",
+            "Local Whisper 실행 환경 정보가 올바르지 않습니다.",
+            "invalid runtime source provenance",
+        )
+    if expected_source_head is not None and source_head != expected_source_head:
+        raise _engine_error(
+            "LOCAL_RUNTIME_PROVENANCE_MISMATCH",
+            "Local Whisper 실행 환경이 현재 앱 빌드와 맞지 않습니다.",
+            f"runtime source_head={source_head}; Core source_head={expected_source_head}",
+        )
+
     hashes = (manifest.get("worker_sha256"), manifest.get("artifact_sha256"))
     if any(
         type(value) is not str
@@ -155,6 +211,7 @@ def verify_runtime(runtime_dir: Path) -> VerifiedRuntime:
             executable_stat.st_ctime_ns,
             executable_stat.st_size,
         ),
+        source_head=source_head,
     )
 
 
@@ -246,6 +303,7 @@ class LocalWhisperEngine:
         popen: Optional[Callable] = None,
         clock: Callable[[], float] = time.monotonic,
         reap: Callable = _reap,
+        core_source_head: Optional[str] = None,
     ):
         self._runtime_dir = Path(runtime_dir) if runtime_dir is not None else default_runtime_dir()
         self._timeout_seconds = timeout_seconds
@@ -253,11 +311,15 @@ class LocalWhisperEngine:
         self._popen = popen or subprocess.Popen
         self._clock = clock
         self._reap = reap
+        self._core_source_head = core_source_head
         self._runtime_lock = threading.Lock()
         self._verified_runtime: Optional[VerifiedRuntime] = None
 
     def _runtime(self) -> VerifiedRuntime:
         with self._runtime_lock:
+            expected_source_head = self._core_source_head
+            if expected_source_head is None:
+                expected_source_head = _packaged_core_source_head()
             cached = self._verified_runtime
             if cached is not None:
                 manifest = self._runtime_dir / RUNTIME_MANIFEST
@@ -274,9 +336,17 @@ class LocalWhisperEngine:
                     )
                 except OSError:
                     fingerprint = None
-                if fingerprint == cached.fingerprint:
+                if (
+                    fingerprint == cached.fingerprint
+                    and (
+                        expected_source_head is None
+                        or cached.source_head == expected_source_head
+                    )
+                ):
                     return cached
-            verified = verify_runtime(self._runtime_dir)
+            verified = verify_runtime(
+                self._runtime_dir, expected_source_head=expected_source_head
+            )
             self._verified_runtime = verified
             return verified
 

@@ -10,7 +10,6 @@
 #>
 
 $ErrorActionPreference = "Stop"
-$CoreMsiSizeLimitBytes = 250MB # First-split regression ceiling, not a final product contract.
 
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -78,6 +77,14 @@ try {
     Write-Error "BUILD_MANIFEST_INVALID: $($_.Exception.Message)"
     exit 1
 }
+if (
+    -not ($Manifest.core_sidecar_size_limit_mib -is [int]) -or
+    $Manifest.core_sidecar_size_limit_mib -le 0
+) {
+    Write-Error "BUILD_MANIFEST_CORE_SIZE_POLICY_INVALID"
+    exit 1
+}
+$CoreMsiSizeLimitBytes = [long]$Manifest.core_sidecar_size_limit_mib * 1MB
 $CurrentSourceHeadOutput = @(& git rev-parse HEAD)
 $CurrentSourceHeadExitCode = $LASTEXITCODE
 $CurrentSourceHead = if ($CurrentSourceHeadOutput.Count -eq 1) {
