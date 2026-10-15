@@ -2,6 +2,8 @@
 
 > PR 원본 변경 파일·patch 기반. 개별 HEAD는 Integration 조상. 관련 동작은 최신 제품 계약/후속 구현 우선.
 
+<a id="pr-134"></a>
+
 ## [PR #134](https://github.com/bongbong90/Sorigul/pull/134) · Week/lesson allocation parity
 
 - **원본:** fix: restore Legacy week and lesson allocation; CLOSED / 직접 GitHub 병합 아님; HEAD `f61686e69c47ab04a6cc8a708df40738ccb12369`; base `audit/full-source-contract-regression`.
@@ -12,6 +14,8 @@
 - **당시 검증 내용(원문 발췌):** Changed files: 'normalizer.py' and the new 'backend/tests/test_filename_normalizer_parity.py'. No routes, frontend, or Rust changes. / | 'cargo test --locked --offline' | 54 passed |.
 - **장애 분석 가이드:** #180 수동 주차·#192 과목명 축약까지 전후 계약 비교. 자동 번호 덮어쓰기 주의.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
+
+<a id="pr-135"></a>
 
 ## [PR #135](https://github.com/bongbong90/Sorigul/pull/135) · Trusted Windows system paths
 
@@ -24,6 +28,8 @@
 - **장애 분석 가이드:** taskkill/기타 시스템 도구가 PATH 문자열 대신 trusted path를 쓰는지 확인.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
 
+<a id="pr-137"></a>
+
 ## [PR #137](https://github.com/bongbong90/Sorigul/pull/137) · Loopback Host hardening
 
 - **원본:** fix: reject untrusted loopback Host headers; CLOSED / 직접 GitHub 병합 아님; HEAD `24a4ecd04aa286c24c2e5b304a0a6ef3e85958d6`; base `fix/trusted-windows-system-utilities`.
@@ -34,6 +40,8 @@
 - **당시 검증 내용(원문 발췌):** Test-only change: 'test_folder_revision.py' and 'test_notification_folder_intent.py' relied on TestClient's default 'testserver' Host. They now use the real 'http://127.0.0.1:8000' / | Frontend lint / typecheck / build | PASS / PASS / PASS | / | cargo fmt --check / check / clippy -D warnings / test | PASS / PASS / PASS / 62 passed |.
 - **장애 분석 가이드:** localhost API 악용/외부 오접속시 Host validation/보안 테스트 확인.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
+
+<a id="pr-139"></a>
 
 ## [PR #139](https://github.com/bongbong90/Sorigul/pull/139) · One global run
 
@@ -46,6 +54,8 @@
 - **장애 분석 가이드:** 중복 Job/동시 실행·복귀 상태 문제가 생기면 Job API/global-active-run 경계 검토.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
 
+<a id="pr-140"></a>
+
 ## [PR #140](https://github.com/bongbong90/Sorigul/pull/140) · Active-close guard
 
 - **원본:** fix: protect active work from window close; CLOSED / 직접 GitHub 병합 아님; HEAD `0c3266dd5de21469878ffbf37119c8dcebe33798`; base `fix/global-single-run-enforcement`.
@@ -56,6 +66,8 @@
 - **당시 검증 내용(원문 발췌):** - Rust 'close_guard' tests: 10 passed. Covers tray → hide, exit coalescing, active/idle/error outcomes, stale-idle superseded, parser valid/malformed/inconsistent, fixed URL, a liv / - Root contracts: 59 passed (new 'tests/test_active_run_close_contracts.py'). / - Rust: fmt, check and clippy '-D warnings' OK. 'cargo test': 72/72 on four full runs. #138 was not observed..
 - **장애 분석 가이드:** #195의 유휴 Exit 기본값과 active protected hide 구분; #128/#174 Native 가드 연계.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
+
+<a id="pr-141"></a>
 
 ## [PR #141](https://github.com/bongbong90/Sorigul/pull/141) · Colab convenience
 
@@ -68,6 +80,8 @@
 - **장애 분석 가이드:** 외부 URL, 앱 설정 이동, Colab 수동 연결 UX 후속 #194와 비교.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
 
+<a id="pr-142"></a>
+
 ## [PR #142](https://github.com/bongbong90/Sorigul/pull/142) · Honest tray tooltip
 
 - **원본:** feat: restore honest tray progress tooltip; CLOSED / 직접 GitHub 병합 아님; HEAD `c508e8a6968068aa45dc6343222552cae567acfd`; base `fix/colab-open-convenience`.
@@ -78,6 +92,8 @@
 - **당시 검증 내용(원문 발췌):** 원문 테스트 수치 없음(미확인).
 - **장애 분석 가이드:** ETA/진행률 fabrication·백그라운드 상태 멈춤 시 tray 상태 observer #173과 연결.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
+
+<a id="pr-143"></a>
 
 ## [PR #143](https://github.com/bongbong90/Sorigul/pull/143) · Folders sorting
 
@@ -90,6 +106,8 @@
 - **장애 분석 가이드:** 정렬 순서·타입별 동작은 계약상 허용된 컬럼만 확인.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
 
+<a id="pr-144"></a>
+
 ## [PR #144](https://github.com/bongbong90/Sorigul/pull/144) · TXT display encoding
 
 - **원본:** fix: restore TXT display encoding fallback; CLOSED / 직접 GitHub 병합 아님; HEAD `665fe8f73b545347bd24d92add85d66fbf242f92`; base `fix/folders-column-sorting`.
@@ -100,6 +118,8 @@
 - **당시 검증 내용(원문 발췌):** - dedicated encoding fallback tests: 13 passed / - existing ResultsService/live-folder tests: 46 passed, 1 skipped / - frontend lint/typecheck/build: PASS.
 - **장애 분석 가이드:** 한글 깨짐시 UTF-8 BOM/cp949/euc-kr 읽기 순서와 원본 파일 무변경 검사.
 - **후속 유의:** 현재 Integration 조상인 것은 입증됨. 기능이 동일하게 유지됐다는 의미는 아니므로 최신 HEAD의 대상 파일/테스트 재확인 필수.
+
+<a id="pr-145"></a>
 
 ## [PR #145](https://github.com/bongbong90/Sorigul/pull/145) · Trusted taskkill in build
 
