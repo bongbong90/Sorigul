@@ -3,6 +3,8 @@
 > 기준: 2026-10-15 GitHub PR 본문·변경 파일·patch; 각 PR HEAD는 Integration `38b856a0...`의 조상임을 별도 compare 검증. CLOSED는 GitHub MERGED가 아님. 후속 커밋이 코드를 바꿨을 수 있으므로 **PR 당시 변경**만 서술.
 > 상태 표기: 검증 = 과거 PR 문서에 적힌 주장일 수 있으며 현 설치본의 증명 아님. 공개 Diff는 원본 PR에서 열람.
 
+<a id="pr-67"></a>
+
 ## [PR #67](https://github.com/bongbong90/Sorigul/pull/67) · A: Release packaging hardening
 
 - **원본:** Package A: harden release packaging gates; CLOSED / GitHub 미병합; PR HEAD `3181b8f57d7825b2b412dc7b77966cce5d4773be`; 원래 base `review/cuda-release-remediation`; 현재 Integration 조상 커밋(추가 병합 불필요).
@@ -13,6 +15,8 @@
 - **기존 PR의 테스트/검증 표기:** - stale MSI first-match false pass 제거 / - bounded packaged self-test + progressive log / - 검증 후 transactional promotion + rollback.
 - **장애 대응 시작점:** 패키징 실패·FFmpeg/CUDA·manifest 문제 시 sidecar_main 및 두 빌드 스크립트, packaging 테스트를 함께 대조.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
+
+<a id="pr-68"></a>
 
 ## [PR #68](https://github.com/bongbong90/Sorigul/pull/68) · B: Job/recovery boundaries
 
@@ -25,6 +29,8 @@
 - **장애 대응 시작점:** 실패·재시도·데이터 보존·Chunk 상태 불일치 시 job_manager/runner/output_bundle·Drive 경계와 관련 테스트 확인.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
 
+<a id="pr-69"></a>
+
 ## [PR #69](https://github.com/bongbong90/Sorigul/pull/69) · C: External-auth security
 
 - **원본:** Package C: secure Colab and OAuth boundaries; CLOSED / GitHub 미병합; PR HEAD `c393303924f202d6c0045365331ed0a73a49479f`; 원래 base `review/remediation-b-process-recovery`; 현재 Integration 조상 커밋(추가 병합 불필요).
@@ -35,6 +41,8 @@
 - **기존 PR의 테스트/검증 표기:** ## 검증 상태.
 - **장애 대응 시작점:** 외부 연결 실패 시 Colab URL·rendezvous·OAuth loopback 코드 및 보안 테스트 확인; 실 API 성공 근거는 별도.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
+
+<a id="pr-70"></a>
 
 ## [PR #70](https://github.com/bongbong90/Sorigul/pull/70) · D: Frontend/filesystem integrity
 
@@ -47,6 +55,8 @@
 - **장애 대응 시작점:** 파일 잘못 이름변경/선택/상태 꼬임 시 renamer, settings, Tauri lib, UI API 참조.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
 
+<a id="pr-71"></a>
+
 ## [PR #71](https://github.com/bongbong90/Sorigul/pull/71) · E: Prebuild gate/authority
 
 - **원본:** Package E: close pre-build release validation contracts; CLOSED / GitHub 미병합; PR HEAD `e5a523e7e3e5b19ab73d272bccfd59b6eeabec42`; 원래 base `review/remediation-d-frontend-filesystem-ux`; 현재 Integration 조상 커밋(추가 병합 불필요).
@@ -57,6 +67,8 @@
 - **기존 PR의 테스트/검증 표기:** - packaged self-test app-data isolation / - readiness contract tests / - #37 packaged self-test user app-data isolation.
 - **장애 대응 시작점:** 릴리스 선행검증·패키지 경로 오류 시 release conf, scripts, canonical 문서 계보 확인.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
+
+<a id="pr-73"></a>
 
 ## [PR #73](https://github.com/bongbong90/Sorigul/pull/73) · Design foundation
 
@@ -69,6 +81,8 @@
 - **장애 대응 시작점:** 색상/버튼/카드 일관성 문제 시 tokens/UI components 및 디자인 문서 참조.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
 
+<a id="pr-74"></a>
+
 ## [PR #74](https://github.com/bongbong90/Sorigul/pull/74) · App shell
 
 - **원본:** App shell implementation; CLOSED / GitHub 미병합; PR HEAD `5d66771b276244ebea7d5a8cf3b481d0ae619389`; 원래 base `feature/design-system-foundation`; 현재 Integration 조상 커밋(추가 병합 불필요).
@@ -79,6 +93,8 @@
 - **기존 PR의 테스트/검증 표기:** 검증 수치의 명시적 근거를 이 PR 본문에서 확보하지 못함(미확인).
 - **장애 대응 시작점:** 사이드바/헤더/스크롤 문제 시 AppShell, app-shell.css 와 후속 #193/#194 변경 비교.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
+
+<a id="pr-75"></a>
 
 ## [PR #75](https://github.com/bongbong90/Sorigul/pull/75) · Transcription screen static
 
@@ -91,6 +107,8 @@
 - **장애 대응 시작점:** 전사 화면 레이아웃·파일목록 누락 시 화면 각 컴포넌트와 후속 #194 변경 비교.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
 
+<a id="pr-76"></a>
+
 ## [PR #76](https://github.com/bongbong90/Sorigul/pull/76) · Transcription mock interaction
 
 - **원본:** Transcription screen mock interactions; CLOSED / GitHub 미병합; PR HEAD `154e550e6aefd4dfecd5e0140d0ff1f69bf17f5c`; 원래 base `feature/transcription-screen-static-ui`; 현재 Integration 조상 커밋(추가 병합 불필요).
@@ -101,6 +119,8 @@
 - **기존 PR의 테스트/검증 표기:** 검증 수치의 명시적 근거를 이 PR 본문에서 확보하지 못함(미확인).
 - **장애 대응 시작점:** 실제 API 동작을 증명하는 PR이 아니라 초기 상호작용 기록; 최신 Job UX와 비교 시 주의.
 - **계보 주의:** PR 자체는 미병합 상태로 종료됐지만 head 커밋은 현 Integration 계보에 포함; 현재 동작 동일성은 최신 파일 및 테스트 재확인 필요.
+
+<a id="pr-77"></a>
 
 ## [PR #77](https://github.com/bongbong90/Sorigul/pull/77) · Legacy parity inventory
 
