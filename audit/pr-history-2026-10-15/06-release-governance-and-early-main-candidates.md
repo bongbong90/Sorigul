@@ -2,6 +2,8 @@
 
 > 실제 변경 파일/patch 및 당시 PR 본문만으로 기술. `main` 대상 구형 통합 PR은 이후 후보로 대체된 이력이지 현재 자동 병합 대상이 아님.
 
+<a id="pr-146"></a>
+
 ## [PR #146](https://github.com/bongbong90/Sorigul/pull/146) · Deterministic Job Object QA
 
 - **원본:** test: make Job Object kill-on-close checks deterministic; CLOSED/미병합(단일 GitHub merge 아님); HEAD `e7996d8bbc932c2b67b3a4ef9f70495bf2a0e6d0`; base `fix/build-script-trusted-taskkill`.
@@ -12,6 +14,8 @@
 - **당시 검증·차단 기록:** kill-on-close tests so the final source regression does not depend on / - root-only test: fixed 500 ms sleep / - root+child test: fixed 800 ms sleep / - real timeout failure when it does not.
 - **장애/개발 시 주의:** 자식 프로세스 잔류·강제 종료 테스트 신뢰성은 #56/#63에 최신 실제 설치 검증 필요.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
+
+<a id="pr-148"></a>
 
 ## [PR #148](https://github.com/bongbong90/Sorigul/pull/148) · Parity contract decisions
 
@@ -24,6 +28,8 @@
 - **장애/개발 시 주의:** 현행 제품 결정 우선순위와 증거 문서의 상태(LOCKED/HISTORICAL) 확인.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
 
+<a id="pr-149"></a>
+
 ## [PR #149](https://github.com/bongbong90/Sorigul/pull/149) · Fresh #123 full source audit
 
 - **원본:** audit: re-run full source contract regression; CLOSED/미병합(단일 GitHub merge 아님); HEAD `c8c08b39d1854f605d38a8b50660c89994431f6a`; base `docs/lock-127-parity-decisions`.
@@ -34,6 +40,8 @@
 - **당시 검증·차단 기록:** - SOURCE FULL REGRESSION = PASS / ## Test results / - frontend lint/typecheck/build: PASS / - Rust fmt/check/clippy/all-targets: PASS.
 - **장애/개발 시 주의:** 당시 audit Source와 10/15 Integration의 #123 결과를 혼동하지 않음.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
+
+<a id="pr-152"></a>
 
 ## [PR #152](https://github.com/bongbong90/Sorigul/pull/152) · #123 report classification
 
@@ -46,6 +54,8 @@
 - **장애/개발 시 주의:** #199/#200 재발 문제의 선례. 신규 docs/*.md은 ledger와 historical lock 일치 확인.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
 
+<a id="pr-153"></a>
+
 ## [PR #153](https://github.com/bongbong90/Sorigul/pull/153) · Packaged CUDA selftest
 
 - **원본:** fix: restore packaged Local Runtime CUDA self-test; CLOSED/미병합(단일 GitHub merge 아님); HEAD `d06a74def23af7e8a571e3ed9a106cf0ab150f30`; base `docs/classify-123-rerun-report`.
@@ -56,6 +66,8 @@
 - **당시 검증·차단 기록:** ## Failure / A fresh PyInstaller Local Runtime candidate built successfully and returned a successful CUDA self-test JSON response, but the Windows PowerShell 5 build script read its process ex / - failed candidate promoted: NO / Windows PowerShell 5 'Start-Process -PassThru' did not retain the native process handle on the bounded polling path. Once the process exited, 'ExitCode' remained '$null'; '$null -n.
 - **장애/개발 시 주의:** #191 Runtime pairing과 CUDA tensor 성공은 별개; 설치형 프로필에서 재증명 필요.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
+
+<a id="pr-155"></a>
 
 ## [PR #155](https://github.com/bongbong90/Sorigul/pull/155) · Fresh current-head installed QA
 
@@ -68,6 +80,8 @@
 - **장애/개발 시 주의:** blocked/PASS 이력을 시도별로 구분하고 현재 Core/Local Artifact 증거로 재사용 금지.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
 
+<a id="pr-157"></a>
+
 ## [PR #157](https://github.com/bongbong90/Sorigul/pull/157) · Classify blocked #113 report
 
 - **원본:** docs: classify 6A-R3 blocked validation report; CLOSED/미병합(단일 GitHub merge 아님); HEAD `e52bd39a200b29310c81cf479d2020ef912af347`; base `gate/fresh-current-head-artifact-revalidation-r2`.
@@ -78,6 +92,8 @@
 - **당시 검증·차단 기록:** - 'git diff --check': PASS. / - Exact diff: only 'docs/project/CURRENT_SOURCE_OF_TRUTH.md' and 'tests/test_release_readiness_contracts.py'; report body and product/runtime/packaging source unchanged..
 - **장애/개발 시 주의:** #201과는 별개 문서 분류 이슈; 새 문서에는 분류표 누락 방지.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
+
+<a id="pr-158"></a>
 
 ## [PR #158](https://github.com/bongbong90/Sorigul/pull/158) · Split runtime manifest gate
 
@@ -90,6 +106,8 @@
 - **장애/개발 시 주의:** #191 manifest/Source HEAD mismatch가 실제로 무엇을 막는지 추적.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
 
+<a id="pr-160"></a>
+
 ## [PR #160](https://github.com/bongbong90/Sorigul/pull/160) · PS5 self-test observation
 
 - **원본:** test: lock Core self-test process observation on PowerShell 5; CLOSED/미병합(단일 GitHub merge 아님); HEAD `a33ac99ee47c040692e0dd4cf0149795baa4e92a`; base `test/split-runtime-manifest-gate-reconciliation`.
@@ -100,6 +118,8 @@
 - **당시 검증·차단 기록:** PR: https://github.com/bongbong90/Sorigul/pull/160 — OPEN / NOT MERGED, base 'test/split-runtime-manifest-gate-reconciliation'. / - Base: 'test/split-runtime-manifest-gate-reconciliation' / exact start HEAD '40d721ebb287ec5a1eda60f77ac3f40c99813f37'; parent PR #158 OPEN / MERGEABLE / NOT MERGED at preflight a / - Branch: 'fix/core-powershell5-selftest-handle-retention'; exact local / remote tracking / live remote HEAD: 'a33ac99ee47c040692e0dd4cf0149795baa4e92a' (all identical). / - Commit: 'a33ac99ee47c040692e0dd4cf0149795baa4e92a' — 'test: lock Core self-test process observation on PowerShell 5'..
 - **장애/개발 시 주의:** PS5 프로세스 ID·종료시점 오관찰과 실제 orphan 여부 구분.
 - **후속 계보:** 원본 HEAD는 현재 Integration 조상. 본문 실행 결과는 당시 상태 한정.
+
+<a id="pr-162"></a>
 
 ## [PR #162](https://github.com/bongbong90/Sorigul/pull/162) · Obsolete main integration candidate
 
