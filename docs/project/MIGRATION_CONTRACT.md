@@ -1,6 +1,8 @@
 # Sorigul Migration Contract
 
-Status: `LOCKED`
+Status: `LOCKED` (amended — see notice below)
+
+> **Amendment notice (2026-08-29):** `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` D11, D12, and D15 supersede specific lines in this document based on real usage review: §4/§12/§19's "MP3/TXT/JSON/SRT 4-file upload" is narrowed to TXT/JSON/SRT only (D11); §10.1's "course/subject alias 적용" is superseded for course/subject, which become direct user text input, while week/lesson detection is unchanged (D12); and Drive classification's implicit filename-re-parsing basis is superseded by Job/file metadata as the classification source of truth (D15). This document's content below is preserved as historical evidence and remains authoritative for every section not listed above. Do not read §4/§10.1/§12/§19 in isolation for those three areas — read them together with the refinement plan.
 
 ## 1. Purpose
 

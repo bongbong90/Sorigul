@@ -7,6 +7,8 @@
 > Legacy baseline: `bongbong90/jeonsa_doumi` `main` / `fbc86313a179a62a586386551f99384a9fce5fc8`
 
 > **Decision resolution:** 이 문서는 위 baseline에서 수집한 Legacy 증거와 당시의 conflict/open question 기록을 보존한다. 이후 확정된 제품 정책은 `MIGRATION_CONTRACT.md`가 우선한다. 따라서 21–22절의 intentional change candidates/open questions는 Contract에서 해결되었고, Dashboard는 Legacy에서 ACTIVE였다는 증거를 유지하되 Sorigul에서는 D10 `INTENTIONAL_CHANGE`로 제거한다. 23절 B08은 Dashboard 완성이 아니라 독립 Log Screen과 Dashboard 제거 결정의 반영으로 해석한다. 제품 행동이 아닌 D09 Result 탐색/API 구조만 deferred technical decision으로 남는다.
+>
+> **Amendment notice (2026-08-29):** `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md`가 다음 행을 `SUPERSEDED_BY_PRODUCT_DECISION`으로 갱신한다 — 행 자체는 Legacy 증거로 보존하고 삭제하지 않는다. `GD-003`/`GD-004`(4종 bundle 업로드·preflight)는 TXT/JSON/SRT 3종으로 축소된다 (D11). `GD-002`(파일명 정규화 결과로 Drive 경로 분류)는 Job/file metadata 기반 분류로 대체된다 (D15). `FN-002`(과정·과목 alias 감지)는 사용자 직접 입력으로 대체되며 주차/강 감지만 유지된다 (D12). Prompt/corrections와 MP3 import/move는 이 43개 ACTIVE 항목에 애초에 포함되지 않았으므로 이 audit과 충돌하지 않는다 — `APPROVED_INTENTIONAL_CHANGE`로 신규 잠금.
 
 ## 1. Audit Scope
 
