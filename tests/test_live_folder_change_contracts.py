@@ -85,7 +85,7 @@ def test_hook_watches_only_the_selected_folder_via_revision_api():
 def test_transcription_live_refresh_only_reloads_disk_and_defers_while_busy():
     page = read_repo("frontend/src/pages/TranscriptionPage.tsx")
     reconcile = block_after(page, "const reconcileFolderChange = useCallback(")
-    assert "await loadFolder(signal)" in reconcile
+    assert "await loadFolder(folder, signal)" in reconcile
     assert not JOB_ACTIONS.search(reconcile)
     # Vanished selections are pruned; nothing is auto-selected.
     assert "current.filter((id) => present.has(id))" in reconcile
