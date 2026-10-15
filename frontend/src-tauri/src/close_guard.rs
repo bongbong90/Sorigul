@@ -5,6 +5,7 @@
 //! is in progress. The window event callback never blocks: it prevents the
 //! close, and one background check asks the backend's read-only close guard.
 //! Active work, or any doubt about it, hides the window to the tray instead.
+//! The tray "종료" item (#174) goes through the very same check.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -78,6 +79,17 @@ impl CloseCheck {
         {
             Ok(_) => (CloseRequestAction::CheckCriticalWork, generation),
             Err(_) => (CloseRequestAction::AlreadyChecking, generation),
+        }
+    }
+
+    /// Tray "종료" (#174): always the guarded exit path, whatever
+    /// `close_behavior` says, through the same single pending check as X.
+    /// `Some(generation)` starts the check; `None` means one is already
+    /// pending (repeated clicks coalesce).
+    pub fn on_exit_requested(&self) -> Option<u64> {
+        match self.on_close_requested("exit") {
+            (CloseRequestAction::CheckCriticalWork, generation) => Some(generation),
+            _ => None,
         }
     }
 
@@ -284,6 +296,76 @@ mod tests {
     }
 
     #[test]
+    fn tray_exit_always_checks_and_coalesces_repeated_clicks() {
+        let check = CloseCheck::default();
+        let generation = check
+            .on_exit_requested()
+            .expect("first click starts a check");
+        assert_eq!(check.on_exit_requested(), None);
+        assert_eq!(check.on_exit_requested(), None);
+        // The X button shares the same pending slot.
+        assert_eq!(
+            check.on_close_requested("exit").0,
+            CloseRequestAction::AlreadyChecking
+        );
+        assert_eq!(
+            check.finish(generation, Ok(GuardReport::Idle)),
+            CloseOutcome::ConfirmedExit
+        );
+        assert!(check.on_exit_requested().is_some(), "slot released");
+    }
+
+    #[test]
+    fn tray_exit_is_refused_while_x_check_is_pending() {
+        let check = CloseCheck::default();
+        let (_, generation) = check.on_close_requested("exit");
+        assert_eq!(check.on_exit_requested(), None);
+        check.finish(generation, Ok(GuardReport::Active(ActiveWork::Drive)));
+        assert!(check.on_exit_requested().is_some());
+    }
+
+    #[test]
+    fn tray_exit_outcomes_follow_the_guard_and_fail_safe() {
+        let cases = [
+            (Ok(GuardReport::Idle), CloseOutcome::ConfirmedExit),
+            (
+                Ok(GuardReport::Active(transcription(Some("A.mp3"), Some(7.0)))),
+                CloseOutcome::ProtectedHide(transcription(Some("A.mp3"), Some(7.0))),
+            ),
+            (
+                Ok(GuardReport::Active(ActiveWork::Drive)),
+                CloseOutcome::ProtectedHide(ActiveWork::Drive),
+            ),
+            (Err("BACKEND_UNREACHABLE".into()), CloseOutcome::SafeHide),
+            (
+                Err("BACKEND_ERROR: HTTP 500".into()),
+                CloseOutcome::SafeHide,
+            ),
+            (Err("GUARD_PARSE_ERROR".into()), CloseOutcome::SafeHide),
+            (
+                Err("BACKEND_UNREACHABLE: timed out".into()),
+                CloseOutcome::SafeHide,
+            ),
+        ];
+        for (result, expected) in cases {
+            let check = CloseCheck::default();
+            let generation = check.on_exit_requested().unwrap();
+            assert_eq!(check.finish(generation, result), expected);
+        }
+    }
+
+    #[test]
+    fn tray_exit_late_idle_after_reopen_is_superseded() {
+        let check = CloseCheck::default();
+        let generation = check.on_exit_requested().unwrap();
+        check.window_reopened();
+        assert_eq!(
+            check.finish(generation, Ok(GuardReport::Idle)),
+            CloseOutcome::Superseded
+        );
+    }
+
+    #[test]
     fn parses_valid_guard_snapshots() {
         assert_eq!(
             parse_close_guard(
@@ -393,6 +475,27 @@ mod tests {
             let (_, generation) = check.on_close_requested("exit");
             assert_eq!(check.finish(generation, result), CloseOutcome::SafeHide);
         }
+    }
+
+    #[test]
+    fn stalled_backend_times_out_into_safe_hide() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // Accept and hold the connection open without ever answering.
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(CLOSE_GUARD_TIMEOUT * 3);
+                drop(stream);
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/api/desktop/close-guard");
+        let started = std::time::Instant::now();
+        let result = fetch_close_guard(&url);
+        assert!(result.is_err(), "{result:?}");
+        assert!(started.elapsed() < CLOSE_GUARD_TIMEOUT * 2);
+        let check = CloseCheck::default();
+        let generation = check.on_exit_requested().unwrap();
+        assert_eq!(check.finish(generation, result), CloseOutcome::SafeHide);
     }
 
     #[test]
