@@ -237,7 +237,7 @@
 
 .classification-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 2fr 2fr minmax(6rem, 1fr);
   gap: var(--space-control);
 }
 

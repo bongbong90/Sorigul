@@ -14,7 +14,7 @@ import {
 } from '../api/client'
 import { pickFolder } from '../lib/native'
 import { useFolderRevision } from '../hooks/useFolderRevision'
-import { knownStageFor, overrideStageFor, validateClassificationText, type Stage } from '../lib/classification'
+import { knownStageFor, overrideStageFor, validateClassificationText, validateWeekInput, type Stage } from '../lib/classification'
 import {
   classifyPreview,
   needsDriveConfirmation,
@@ -42,6 +42,9 @@ interface PreflightAttempt {
   filenames: Record<string, string>
   force: boolean
   scope: 'selected' | 'all_incomplete'
+  // #180: the manual week validated at Start. Every resume of this attempt
+  // uses this snapshot, never the live week input.
+  week: number
 }
 interface AdoptedClassification {
   course: string
@@ -136,6 +139,10 @@ export function TranscriptionPage() {
   const [subject, setSubject] = useState('')
   const [courseError, setCourseError] = useState<string>()
   const [subjectError, setSubjectError] = useState<string>()
+  // #180 manual week: per-folder input, never persisted to RuntimeSettings
+  // and cleared whenever the folder actually changes.
+  const [week, setWeek] = useState('')
+  const [weekError, setWeekError] = useState<string>()
   const [editingOverride, setEditingOverride] = useState(false)
   const activeJobId = job?.job_id
   const activeJobStatus = job?.status
@@ -143,6 +150,9 @@ export function TranscriptionPage() {
   const backendStatusRef = useRef<BackendStatus>('STARTING')
   const folderRef = useRef(folder)
   const folderPickedRef = useRef(false)
+  // Bumped on every actual folder change; an in-flight preflight compares it
+  // so a late response can never revive a reset attempt (#170/#180).
+  const folderEpochRef = useRef(0)
   const scanGenerationRef = useRef(0)
   const scanControllerRef = useRef<AbortController | null>(null)
   const engineHydratedRef = useRef(false)
@@ -196,8 +206,10 @@ export function TranscriptionPage() {
         scanGenerationRef.current += 1
         scanControllerRef.current?.abort()
         folderRef.current = effectiveFolder
+        folderEpochRef.current += 1
         setFolder(effectiveFolder)
         setFiles([]); setSelectedIds([]); setJob(undefined)
+        setWeek(''); setWeekError(undefined)
       }
       setCourse((current) => current || loaded.last_course || '')
       setSubject((current) => current || loaded.last_subject || '')
@@ -422,10 +434,13 @@ export function TranscriptionPage() {
     scanGenerationRef.current += 1
     scanControllerRef.current?.abort()
     folderRef.current = value
+    folderEpochRef.current += 1
     folderPickedRef.current = true
     setFiles([]); setSelectedIds([]); setJob(undefined)
     setDialog(null); setPendingIds([])
     resetPreflight()
+    // #180: folder B never inherits folder A's week.
+    setWeek(''); setWeekError(undefined)
     saveFolder(value); setFolder(value)
     setMessage('새 폴더를 확인하고 있습니다.')
     // Persistence must never delay or prevent this explicit user scan.
@@ -446,6 +461,11 @@ export function TranscriptionPage() {
     setSubject(value)
     setSubjectError(value.trim() ? validateClassificationText(value, '과목명').error : undefined)
     setEditingOverride(false)
+  }
+
+  function onWeekChange(value: string) {
+    setWeek(value)
+    setWeekError(value.trim() ? validateWeekInput(value).error : undefined)
   }
 
   async function onPickStage(stage: Stage) {
@@ -500,6 +520,9 @@ export function TranscriptionPage() {
     const subjectCheck = validateClassificationText(subject, '과목명')
     setCourseError(courseCheck.error); setSubjectError(subjectCheck.error)
     if (courseCheck.error || subjectCheck.error) { setMessage('과정명/과목명을 확인해 주세요.'); return }
+    const weekCheck = validateWeekInput(week)
+    setWeekError(weekCheck.error)
+    if (weekCheck.error) { setMessage('주차를 확인해 주세요.'); return }
     if (needsStagePrompt) { setMessage('과목의 1차/2차 분류를 먼저 선택해 주세요.'); return }
     if (selectedIds.length === 0) {
       const targets = rows.filter((row) => row.status !== 'DONE').map((row) => row.id)
@@ -535,11 +558,20 @@ export function TranscriptionPage() {
       return
     }
     if (preflightLockRef.current) return
+    // #180: validate and snapshot the week before taking the lock; a paused
+    // review later resumes with this value, never the live input.
+    const weekCheck = validateWeekInput(week)
+    if (weekCheck.value === undefined) {
+      setWeekError(weekCheck.error)
+      setMessage('주차를 확인해 주세요.')
+      setDialog(null)
+      return
+    }
     preflightLockRef.current = true
     setPreflightActive(true)
 
     return runPreflight(
-      { ids, filenames: filenamesFor(ids), force, scope },
+      { ids, filenames: filenamesFor(ids), force, scope, week: weekCheck.value },
       new Map(),
       null,
       course,
@@ -579,10 +611,19 @@ export function TranscriptionPage() {
       return
     }
 
+    // A folder switch already reset this attempt (#170); a response that
+    // lands afterwards must not revive it or its week in the new folder.
+    const attemptEpoch = folderEpochRef.current
+    const superseded = () => folderEpochRef.current !== attemptEpoch
+
     let previews: NormalizationPreview[]
     try {
-      previews = await api.normalizeBatch(folder, orderedFilenames as string[], courseCheck.value, subjectCheck.value)
-    } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
+      previews = await api.normalizeBatch(folder, orderedFilenames as string[], courseCheck.value, subjectCheck.value, seed.week)
+    } catch (cause) {
+      if (superseded()) return
+      setMessage(getUserMessage(cause)); resetPreflight(); return
+    }
+    if (superseded()) return
 
     let renamedAny = false
 
@@ -599,6 +640,7 @@ export function TranscriptionPage() {
           const oldStem = preview.original_name.replace(/\.mp3$/i, '')
           const newStem = preview.suggested_name.replace(/\.mp3$/i, '')
           const response = await api.rename(folder, oldStem, newStem)
+          if (superseded()) return
           renamedAny = true
           ids = remapId(ids, response.old_file_id, response.new_file_id)
           delete filenames[response.old_file_id]
@@ -606,7 +648,10 @@ export function TranscriptionPage() {
           resolutions = remapResolutionKey(resolutions, response.old_file_id, response.new_file_id)
           resolutions.set(response.new_file_id, 'AUTO_RENAME')
           setSelectedIds((current) => remapId(current, response.old_file_id, response.new_file_id))
-        } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight(); return }
+        } catch (cause) {
+          if (superseded()) return
+          setMessage(getUserMessage(cause)); resetPreflight(); return
+        }
         continue
       }
 
@@ -618,7 +663,7 @@ export function TranscriptionPage() {
       setResolvingId(id)
       setFileResolutions(resolutions)
       setAdoptedClassification(adoptedIn)
-      setAttempt({ ids, filenames, force: seed.force, scope: seed.scope })
+      setAttempt({ ids, filenames, force: seed.force, scope: seed.scope, week: seed.week })
       return
     }
 
@@ -643,7 +688,7 @@ export function TranscriptionPage() {
 
     setAttempt(null)
     setAdoptedClassification(null)
-    await finalizeJob(ids, seed.force, 'selected', resolutions, forceDriveOff ? false : uploadToDrive, courseCheck.value, subjectCheck.value)
+    await finalizeJob(ids, seed.force, 'selected', resolutions, forceDriveOff ? false : uploadToDrive, courseCheck.value, subjectCheck.value, seed.week)
   }
 
   async function finalizeJob(
@@ -654,12 +699,13 @@ export function TranscriptionPage() {
     uploadToDriveForRun: boolean,
     courseValue: string,
     subjectValue: string,
+    weekValue: number,
   ) {
     if (!folder) { releasePreflight(); return }
     try {
       const created = await api.createJob({
         folder, file_ids: ids, scope, force_retranscribe: force, upload_to_drive: uploadToDriveForRun,
-        course: courseValue, subject: subjectValue, stage: resolveStageFor(subjectValue),
+        course: courseValue, subject: subjectValue, week: weekValue, stage: resolveStageFor(subjectValue),
         file_resolutions: toFileResolutionsPayload(resolutions),
         engine,
         colab_url: engine === 'direct_colab' ? (connectedBaseUrl ?? undefined) : undefined,
@@ -765,28 +811,42 @@ export function TranscriptionPage() {
     } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight() }
   }
 
-  // D24 mismatch option B: keep the typed course/subject and rename this one
-  // file to match -- built from the typed values plus the week/lesson
-  // already embedded in its current standard name. Never overwrites: the
-  // rename endpoint rejects the call outright if the target already exists.
+  // D24 mismatch option B / #180 week mismatch: rename this one file to the
+  // typed course + typed subject + the attempt's snapshotted manual week.
+  // The target is the backend-allocated typed_target_name (source lesson
+  // preferred, else first free, stepped past occupied stems) -- never the
+  // source week in detected_week. Never overwrites: the rename endpoint
+  // rejects the call outright if the target already exists.
   async function onRenameToTypedForCurrent() {
-    if (!resolvingId || !attempt || !normalization || !folder || !normalization.detected_week || !normalization.detected_lesson) return
+    if (!resolvingId || !attempt || !normalization || !folder || !normalization.typed_target_name) return
+    if (normalization.manual_week !== String(attempt.week)) return
     const courseCheck = validateClassificationText(course, '과정명')
     const subjectCheck = validateClassificationText(subject, '과목명')
     if (courseCheck.error || subjectCheck.error) return
-    const targetStem = `${courseCheck.value}_${subjectCheck.value}_${normalization.detected_week}주차_${normalization.detected_lesson}강`
+    const targetName = normalization.typed_target_name
     try {
       const oldStem = normalization.original_name.replace(/\.mp3$/i, '')
-      const response = await api.rename(folder, oldStem, targetStem)
+      const response = await api.rename(folder, oldStem, targetName.replace(/\.mp3$/i, ''))
       const nextIds = remapId(attempt.ids, response.old_file_id, response.new_file_id)
       const nextFilenames = { ...attempt.filenames }
       delete nextFilenames[response.old_file_id]
-      nextFilenames[response.new_file_id] = `${targetStem}.mp3`
+      nextFilenames[response.new_file_id] = targetName
       const nextResolutions = remapResolutionKey(new Map(fileResolutions), response.old_file_id, response.new_file_id)
       nextResolutions.set(response.new_file_id, 'RENAME_TO_TYPED')
       setSelectedIds((current) => remapId(current, response.old_file_id, response.new_file_id))
       await runPreflight({ ...attempt, ids: nextIds, filenames: nextFilenames }, nextResolutions, adoptedClassification, courseCheck.value, subjectCheck.value)
     } catch (cause) { setMessage(getUserMessage(cause)); resetPreflight() }
+  }
+
+  // #180 week mismatch: end this attempt so the week input is editable
+  // again. Renames already applied earlier in the attempt stay on disk.
+  function onEditWeekForCurrent() {
+    if (!resolvingId || !attempt || !normalization) return
+    const fileWeek = normalization.detected_week
+    resetPreflight()
+    // The field hint survives the post-preflight folder reconcile message.
+    setWeekError(`파일명은 ${fileWeek}주차, 입력한 주차는 ${attempt.week}주차입니다. 주차를 확인해 주세요.`)
+    setMessage('주차를 수정한 뒤 다시 전사를 시작해 주세요.')
   }
 
   // D24 mismatch option A: adopt the file's own embedded classification as
@@ -840,10 +900,13 @@ export function TranscriptionPage() {
       <ClassificationSection
         course={course}
         subject={subject}
+        week={week}
         courseError={courseError}
         subjectError={subjectError}
+        weekError={weekError}
         onCourseChange={(v) => { if (!isPreflighting) onCourseChange(v) }}
         onSubjectChange={(v) => { if (!isPreflighting) onSubjectChange(v) }}
+        onWeekChange={(v) => { if (!isPreflighting) onWeekChange(v) }}
         knownStage={knownStage}
         overrideStage={overrideStage}
         needsStagePrompt={needsStagePrompt}
@@ -856,13 +919,13 @@ export function TranscriptionPage() {
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
       <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} actionsDisabled={globalRunActive} />
-      <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
+      <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} onEditWeek={onEditWeekForCurrent} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
         <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || globalRunActive || (job != null &&['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
         <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
           <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>
-          {uploadToDrive ? <DrivePathPreview course={course} subject={subject} settings={settings} /> : null}
+          {uploadToDrive ? <DrivePathPreview course={course} subject={subject} week={week} settings={settings} /> : null}
           <div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
       </div></section>
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
@@ -874,7 +937,11 @@ export function TranscriptionPage() {
   )
 }
 
-function DrivePathPreview({ course, subject, settings }: { course: string; subject: string; settings?: RuntimeSettings }) {
+// Mirrors DriveClassifier's folder chain (backend/src/services/drive.py):
+// root / 전사자료 / 과정 / [단계] 과목 / 과정_과목_N주차 ("공인중개사법" uses
+// "중개사법" in the week folder). The week folder is shown only for a valid
+// manual week; each file's final week still comes from its canonical name.
+function DrivePathPreview({ course, subject, week, settings }: { course: string; subject: string; week: string; settings?: RuntimeSettings }) {
   if (!settings) return null
   const driveRoot = settings.drive_exam_root || '2026 제37회 공인중개사 자격시험'
 
@@ -890,6 +957,8 @@ function DrivePathPreview({ course, subject, settings }: { course: string; subje
   }
 
   const stage = knownStageFor(trimmedSubject) ?? overrideStageFor(trimmedSubject, settings.subject_stage_overrides) ?? '?'
+  const weekValue = validateWeekInput(week).value
+  const weekSubject = trimmedSubject === '공인중개사법' ? '중개사법' : trimmedSubject
 
   return (
     <div className="setting-note">
@@ -898,7 +967,7 @@ function DrivePathPreview({ course, subject, settings }: { course: string; subje
 {'\n/ '}전사자료
 {'\n/ '}{trimmedCourse}
 {'\n/ '}[{stage}] {trimmedSubject}
-{'\n/ '}파일명 확인 후 주차 폴더가 확정됩니다.
+{'\n/ '}{weekValue !== undefined ? `${trimmedCourse}_${weekSubject}_${weekValue}주차` : '주차를 입력하면 주차 폴더가 표시됩니다.'}
       </div>
     </div>
   )
@@ -919,14 +988,16 @@ interface FilenameReviewProps {
   onApply: () => void
   onUseFileClassification: () => void
   onRenameToTyped: () => void
+  onEditWeek: () => void
 }
 
 function FilenameReview({
   preview, mode, value, onValueChange, onContinueOriginal, onEdit, onApply,
-  onUseFileClassification, onRenameToTyped,
+  onUseFileClassification, onRenameToTyped, onEditWeek,
 }: FilenameReviewProps) {
   const invalid = /[<>:"/\\|?*]/.test(value.replace(/\.mp3$/i, '')) || !value.toLowerCase().endsWith('.mp3')
   const mismatch = preview?.result_type === 'MISMATCH'
+  const weekMismatch = preview?.result_type === 'WEEK_MISMATCH'
 
   return (
     <Card className="filename-review">
@@ -947,7 +1018,25 @@ function FilenameReview({
           {preview.warnings.map((warning) => <p key={warning}>{warning}</p>)}
           <div className="inline-actions">
             <Button variant="secondary" onClick={onUseFileClassification}>현재 파일의 분류 사용</Button>
-            <Button variant="secondary" onClick={onRenameToTyped}>입력한 분류로 파일명 변경</Button>
+            <Button variant="secondary" disabled={!preview.typed_target_name} onClick={onRenameToTyped}>입력한 분류로 파일명 변경</Button>
+            <Button variant="secondary" onClick={onContinueOriginal}>원래 이름으로 Local 전사 계속</Button>
+          </div>
+        </div>
+      ) : weekMismatch ? (
+        // #180: the filename's explicit week differs from the typed week.
+        // Never silently rewritten either way, and kept apart from the
+        // course/subject mismatch choices ("현재 파일의 분류 사용" never applies).
+        <div role="alert">
+          <dl className="filename-comparison">
+            <div><dt>현재 파일</dt><dd>{preview.original_name}</dd></div>
+            <div><dt>파일의 주차</dt><dd>{preview.detected_week}주차{preview.detected_lesson ? ` ${preview.detected_lesson}강` : ''}</dd></div>
+            <div><dt>입력한 주차</dt><dd>{preview.manual_week}주차</dd></div>
+            <div><dt>변경할 이름</dt><dd>{preview.typed_target_name ?? '사용 가능한 강 번호 없음'}</dd></div>
+          </dl>
+          {preview.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          <div className="inline-actions">
+            <Button variant="secondary" disabled={!preview.typed_target_name} onClick={onRenameToTyped}>입력한 주차로 파일명 변경</Button>
+            <Button variant="secondary" onClick={onEditWeek}>주차 입력 수정</Button>
             <Button variant="secondary" onClick={onContinueOriginal}>원래 이름으로 Local 전사 계속</Button>
           </div>
         </div>

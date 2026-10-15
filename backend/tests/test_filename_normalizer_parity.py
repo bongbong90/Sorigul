@@ -231,6 +231,7 @@ def test_batch_endpoint_and_job_metadata_use_restored_allocation(tmp_path):
             filenames=[f"{stem}.mp3" for stem in originals],
             course=COURSE,
             subject=SUBJECT,
+            week=4,
         )
     )
     targets = [Path(preview.suggested_name).stem for preview in previews]
@@ -240,7 +241,7 @@ def test_batch_endpoint_and_job_metadata_use_restored_allocation(tmp_path):
         apply_rename(RenameRequest(folder=str(folder), old_stem=old_stem, new_stem=new_stem))
 
     job = create_job(
-        CreateJobRequest(folder=str(folder), file_ids=[], scope="all_incomplete", course=COURSE, subject=SUBJECT)
+        CreateJobRequest(folder=str(folder), file_ids=[], scope="all_incomplete", course=COURSE, subject=SUBJECT, week=4)
     )
     for lesson, stem in ((2, targets[0]), (3, targets[1])):
         metadata = job.file_metadata[stem]

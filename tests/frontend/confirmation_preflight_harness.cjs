@@ -32,7 +32,7 @@ const button = (h, node, label) => {
 }
 const execute = (h, kind) => button(h, h.dialog(), kind === 'start-all' ? '실행' : '다시 전사 시작')
 async function open(kind) {
-  const h = host('B'); await h.settle()
+  const h = host('B'); await h.settle(); await h.week('1')
   if (kind === 'start-all') h.component('TranscriptionActions').onStart()
   else h.component('QueueTable').onRetranscribe('shared')
   await h.settle()
@@ -138,6 +138,11 @@ for (const kind of ['start-all', 'retranscribe']) {
   cases[`${kind}_folder_switch`] = async () => {
     const h = await open(kind)
     await h.pick('C'); idle(h); invariant(h)
+    // #180: folder C never inherits folder B's week.
+    assert.equal(h.component('ClassificationSection').week, '')
+    h.component('TranscriptionActions').onStart(); await h.settle()
+    assert.equal(h.dialog(), undefined); assert.match(h.component('RuntimeBanner').message, /주차/)
+    await h.week('1')
     h.component('TranscriptionActions').onStart(); await h.settle()
     assert.match(h.text(h.dialog()), /전체 1개 중 완료 0개를 제외한 1개/)
     assert.deepEqual(Array.from(h.state('pendingIds')), ['shared'])
@@ -163,6 +168,7 @@ cases.use_file_classification = async () => {
   h.normalize(async (_, names) => names.map((name) => preview(name, 'MISMATCH')))
   execute(h, 'retranscribe')(); await h.settle(); invariant(h)
   button(h, h.review(), '현재 파일의 분류 사용')(); await h.settle(); invariant(h)
+  assert.equal(h.normalized.at(-1)[4], 1) // resumed attempt keeps its week snapshot
   assert.equal(h.created.length, 1); assert.equal(h.created[0].course, '기초')
   assert.equal(h.created[0].force_retranscribe, true); assert.equal(h.started.length, 1)
   h.unmount()

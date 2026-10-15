@@ -55,8 +55,14 @@ export interface NormalizationPreview {
   warnings: string[]
   conflicts: string[]
   can_apply: boolean
-  // NORMALIZED | UNCHANGED | MISMATCH | INVALID_TARGET | CONFLICT
+  // NORMALIZED | UNCHANGED | MISMATCH | WEEK_MISMATCH | INVALID_TARGET | CONFLICT
   result_type: string
+  // The manually entered week the preview was computed against (#180).
+  manual_week: string | null
+  // MISMATCH/WEEK_MISMATCH: the backend-allocated target for an explicit
+  // "rename to typed course + subject + manual week" choice; null when no
+  // free lesson exists.
+  typed_target_name: string | null
 }
 
 export interface FileMetadata {
@@ -291,13 +297,13 @@ export const api = {
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  normalize: (folder: string, filename: string, course: string, subject: string) =>
+  normalize: (folder: string, filename: string, course: string, subject: string, week: number) =>
     request<NormalizationPreview>('/normalize/preview', {
-      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filename, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
-  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string) =>
+  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string, week: number) =>
     request<NormalizationPreview[]>('/normalize/batch', {
-      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   rename: (folder: string, oldStem: string, newStem: string) =>
     request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
@@ -315,6 +321,7 @@ export const api = {
     upload_to_drive?: boolean
     course: string
     subject: string
+    week: number
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
