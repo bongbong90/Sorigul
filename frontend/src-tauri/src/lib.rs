@@ -2,6 +2,7 @@ mod close_guard;
 mod completion_toast;
 mod shutdown;
 mod sidecar;
+mod tray_tooltip;
 #[cfg(target_os = "windows")]
 mod windows_system;
 
@@ -25,8 +26,12 @@ use completion_toast::{
 };
 use shutdown::{RealShutdownExecutor, ShutdownGate};
 use sidecar::{HttpHealthProbe, SidecarManager, SidecarStatus, SpawnSpec};
+use tray_tooltip::{
+    format_tray_tooltip, update_tooltip_if_changed, TrayProgressPayload, IDLE_TRAY_TOOLTIP,
+};
 
 const BACKEND_PORT: u16 = 8000;
+const TRAY_ID: &str = "sorigul-main-tray";
 
 #[cfg(target_os = "windows")]
 const PATH_LIST_SEPARATOR: &str = ";";
@@ -40,6 +45,7 @@ struct AppState {
     close_behavior: Mutex<String>,
     close_check: CloseCheck,
     completion_toast: Mutex<CompletionToastState>,
+    last_tray_tooltip: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -132,6 +138,27 @@ fn native_shutdown(state: State<AppState>) -> Result<(), String> {
 #[tauri::command]
 fn reset_shutdown_gate(state: State<AppState>) {
     state.shutdown_gate.reset();
+}
+
+#[tauri::command]
+fn set_tray_progress(
+    app: AppHandle,
+    state: State<AppState>,
+    payload: TrayProgressPayload,
+) -> Result<(), String> {
+    let tooltip = format_tray_tooltip(&payload);
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "TRAY_NOT_AVAILABLE".to_string())?;
+    let mut last_tooltip = state
+        .last_tray_tooltip
+        .lock()
+        .map_err(|_| "TRAY_TOOLTIP_STATE_UNAVAILABLE".to_string())?;
+    update_tooltip_if_changed(&mut last_tooltip, &tooltip, |value| {
+        tray.set_tooltip(Some(value))
+    })
+    .map_err(|error| format!("TRAY_TOOLTIP_UPDATE_FAILED: {error}"))?;
+    Ok(())
 }
 
 /// Opens the backend-validated folder (or reveals a specific item within it)
@@ -570,12 +597,13 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
 
-    let tray = TrayIconBuilder::new()
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(
             app.default_window_icon()
                 .cloned()
                 .expect("default window icon configured"),
         )
+        .tooltip(IDLE_TRAY_TOOLTIP)
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -656,11 +684,13 @@ pub fn run() {
             close_behavior: Mutex::new("tray".into()),
             close_check: CloseCheck::default(),
             completion_toast: Mutex::new(CompletionToastState::default()),
+            last_tray_tooltip: Mutex::new(Some(IDLE_TRAY_TOOLTIP.to_string())),
         })
         .invoke_handler(tauri::generate_handler![
             set_close_behavior,
             native_shutdown,
             reset_shutdown_gate,
+            set_tray_progress,
             open_folder_by_intent,
             open_notification_folder,
             show_completion_toast,
