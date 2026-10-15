@@ -21,7 +21,7 @@ def _client(tmp_path, monkeypatch):
 
     manager = JobManager(str(tmp_path / "jobs.json"))
     monkeypatch.setattr(routes, "job_manager", manager)
-    return TestClient(app), manager
+    return TestClient(app, base_url="http://127.0.0.1:8000"), manager
 
 
 def test_valid_job_returns_backend_resolved_folder_intent(tmp_path, monkeypatch):

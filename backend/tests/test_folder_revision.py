@@ -169,7 +169,7 @@ def _client(tmp_path, monkeypatch):
 
     manager = JobManager(str(tmp_path / "jobs.json"))
     monkeypatch.setattr(routes, "job_manager", manager)
-    return TestClient(app), manager
+    return TestClient(app, base_url="http://127.0.0.1:8000"), manager
 
 
 def test_revision_api_returns_revision_without_side_effects(tmp_path, monkeypatch):
