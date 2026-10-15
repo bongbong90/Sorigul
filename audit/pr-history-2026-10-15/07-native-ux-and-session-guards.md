@@ -2,6 +2,8 @@
 
 > 여기의 기능/테스트 설명은 당시 PR 변경 및 기록에 한정된다. 현재 Integration에서의 재검증은 별도. 과거 main 후보 PR을 현재 main에 개별 재병합하지 않음.
 
+<a id="pr-163"></a>
+
 ## [PR #163](https://github.com/bongbong90/Sorigul/pull/163) · Preflight integration proposal
 
 - **원본:** integrate: consolidate Study-Use candidate with canonical #113 preflight; CLOSED / GitHub에서 직접 MERGED 아님; HEAD `14c72f0db8356cde8b15487d7267061ae13c3a20`; base `main`.
@@ -12,6 +14,8 @@
 - **과거 검증 근거/미실행:** **#113 CANONICAL SESSION BOOTSTRAP WORK = STOP. Implementation/targeted validation/real-repository Probe PASS; mandatory canonical preflight is BLOCKED. #164 OPEN / BLOCKED. #113 O / - Product/runtime/API/protocol/model/decode/build/installer implementation: UNCHANGED. Existing #161/#159 tests and all three artifact builders: UNCHANGED. Five pre-existing untrac / - Actual Windows PS5 **5.1.26100.9444 Desktop** parser: PASS. / - Existing preflight/readiness contracts: **24 PASS**..
 - **재발 시 디버깅:** #185와 선후관계를 분리하고 과거 HEAD의 preflight PASS를 현 HEAD에 적용하지 않음.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
+
+<a id="pr-165"></a>
 
 ## [PR #165](https://github.com/bongbong90/Sorigul/pull/165) · Single Writer bootstrap
 
@@ -24,6 +28,8 @@
 - **재발 시 디버깅:** lock 미해제/중복 Writer/세션 누락 시 bootstrap 스크립트·상태·guard 흐름 진단.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
 
+<a id="pr-166"></a>
+
 ## [PR #166](https://github.com/bongbong90/Sorigul/pull/166) · Obsolete bootstrap main candidate
 
 - **원본:** integrate: Study-Use candidate with canonical session bootstrap (#164); CLOSED / GitHub에서 직접 MERGED 아님; HEAD `780dbb1e799fd5eb79f3c13736061ad34223cc1a`; base `main`.
@@ -34,6 +40,8 @@
 - **과거 검증 근거/미실행:** - Installed ProductCode: '{ED322345-04ED-401B-9922-476A194CF4F3}'; Local/Core source pairing PASS. / Product fixes must follow independent Issue → dedicated branch → implementation/tests → commit/push → PR. Once runtime/UI source changes: new Freeze → #113 Fresh Artifact/Install → / <!-- FRESH113-6B4E43F00845-PASS:BEGIN --> / ## Current checkpoint — 6A-R4 / #113 PASS — 2026-10-06 KST.
 - **재발 시 디버깅:** 예전 main 후보 PR을 병합하여 현재 릴리스 게이트를 우회하지 않음.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
+
+<a id="pr-175"></a>
 
 ## [PR #175](https://github.com/bongbong90/Sorigul/pull/175) · Local worker UTF-8 stdout
 
@@ -46,6 +54,8 @@
 - **재발 시 디버깅:** 한글 파일명/상태 파싱 오류 시 worker stdout encoding, parent parser, #191 pairing 분리.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
 
+<a id="pr-176"></a>
+
 ## [PR #176](https://github.com/bongbong90/Sorigul/pull/176) · Forced retranscribe retry
 
 - **원본:** [#172] Honor forced re-transcription intent on Retry; CLOSED / GitHub에서 직접 MERGED 아님; HEAD `8071886e9cd5d1ad73e6f6cc3eba06f61616b9d0`; base `fix/167-local-worker-utf8-protocol`.
@@ -56,6 +66,8 @@
 - **과거 검증 근거/미실행:** - 13 new regression cases: reproduced failures before the source fix; all pass after it. / - Affected Retry/Job/output/single-run/recovery tests: 214 passed. / - Python compileall, diff and staged diff checks: PASS. / - Synthetic engine results exercise the real route, runner, persisted jobs and output writer. Engine, staged verification, partial promotion and final verification failures preserv.
 - **재발 시 디버깅:** 완료 파일 보호·중복 실행/강제 재실행의 상태 구별과 파일 overwrite 방지 확인.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
+
+<a id="pr-177"></a>
 
 ## [PR #177](https://github.com/bongbong90/Sorigul/pull/177) · Folder picker immediate reconcile
 
@@ -68,6 +80,8 @@
 - **재발 시 디버깅:** 폴더 바꾼 뒤 이전 목록 혼입·잘못된 선택/Job 시작 시 race를 재현.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
 
+<a id="pr-178"></a>
+
 ## [PR #178](https://github.com/bongbong90/Sorigul/pull/178) · Preflight confirmation sequencing
 
 - **원본:** fix: consume confirmations before transcription preflight (#171); CLOSED / GitHub에서 직접 MERGED 아님; HEAD `82cee4d7c26621ea76c9b0ef72c2ec774c262375`; base `fix/170-folder-picker-immediate-reconcile`.
@@ -78,6 +92,8 @@
 - **과거 검증 근거/미실행:** - Existing #170 folder-switch clearing and #167/#172 ancestry are preserved. Production changes are confined to 'frontend/src/pages/TranscriptionPage.tsx'; the other five files are / - #171 callback regressions: **26 PASS**. The exact parent source reproduces **20 failures / 6 passes** in the same harness. / - #170 folder-picker regressions: **19 PASS**. / - Existing TranscriptionPage/folder revision/tray contracts: **30 PASS** (including 7 folder-revision cases)..
 - **재발 시 디버깅:** 잘못된 확인창 이후 실행 또는 순서 누락 시 pending intent/confirm lifecycle 점검.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
+
+<a id="pr-179"></a>
 
 ## [PR #179](https://github.com/bongbong90/Sorigul/pull/179) · App-lifetime tray progress
 
@@ -90,6 +106,8 @@
 - **재발 시 디버깅:** 전사 화면 이동/트레이 숨김 시 진행률이 멈출 때 App-wide observer 확인.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
 
+<a id="pr-181"></a>
+
 ## [PR #181](https://github.com/bongbong90/Sorigul/pull/181) · Single desktop instance
 
 - **원본:** fix: focus existing desktop instance on second launch (#168); CLOSED / GitHub에서 직접 MERGED 아님; HEAD `a4e46c8214e47ba59ff64f862a33dd76514c555d`; base `fix/173-app-lifetime-tray-progress`.
@@ -100,6 +118,8 @@
 - **과거 검증 근거/미실행:** - Adds official 'tauri-plugin-single-instance' '~2.4.5' (latest 2.x with MSRV 1.77.2, same as the existing Tauri plugins; 2.5.x needs 1.90). 'rust-version' unchanged. Cargo.lock: + / Tests: 'tests/test_168_desktop_single_instance_contracts.py' (7 contracts). Rust fmt/check/clippy/test (78) pass; frontend lint/typecheck/build pass; root pytest (PowerShell) 183 p / Dev native smoke (debug exe, not installed): visible window and real close-to-tray hidden window → second launch exits 0 in ~200ms, main window shown + foreground; desktop PID coun / Installed retest pending; #168 stays open. No merge..
 - **재발 시 디버깅:** #168 재발인 중복 설치본·Job 충돌 확인과 기존 세션 소유관계 점검.
 - **현행 계보:** HEAD는 Integration 조상으로 포함. 후속 변경으로 현재 의미는 달라질 수 있으므로 최신 계약/소스 재확인.
+
+<a id="pr-182"></a>
 
 ## [PR #182](https://github.com/bongbong90/Sorigul/pull/182) · Guard explicit tray exit
 
