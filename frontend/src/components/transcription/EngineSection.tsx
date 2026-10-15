@@ -224,7 +224,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
           />
           <div className="engine-option-copy">
             <strong>Local</strong>
-            <span>Whisper medium</span>
+            <span>Whisper medium · 내 PC GPU 우선</span>
           </div>
           {engine === 'local_whisper' && <CheckCircle className="engine-icon" aria-hidden="true" />}
         </label>
@@ -241,7 +241,7 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
           />
           <div className="engine-option-copy">
             <strong>Colab</strong>
-            <span>Whisper medium (GPU)</span>
+            <span>Whisper large-v3 · Colab GPU 우선</span>
           </div>
           {engine === 'direct_colab' && <CheckCircle className="engine-icon" aria-hidden="true" />}
         </label>
