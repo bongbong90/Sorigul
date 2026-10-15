@@ -117,6 +117,12 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
     Write-Error "Python venv not found at '$VenvPython'. Create it first before running this script."
     exit 1
 }
+$PythonVersion = (& $VenvPython -c "import sys; print('.'.join(map(str, sys.version_info[:3])))").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $PythonVersion.StartsWith("3.13.")) {
+    Write-Error "PYTHON_RELEASE_VERSION_MISMATCH: expected Python 3.13.x, found '$PythonVersion'"
+    exit 1
+}
+Write-Host "Release Python: $PythonVersion"
 
 $SourceHead = (& git rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SourceHead)) {
@@ -314,6 +320,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
     Write-Host $SelfTestContent
 
     $RequiredSelfTestChecks = @(
+        "self_test_app_data_isolation",
         "fastapi_app_import",
         "uvicorn_import",
         "google_drive_runtime_import",

@@ -105,11 +105,11 @@ Push-Location $TauriDir
 try {
     cargo fmt --check
     if ($LASTEXITCODE -ne 0) { throw "cargo fmt --check failed (exit $LASTEXITCODE)" }
-    cargo check
+    cargo check --locked
     if ($LASTEXITCODE -ne 0) { throw "cargo check failed (exit $LASTEXITCODE)" }
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed (exit $LASTEXITCODE)" }
-    cargo test
+    cargo test --locked
     if ($LASTEXITCODE -ne 0) { throw "cargo test failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location
@@ -118,10 +118,10 @@ try {
 $MsiDir = Join-Path $TauriDir "target\release\bundle\msi"
 $PreBuildMsiInventory = @(Get-MsiInventory $MsiDir)
 $TauriBuildStartUtc = [DateTime]::UtcNow
-Write-Step "Building Windows MSI (tauri build --bundles msi)"
+Write-Step "Building Windows MSI (release-only Tauri config)"
 Push-Location $FrontendDir
 try {
-    npx tauri build --bundles msi
+    npx.cmd --no-install tauri build --config "src-tauri\tauri.release.conf.json" --bundles msi
     if ($LASTEXITCODE -ne 0) { throw "tauri build failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location

@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,10 +152,123 @@ def test_bundled_ffmpeg_timeout_is_a_check_failure(monkeypatch):
         sidecar_main._bundled_ffmpeg_detail(sidecar, run=run)
 
 
-def test_required_self_test_contract_has_exactly_eleven_checks():
-    assert len(sidecar_main.REQUIRED_SELF_TEST_CHECKS) == 11
+def test_required_self_test_contract_has_exactly_twelve_checks():
+    assert len(sidecar_main.REQUIRED_SELF_TEST_CHECKS) == 12
+    assert sidecar_main.REQUIRED_SELF_TEST_CHECKS[0] == "self_test_app_data_isolation"
     assert "torch_cuda_compute" in sidecar_main.REQUIRED_SELF_TEST_CHECKS
     assert "bundled_ffmpeg_execution" in sidecar_main.REQUIRED_SELF_TEST_CHECKS
+
+
+def test_self_test_app_data_context_restores_present_and_absent_environment(
+    tmp_path, monkeypatch
+):
+    owned = tmp_path / "Sorigul_SelfTest_fixed"
+    original_local = "C:/original/local"
+    original_home = "C:/original/home"
+    monkeypatch.setenv("LOCALAPPDATA", original_local)
+    monkeypatch.setenv("HOME", original_home)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cleaned = []
+
+    def create_temp_root(**kwargs):
+        assert kwargs["prefix"] == "Sorigul_SelfTest_"
+        owned.mkdir()
+        return str(owned)
+
+    def remove_tree(path):
+        cleaned.append(Path(path))
+
+    with sidecar_main._isolated_self_test_app_data(create_temp_root, remove_tree) as root:
+        assert root == owned.resolve()
+        assert Path(os.environ["LOCALAPPDATA"]).resolve() == (root / "LocalAppData")
+        assert Path(os.environ["HOME"]).resolve() == (root / "Home")
+        assert Path(os.environ["XDG_CONFIG_HOME"]).resolve() == (root / "XdgConfig")
+
+        from src.utils.paths import get_app_data_dir
+
+        resolved = get_app_data_dir()
+        assert sidecar_main._is_path_within(resolved, root)
+        assert not sidecar_main._is_path_within(resolved, Path(original_local))
+
+    assert os.environ["LOCALAPPDATA"] == original_local
+    assert os.environ["HOME"] == original_home
+    assert "XDG_CONFIG_HOME" not in os.environ
+    assert cleaned == [owned.resolve()]
+
+
+def test_self_test_app_data_context_restores_environment_after_check_exception(
+    tmp_path, monkeypatch
+):
+    owned = tmp_path / "Sorigul_SelfTest_exception"
+    monkeypatch.setenv("LOCALAPPDATA", "original-local")
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cleaned = []
+
+    def create_temp_root(**kwargs):
+        owned.mkdir()
+        return str(owned)
+
+    with pytest.raises(RuntimeError, match="check failed"):
+        with sidecar_main._isolated_self_test_app_data(
+            create_temp_root, lambda path: cleaned.append(Path(path))
+        ):
+            raise RuntimeError("check failed")
+
+    assert os.environ["LOCALAPPDATA"] == "original-local"
+    assert "HOME" not in os.environ
+    assert "XDG_CONFIG_HOME" not in os.environ
+    assert cleaned == [owned.resolve()]
+
+
+def test_self_test_app_data_cleanup_failure_is_explicit_and_never_expands_target(
+    tmp_path, monkeypatch
+):
+    owned = tmp_path / "Sorigul_SelfTest_cleanup"
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    cleanup_targets = []
+
+    def create_temp_root(**kwargs):
+        owned.mkdir()
+        return str(owned)
+
+    def fail_cleanup(path):
+        cleanup_targets.append(Path(path))
+        raise OSError("locked")
+
+    with pytest.raises(
+        sidecar_main.SelfTestAppDataCleanupError,
+        match="SELF_TEST_APP_DATA_CLEANUP_FAILED",
+    ):
+        with sidecar_main._isolated_self_test_app_data(create_temp_root, fail_cleanup):
+            pass
+
+    assert cleanup_targets == [owned.resolve()]
+    assert "LOCALAPPDATA" not in os.environ
+    assert "HOME" not in os.environ
+    assert "XDG_CONFIG_HOME" not in os.environ
+
+
+def test_self_test_establishes_isolation_before_application_import(monkeypatch):
+    observed = {}
+
+    def run_checks(checks, progress):
+        check_map = dict(checks)
+        observed["local"] = os.environ["LOCALAPPDATA"]
+        observed["home"] = os.environ["HOME"]
+        observed["xdg"] = os.environ["XDG_CONFIG_HOME"]
+        check_map["self_test_app_data_isolation"]()
+        check_map["fastapi_app_import"]()
+        return True
+
+    monkeypatch.setattr(sidecar_main, "_run_self_test_checks", run_checks)
+
+    assert sidecar_main._self_test() == 0
+    assert "Sorigul_SelfTest_" in observed["local"]
+    assert "Sorigul_SelfTest_" in observed["home"]
+    assert "Sorigul_SelfTest_" in observed["xdg"]
 
 
 def test_candidate_validation_precedes_transactional_promotion():
@@ -176,7 +290,9 @@ def test_candidate_validation_precedes_transactional_promotion():
 
 def test_installer_requires_one_current_run_msi_and_manifest_resource():
     installer = (REPO_ROOT / "scripts/build_windows_installer.ps1").read_text(encoding="utf-8")
-    config = (REPO_ROOT / "frontend/src-tauri/tauri.conf.json").read_text(encoding="utf-8")
+    release_config = (
+        REPO_ROOT / "frontend/src-tauri/tauri.release.conf.json"
+    ).read_text(encoding="utf-8")
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
 
     assert "Select-Object -First 1" not in installer
@@ -186,7 +302,11 @@ def test_installer_requires_one_current_run_msi_and_manifest_resource():
     assert "MSI_CURRENT_RUN_ARTIFACT_MISSING" in installer
     assert "MSI_CURRENT_RUN_ARTIFACT_AMBIGUOUS" in installer
     assert "BUILD_MANIFEST_MISSING" in installer
-    assert '"binaries/sorigul-build-manifest.json": "sorigul-build-manifest.json"' in config
+    assert (
+        '"binaries/sorigul-build-manifest.json": "sorigul-build-manifest.json"'
+        in release_config
+    )
+    assert "tauri.release.conf.json" in installer
     assert "frontend/src-tauri/binaries/sorigul-build-manifest.json" in gitignore.splitlines()
 
 

@@ -1,5 +1,5 @@
 openai-whisper==20250625
-fastapi
-uvicorn
-python-multipart
-cryptography
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
+cryptography==50.0.1
