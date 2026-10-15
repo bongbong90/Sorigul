@@ -5,7 +5,9 @@ import { Card } from '../ui/Card'
 
 export type QueueStatus =
   | 'WAITING'
+  | 'PREPARING'
   | 'TRANSCRIBING'
+  | 'SAVING'
   | 'VERIFYING'
   | 'DONE'
   | 'FAILED'
@@ -35,7 +37,9 @@ interface QueueTableProps {
 
 const statusPresentation = {
   WAITING: { label: '대기', tone: 'waiting' as const },
+  PREPARING: { label: '준비 중', tone: 'preparing' as const },
   TRANSCRIBING: { label: '전사 중', tone: 'transcribing' as const },
+  SAVING: { label: '저장 중', tone: 'preparing' as const },
   VERIFYING: { label: '검증 중', tone: 'verifying' as const },
   DONE: { label: '완료', tone: 'done' as const },
   FAILED: { label: '실패', tone: 'failed' as const },

@@ -102,6 +102,7 @@ class JobManager:
         engine: str = "local_whisper",
         engine_config: Optional[dict] = None,
         force_retranscribe: bool = False,
+        upload_to_drive: bool = False,
     ) -> JobModel:
         job_id = str(uuid.uuid4())
         job = JobModel(
@@ -111,6 +112,7 @@ class JobManager:
             engine=engine,
             engine_config=engine_config or {},
             force_retranscribe=force_retranscribe,
+            upload_to_drive=upload_to_drive,
             total_files=len(file_ids),
             done_files=0,
             failed_files=0,

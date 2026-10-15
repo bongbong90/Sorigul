@@ -71,10 +71,14 @@ class TranscriptionRunner:
         job_manager: JobManager,
         engine_resolver: Callable[[JobModel], TranscriptionEngine],
         output_writer: Optional[OutputBundleWriter] = None,
+        file_completed_callback: Optional[Callable[[str, str, str], None]] = None,
+        job_finished_callback: Optional[Callable[[JobModel], None]] = None,
     ):
         self.job_manager = job_manager
         self.engine_resolver = engine_resolver
         self.output_writer = output_writer or OutputBundleWriter()
+        self.file_completed_callback = file_completed_callback
+        self.job_finished_callback = job_finished_callback
 
     def run(self, job_id: str, token: CancellationToken):
         job = self.job_manager.get_job(job_id)
@@ -157,6 +161,8 @@ class TranscriptionRunner:
                 token.raise_if_requested()
                 self._set_file_state(job_id, file_id, FileStatus.DONE, item.filename)
                 self._event(job_id, "info", "File", "파일 전사 완료", file_id, item.filename)
+                if self.file_completed_callback is not None:
+                    self.file_completed_callback(job_id, file_id, item.filename)
             except StopRequested:
                 self._set_file_state(job_id, file_id, FileStatus.STOPPED, item.filename)
                 self._event(job_id, "warning", "Stop", "사용자가 전사를 중지함", file_id, item.filename)
@@ -265,6 +271,7 @@ class TranscriptionRunner:
 
         def mutation(job: JobModel):
             job.status = FileStatus.FAILED
+            job.batch_completed = False
             first_waiting = next(
                 (file_id for file_id, state in job.files.items() if state == FileStatus.WAITING),
                 None,
@@ -309,18 +316,28 @@ class TranscriptionRunner:
                     if state in {FileStatus.WAITING, FileStatus.CANCEL_REQUESTED}:
                         job.files[file_id] = FileStatus.CANCELLED
                 job.status = FileStatus.CANCELLED
+                job.batch_completed = False
             elif token.is_stop_requested or job.status == FileStatus.STOPPED:
                 job.status = FileStatus.STOPPED
-            elif fatal_error or any(state == FileStatus.FAILED for state in job.files.values()):
+                job.batch_completed = False
+            elif fatal_error:
                 job.status = FileStatus.FAILED
+                job.batch_completed = False
+            elif any(state == FileStatus.FAILED for state in job.files.values()):
+                job.status = FileStatus.FAILED
+                job.batch_completed = True
             elif all(state == FileStatus.DONE for state in job.files.values()):
                 job.status = FileStatus.DONE
+                job.batch_completed = True
             job.current_file = None
             job.current_progress = None
             self._update_counts(job)
             job.events.append(JobEvent(level="info", category="Job", message="Job 완료"))
 
         self.job_manager.mutate_job(job_id, mutation)
+        finished = self.job_manager.get_job(job_id)
+        if finished is not None and self.job_finished_callback is not None:
+            self.job_finished_callback(finished)
 
     @staticmethod
     def _update_counts(job: JobModel):

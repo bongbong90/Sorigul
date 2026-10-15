@@ -206,6 +206,20 @@
   background-color: var(--color-primary);
 }
 
+.progress-indeterminate {
+  overflow: hidden;
+}
+
+.progress-indeterminate .progress-fill {
+  width: 35%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-indeterminate {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(300%); }
+}
+
 /* Card / Surface */
 
 .card {
