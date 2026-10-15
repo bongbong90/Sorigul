@@ -152,6 +152,47 @@ def test_cuda_and_python_release_contracts_remain_exact():
     assert "requirements-torch-cuda.txt" not in core_build_script
 
 
+def test_current_manifest_ownership_routes_local_identity_away_from_core():
+    contract = read_repo("docs/project/CURRENT_PRODUCT_CONTRACT.md")
+    truth = SOURCE_OF_TRUTH.read_text(encoding="utf-8")
+
+    for requirement in (
+        "Core build manifest owns Core provenance only",
+        "Core manifest MUST NOT own `torch_requirement` / `expected_cuda`",
+        "Local Runtime manifest owns Local runtime identity",
+        'torch_requirement = "torch==2.13.0+cu130"',
+        'expected_cuda = "13.0"',
+        "Runtime discovery is the fail-closed consumer of Local-only metadata",
+        "Local/Core `source_head` pairing remains mandatory",
+    ):
+        assert requirement in contract
+    assert "in the **Local Runtime manifest**" in truth
+    assert "Historical pre-split Core" in truth
+    assert "is superseded by Current Product Contract §7" in truth
+
+
+def test_current_release_gate_orders_fresh_split_artifacts_before_installed_cuda():
+    status = read_repo("docs/release/CURRENT_RELEASE_STATUS.md")
+    steps = re.findall(r"^\d+\. (.+)$", status, re.MULTILINE)
+    gates = (
+        "Release Freeze:",
+        "fresh Local Runtime build",
+        "fresh Core build",
+        "fresh MSI",
+        "clean install",
+        "installed Core/Local provenance pairing",
+        "installed CUDA synthetic tensor",
+        "only then actual Local MP3 gate",
+    )
+    positions = [next(i for i, step in enumerate(steps) if step.startswith(gate)) for gate in gates]
+
+    assert positions == sorted(positions)
+    assert "fresh current-HEAD CUDA sidecar" not in status
+    assert "#113 remains BLOCKED until the prerequisites complete" in status
+    assert "separate 6A-R3c Core" in status
+    assert "one branch, one frozen HEAD and one artifact session" in status
+
+
 def test_no_paid_ci_workflow_exists():
     workflows = REPO_ROOT / ".github/workflows"
 
