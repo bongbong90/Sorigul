@@ -2,6 +2,8 @@
 
 > 이 파일은 74건 전체 이력 검토의 마지막 4건. 본문은 원본 변경 파일 API와 PR 원문 기반. 테스트 수치는 과거 범위 한정.
 
+<a id="pr-183"></a>
+
 ## [PR #183](https://github.com/bongbong90/Sorigul/pull/183) · Eduwill no-week filename
 
 - **원본:** feat: manual week input + Eduwill no-week normalization (#180); CLOSED / GitHub 병합 아님; HEAD `36ac439c7f631c86e4c5263582d44755ea41c230`; base `fix/174-guarded-tray-exit`.
@@ -12,6 +14,8 @@
 - **당시 검증 문구:** Refs #180 (stays OPEN — SOURCE PASS / INSTALLED RETEST PENDING). Stacked on #182. Do not merge. / - Backend full: 730 passed, 2 skipped (includes the new 'test_manual_week_normalization.py', 98 tests). / - Root 'pytest tests' under Windows PowerShell 5.1: 211 passed (includes the #170/#171 page harnesses, the new #180 page harness with 18 scenarios, and the #168/#173/#174 contracts / - Frontend lint, typecheck and build: PASS. 'git diff --check': clean..
 - **지금 문제 생기면:** #192 중개사법 파일명 예외와 교차; 기존 파일 덮어쓰기·중복 순번·반드시 확인 단계 유지.
 - **최종 경계:** 이 PR HEAD는 현 Integration 조상. 최신 파일 소스가 반드시 같은 로직이라는 증거는 아님.
+
+<a id="pr-186"></a>
 
 ## [PR #186](https://github.com/bongbong90/Sorigul/pull/186) · Final prefreeze reconciliation
 
@@ -24,6 +28,8 @@
 - **지금 문제 생기면:** 당시 10/31 계획은 최신 10/25 일정으로 상위 변경됨; stale 계획을 출시 판정에 재사용 금지.
 - **최종 경계:** 이 PR HEAD는 현 Integration 조상. 최신 파일 소스가 반드시 같은 로직이라는 증거는 아님.
 
+<a id="pr-187"></a>
+
 ## [PR #187](https://github.com/bongbong90/Sorigul/pull/187) · Final #123 source audit
 
 - **원본:** audit: final #123 source regression and classification closure; CLOSED / GitHub 병합 아님; HEAD `035db132609b9ed298f1f4c1d8aacd838bd41056`; base `docs/pre-freeze-plan-reconciliation`.
@@ -34,6 +40,8 @@
 - **당시 검증 문구:** ## #123 Source-of-Truth Classification Closure — PASS (2026-10-07 KST) / - Windows PowerShell **5.1.26100.9444 Desktop**, repository venv: focused release-readiness **14 PASS**; exact-once, duplicate prevention, allowed classification set and historical / - Final committed-tree focused rerun at '035db132609b9ed298f1f4c1d8aacd838bd41056': **14 PASS**. Working/staged diff checks **PASS**; tracked tree/index **CLEAN**. Five pre-existin / #123 final full source regression at the current consolidated candidate is **PASS**. Production code/tests/contracts are unchanged; the only tracked change is the new fixed regress / - P0/P1 source blockers: **0**. SOURCE FULL REGRESSION = PASS. PRODUCT-SOURCE PARITY = COMPLETE..
 - **지금 문제 생기면:** #199/#201과 마찬가지로 새 HEAD에서 테스트 재실행이 필요하며 과거 #123 PASS를 대체 사용하지 않음.
 - **최종 경계:** 이 PR HEAD는 현 Integration 조상. 최신 파일 소스가 반드시 같은 로직이라는 증거는 아님.
+
+<a id="pr-188"></a>
 
 ## [PR #188](https://github.com/bongbong90/Sorigul/pull/188) · Heartbeat read/replace race
 
