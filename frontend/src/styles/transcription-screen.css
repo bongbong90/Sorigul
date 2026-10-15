@@ -187,6 +187,11 @@
   accent-color: var(--color-primary);
 }
 
+.selection-cell input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-primary);
+  outline-offset: var(--focus-ring-offset);
+}
+
 .queue-filename {
   display: block;
   overflow: hidden;
