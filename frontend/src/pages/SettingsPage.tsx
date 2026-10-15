@@ -10,6 +10,7 @@ import { Card } from '../components/ui/Card'
 const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
   close_behavior: 'tray', shutdown: 'disabled',
+  transcription_folder: null, last_course: null, last_subject: null, subject_stage_overrides: {},
 }
 const shutdownOptions: Array<[RuntimeSettings['shutdown'], string]> = [
   ['disabled', '사용 안 함'], ['immediate', '즉시'], ['15_seconds', '15초 후'], ['30_seconds', '30초 후'],
