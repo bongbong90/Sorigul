@@ -2,6 +2,8 @@
 
 > 원본 PR 제목·본문 및 변경 파일/patch 기준. HEAD가 현 Integration의 조상이어도 **현재 동일 코드**라는 뜻은 아니다. 실제 Drive·CUDA·MP3의 현 상태는 새 gate를 통해 판단.
 
+<a id="pr-88"></a>
+
 ## [PR #88](https://github.com/bongbong90/Sorigul/pull/88) · Refinement plan
 
 - **원본:** Core workflow refinement plan; CLOSED / GitHub 미병합; HEAD `1399faec2b661acead4e36cb916c9276e9e0e24b`; 원래 base `validation/full-feature-parity-release`.
@@ -12,6 +14,8 @@
 - **원본 PR의 검증 문구:** 구체 실행 결과가 본문에 없음 — 미확인.
 - **재발 시 추적:** D11+ 결정은 이후 승인 문서 우선순위에 따라 해석.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
+
+<a id="pr-89"></a>
 
 ## [PR #89](https://github.com/bongbong90/Sorigul/pull/89) · Phase 1 classifier/normalizer
 
@@ -24,6 +28,8 @@
 - **재발 시 추적:** 과목 별칭 #192, 이름 보존·충돌과 D12/D16 예외 대조.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
 
+<a id="pr-90"></a>
+
 ## [PR #90](https://github.com/bongbong90/Sorigul/pull/90) · Phase 2 Drive
 
 - **원본:** Core workflow Phase 2: Google Drive refinement; CLOSED / GitHub 미병합; HEAD `bbc0df2f0361c0ce016d8ce7bd52ecab93017058`; 원래 base `review/core-workflow-phase1`.
@@ -34,6 +40,8 @@
 - **원본 PR의 검증 문구:** 구체 실행 결과가 본문에 없음 — 미확인.
 - **재발 시 추적:** 실제 Drive 호출은 가상 테스트와 별도이며 #192/197과 연결 검토.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
+
+<a id="pr-91"></a>
 
 ## [PR #91](https://github.com/bongbong90/Sorigul/pull/91) · Phase 3A audio
 
@@ -46,6 +54,8 @@
 - **재발 시 추적:** MP3 메타정보·URL 검증 오류 시 프로브·정규화·연계 테스트 확인.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
 
+<a id="pr-92"></a>
+
 ## [PR #92](https://github.com/bongbong90/Sorigul/pull/92) · Phase 3B Colab
 
 - **원본:** Core workflow Phase 3B: Colab rendezvous and integration; CLOSED / GitHub 미병합; HEAD `0e61f19242fae173f19ec73f87ad084af4c70dd6`; 원래 base `review/core-workflow-phase3a-runtime`.
@@ -56,6 +66,8 @@
 - **원본 PR의 검증 문구:** 구체 실행 결과가 본문에 없음 — 미확인.
 - **재발 시 추적:** Colab Quick Tunnel/서버 비용·가용성은 실사용 시 별도 확인.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
+
+<a id="pr-93"></a>
 
 ## [PR #93](https://github.com/bongbong90/Sorigul/pull/93) · Phase 4 progress
 
@@ -68,6 +80,8 @@
 - **재발 시 추적:** 실측 진도와 추정치 혼동·화면 진행 표시 시 API/runner 및 UI 포맷 확인.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
 
+<a id="pr-94"></a>
+
 ## [PR #94](https://github.com/bongbong90/Sorigul/pull/94) · Phase 5A regression
 
 - **원본:** Core workflow Phase 5A: release regression suite; CLOSED / GitHub 미병합; HEAD `57b9d468253515b7989932ee67b49d1ca7be4d0e`; 원래 base `review/core-workflow-phase4-progress`.
@@ -78,6 +92,8 @@
 - **원본 PR의 검증 문구:** 구체 실행 결과가 본문에 없음 — 미확인.
 - **재발 시 추적:** 현 HEAD #123/#114가 최종 gate이며 과거 테스트 결과 자동 재사용 금지.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
+
+<a id="pr-95"></a>
 
 ## [PR #95](https://github.com/bongbong90/Sorigul/pull/95) · Phase 5B installed evidence
 
@@ -90,6 +106,8 @@
 - **재발 시 추적:** 과거 MSI/Runtime pairing 증거를 현재 HEAD 증거로 대체 사용하면 안 됨.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
 
+<a id="pr-96"></a>
+
 ## [PR #96](https://github.com/bongbong90/Sorigul/pull/96) · CUDA remediation
 
 - **원본:** CUDA release remediation; CLOSED / GitHub 미병합; HEAD `94a08f51fb5ee6f273fbb2ce5a38b7b557c5d75f`; 원래 base `review/core-workflow-phase5b-installed-validation`.
@@ -100,6 +118,8 @@
 - **원본 PR의 검증 문구:** - wait for packaged self-test completion / - #13 CUDA/ffmpeg self-test gap / - #10 historical self-test hang mitigation.
 - **재발 시 추적:** Runtime/Core 구분·CUDA 13.0 고정은 후속 #100/#98/현재 계약과 함께 재확인.
 - **계보:** 현 Integration에 조상으로 포함; 후속 PR과 최신 계약에 의해 수정되었을 수 있음.
+
+<a id="pr-98"></a>
 
 ## [PR #98](https://github.com/bongbong90/Sorigul/pull/98) · Scalar provenance
 
