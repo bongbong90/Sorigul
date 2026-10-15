@@ -2,6 +2,8 @@
 
 > 원본 GitHub changed-file/patch·PR 본문 기준. HEAD ancestor를 확인한 상태이나 하위 문서의 'PASS'는 작성 당시 한정. 고객 실사용과 현 릴리스 판정은 별도.
 
+<a id="pr-100"></a>
+
 ## [PR #100](https://github.com/bongbong90/Sorigul/pull/100) · Runtime split
 
 - **원본:** refactor: split Local Whisper runtime from Core; CLOSED / 직접 병합 아님; HEAD `b34a7cd012403552b0e98376d39e7003e7e4cb2c`; 원래 base `fix/release-manifest-scalar-provenance`.
@@ -12,6 +14,8 @@
 - **원본 PR의 검증 표기:** - PowerShell syntax: PASS / - git diff --check: PASS.
 - **문제 재발 시:** #191의 Core/Local provenance pairing 실패 시 manifest와 split-boundary 빌드·탐색 코드를 대조.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
+
+<a id="pr-102"></a>
 
 ## [PR #102](https://github.com/bongbong90/Sorigul/pull/102) · Prebuild provenance
 
@@ -24,6 +28,8 @@
 - **문제 재발 시:** 잘못된 Local 산출물 수용을 막는 fail-closed 로직과 build script 확인.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
 
+<a id="pr-103"></a>
+
 ## [PR #103](https://github.com/bongbong90/Sorigul/pull/103) · Installed synthetic split QA
 
 - **원본:** test: validate split runtime installed synthetic gate; CLOSED / 직접 병합 아님; HEAD `10f369a15bda49c2e3277a1ecac7aace432cd6e7`; 원래 base `fix/local-runtime-prebuild-hardening`.
@@ -34,6 +40,8 @@
 - **원본 PR의 검증 표기:** - Local Runtime build: PASS — 1,911.45 MiB, SHA-256 '7504ca7811434e5ba0d633135d445994585ca551a83891eb6b414148f34b302a' / - Local CUDA synthetic: PASS — protocol 1, 'device=cuda', clean exit / - Core build: PASS — 35.05 MiB, SHA-256 'c106ddea7ab2e6989d284b2fb93630b6d9f5113f7a2f16f98f4a8d456fdab8b9'.
 - **문제 재발 시:** synthetic 통과와 실제 사용자 MP3/일반 프로필 구분 필수.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
+
+<a id="pr-105"></a>
 
 ## [PR #105](https://github.com/bongbong90/Sorigul/pull/105) · Korean CUDA speech fixture
 
@@ -46,6 +54,8 @@
 - **문제 재발 시:** 사용자 #47 학습강의 실제 재생·전사 품질 검증을 대체하지 않음.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
 
+<a id="pr-115"></a>
+
 ## [PR #115](https://github.com/bongbong90/Sorigul/pull/115) · Legacy parity completion roadmap
 
 - **원본:** docs: rebaseline full Legacy parity completion plan (planning/checkpoint only); CLOSED / 직접 병합 아님; HEAD `80bc2f2cd2d95e66d52fddc6d091f89df8fa1180`; 원래 base `test/korean-real-speech-fixture`.
@@ -56,6 +66,8 @@
 - **원본 PR의 검증 표기:** Official deadline updated in #116 and #7. Historical 2026-10-31 checkpoints below remain audit history only. Goal: installed, working Korean MP3 Local-GPU study transcription with  / - Source/upstream/tracked identity and existing Freeze: 250/250 PASS, unchanged. No new Freeze or canonical preflight rerun. / - New canonical session ACTIVE and Single Writer acquisition/competition denial PASS..
 - **문제 재발 시:** 과거 마감·계획 기록은 현 10/25 마감 및 최신 Current Product Contract를 덮지 않음.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
+
+<a id="pr-117"></a>
 
 ## [PR #117](https://github.com/bongbong90/Sorigul/pull/117) · Contract/governance lock
 
@@ -68,6 +80,8 @@
 - **문제 재발 시:** Issue/PR 절차·외부 유료 서비스 금지·Historical vs Current 충돌 해석.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
 
+<a id="pr-119"></a>
+
 ## [PR #119](https://github.com/bongbong90/Sorigul/pull/119) · Engine parity
 
 - **원본:** fix: restore Local and Colab transcription engine parity; CLOSED / 직접 병합 아님; HEAD `d95a5d9281b3144f209500f7ff193a4216703c76`; 원래 base `docs/governance-contract-lock`.
@@ -78,6 +92,8 @@
 - **원본 PR의 검증 표기:** - frontend lint: PASS / - frontend typecheck: PASS / - frontend production build: PASS.
 - **문제 재발 시:** CPU/GPU fallback·Colab 모델 선택·실 API와 mock 결과를 구별.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
+
+<a id="pr-120"></a>
 
 ## [PR #120](https://github.com/bongbong90/Sorigul/pull/120) · Actionable notification
 
@@ -90,6 +106,8 @@
 - **문제 재발 시:** 알림 경로 접근, Native 소유 폴더 검증과 트레이 운영을 함께 확인.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
 
+<a id="pr-121"></a>
+
 ## [PR #121](https://github.com/bongbong90/Sorigul/pull/121) · Live folder updates
 
 - **원본:** feat: restore live transcription-folder change detection; CLOSED / 직접 병합 아님; HEAD `71d6920f2ded69868c877916af3095130099e838`; 원래 base `fix/notification-folder-open-parity`.
@@ -100,6 +118,8 @@
 - **원본 PR의 검증 표기:** - revision targeted ('backend/tests/test_folder_revision.py'): 19 passed, 1 skipped (symlink creation not permitted on host) / - root contracts: 40 passed (incl. Node-driven watcher behavior test: no storm, max 1 in flight, stop/abort; mutation-checked) / - frontend lint / typecheck / build: PASS.
 - **문제 재발 시:** stale scan/폴더 변경 시 #170, Job 선택 상태와 동기화 점검.
 - **현재 이력:** PR HEAD가 Integration의 조상. 해당 파일의 최신 내용이 이 패치와 같은지는 보장하지 않으며 현재 검증으로 다시 판정.
+
+<a id="pr-129"></a>
 
 ## [PR #129](https://github.com/bongbong90/Sorigul/pull/129) · Full parity source audit
 
