@@ -59,6 +59,19 @@ def test_file_scan_and_completion(test_dir):
     assert names["no_srt.mp3"].completion_status == BundleStatus.INCOMPLETE
     assert names["invalid_json.mp3"].completion_status == BundleStatus.INVALID_RESULT
 
+
+def test_file_scan_rejects_invalid_segment(tmp_path):
+    source = tmp_path / "invalid_segment.mp3"
+    source.touch()
+    source.with_suffix(".txt").write_text("bad", encoding="utf-8")
+    source.with_suffix(".srt").touch()
+    source.with_suffix(".json").write_text(
+        '{"text":"bad","segments":[{"start":2,"end":1,"text":"bad"}]}',
+        encoding="utf-8",
+    )
+    scanned = FileScanner(str(tmp_path)).scan()
+    assert scanned[0].completion_status == BundleStatus.INVALID_RESULT
+
 def test_filename_normalization():
     norm = FilenameNormalizer()
 
