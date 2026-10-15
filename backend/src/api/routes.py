@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,6 +17,7 @@ from src.services.renamer import BundleRenamer, RenameStatus, UnsafeStemError, v
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
+    ExecutionInvariantError,
     DefaultEngineResolver,
     TranscriptionRunner,
 )
@@ -48,6 +50,7 @@ from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Simple dependency injection
@@ -456,6 +459,36 @@ def create_job(req: CreateJobRequest):
 def list_jobs():
     return job_manager.list_jobs()
 
+OTHER_RUN_ACTIVE_MESSAGE = (
+    "다른 전사 작업이 이미 실행 중입니다. 기존 작업이 종료된 뒤 다시 시도해 주세요."
+)
+
+
+def _other_run_active(job_id: str) -> bool:
+    try:
+        active = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return True
+    return active is not None and active != job_id
+
+
+@router.get("/execution/active-job", response_model=Optional[JobModel])
+def get_active_execution_job():
+    """Read-only: the Job whose runner Future has not yet returned (the
+    authoritative single-run owner), or null when idle."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    if active_id is None:
+        return None
+    job = job_manager.get_job(active_id)
+    if job is None:
+        logger.error("Active transcription run has no persisted Job")
+        raise HTTPException(status_code=500, detail="실행 중인 전사 상태를 확인하지 못했습니다.")
+    return job
+
+
 @router.get("/jobs/{job_id}", response_model=JobModel)
 def get_job(job_id: str):
     job = job_manager.get_job(job_id)
@@ -565,6 +598,10 @@ def job_action(job_id: str, req: JobActionRequest):
         current = job_manager.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job not found")
+        # Retry never prepares a second run while another Job executes; the
+        # Job keeps its terminal state. start() remains the atomic guard.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         # Retry opens only once the previous run persisted its terminal
         # state; a Stop/Cancel that is merely requested keeps it closed.
         if execution_service.is_active(job_id) or current.status in {
@@ -618,6 +655,9 @@ def start_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not execution_service.start(job_id):
+        # start() is the atomic single-run guard; this only picks the message.
+        if _other_run_active(job_id):
+            raise HTTPException(status_code=409, detail=OTHER_RUN_ACTIVE_MESSAGE)
         latest = job_manager.get_job(job_id)
         if latest is not None and latest.status == FileStatus.WAITING:
             raise HTTPException(

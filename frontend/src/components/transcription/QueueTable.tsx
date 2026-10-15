@@ -33,6 +33,7 @@ interface QueueTableProps {
   onToggleAll: () => void
   onRetry: (id: string) => void
   onRetranscribe: (id: string) => void
+  actionsDisabled?: boolean
 }
 
 const statusPresentation = {
@@ -60,6 +61,7 @@ export function QueueTable({
   onToggleAll,
   onRetry,
   onRetranscribe,
+  actionsDisabled = false,
 }: QueueTableProps) {
   const selectAllRef = useRef<HTMLInputElement>(null)
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
@@ -141,6 +143,7 @@ export function QueueTable({
                         className="icon-action"
                         aria-label={`${row.filename} 다시 전사`}
                         title="다시 전사"
+                        disabled={actionsDisabled}
                         onClick={() => onRetranscribe(row.id)}
                       >
                         <MoreHorizontal aria-hidden="true" focusable="false" />
@@ -152,6 +155,7 @@ export function QueueTable({
                         className="icon-action"
                         aria-label={`${row.filename} 다시 시도`}
                         title="다시 시도"
+                        disabled={actionsDisabled}
                         onClick={() => onRetry(row.id)}
                       >
                         <RotateCcw aria-hidden="true" focusable="false" />
