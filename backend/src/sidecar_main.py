@@ -21,6 +21,11 @@ from typing import Callable, Iterable
 
 
 BUNDLED_FFMPEG_TIMEOUT_SECONDS = 15
+JOB_STORAGE_EXIT_CODES = {
+    "JOB_STORAGE_READ_FAILED": 20,
+    "JOB_STORAGE_QUARANTINE_FAILED": 21,
+    "JOB_STORAGE_WRITE_FAILED": 22,
+}
 REQUIRED_SELF_TEST_CHECKS = (
     "fastapi_app_import",
     "uvicorn_import",
@@ -137,6 +142,11 @@ def _run_self_test_checks(
     return ok
 
 
+def job_storage_exit_code(code: str) -> int:
+    """Stable desktop boundary for startup-time jobs.json failures."""
+    return JOB_STORAGE_EXIT_CODES.get(code, 1)
+
+
 def _self_test() -> int:
 
     def check_fastapi_app() -> None:
@@ -229,7 +239,16 @@ def main(argv: "list[str] | None" = None) -> int:
 
     import uvicorn
 
-    from src.main import app
+    try:
+        from src.main import app
+    except Exception as exc:
+        # Importing routes constructs JobManager. Expose only a stable process
+        # code to the windowed parent, never a local path or traceback.
+        from src.services.job_manager import JobStorageError
+
+        if isinstance(exc, JobStorageError):
+            return job_storage_exit_code(exc.code)
+        raise
 
     uvicorn.run(app, host="127.0.0.1", port=args.port)
     return 0

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, Clipboard, Cloud, FileCheck2, RotateCcw, TriangleAlert, XCircle } from 'lucide-react'
-import { api, getUserMessage, type StructuredEvent } from '../api/client'
+import { api, getUserMessage, isRequestAbort, type StructuredEvent } from '../api/client'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -31,15 +31,25 @@ export function LogPage() {
 
   useEffect(() => {
     let active = true
+    let timer: number | undefined
+    let controller: AbortController | undefined
     async function refresh() {
+      controller = new AbortController()
       try {
-        const result = await api.events()
+        const result = await api.events(controller.signal)
         if (active) { setEvents(result); setError(undefined) }
-      } catch (cause) { if (active) setError(getUserMessage(cause)) }
+      } catch (cause) {
+        if (active && !isRequestAbort(cause)) setError(getUserMessage(cause))
+      } finally {
+        if (active) timer = window.setTimeout(() => void refresh(), 4000)
+      }
     }
     void refresh()
-    const timer = window.setInterval(() => void refresh(), 4000)
-    return () => { active = false; window.clearInterval(timer) }
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
+    }
   }, [])
 
   const visibleEvents = useMemo(() => events.filter((event) => filter === 'all' || eventLevel(event) === filter), [events, filter])

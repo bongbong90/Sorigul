@@ -2,7 +2,7 @@ import logging
 import math
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -640,7 +640,28 @@ class BackgroundExecutionService:
         self._futures: Dict[str, Future] = {}
         self._lock = threading.Lock()
 
+    QUIESCENCE_TIMEOUT_SECONDS = 2.0
+
+    def wait_for_quiescence(self, job_id: str, timeout: Optional[float] = None) -> bool:
+        """Wait for a previously registered runner to truly return."""
+        with self._lock:
+            previous = self._futures.get(job_id)
+        if previous is None or previous.done():
+            return True
+        try:
+            previous.result(
+                timeout=self.QUIESCENCE_TIMEOUT_SECONDS if timeout is None else timeout
+            )
+        except FutureTimeoutError:
+            return False
+        except Exception:
+            # An ended runner is quiescent even if it ended exceptionally.
+            return True
+        return True
+
     def start(self, job_id: str) -> bool:
+        if not self.wait_for_quiescence(job_id):
+            return False
         with self._lock:
             job = self.runner.job_manager.get_job(job_id)
             if job is None or job.status != FileStatus.WAITING:
