@@ -44,6 +44,7 @@ from src.services.results import (
     TextContent,
     job_folder_open_intent,
 )
+from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
 
@@ -137,6 +138,20 @@ class FolderScanRequest(BaseModel):
 def scan_results(req: FolderScanRequest):
     try:
         return results_service.scan(req.folder, req.filter)
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
+
+
+class FolderRevisionRequest(BaseModel):
+    folder: str
+
+
+@router.post("/folders/revision", response_model=FolderRevision)
+def get_folder_revision(req: FolderRevisionRequest):
+    # Read-only live-change probe (#111): top-level metadata of the one
+    # selected folder. No scan context, Job, or result-bundle mutation.
+    try:
+        return folder_revision(req.folder)
     except (FileNotFoundError, NotADirectoryError, OSError):
         raise HTTPException(status_code=400, detail="전사 폴더를 읽을 수 없습니다.")
 

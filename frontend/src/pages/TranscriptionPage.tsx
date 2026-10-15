@@ -13,6 +13,7 @@ import {
   type ScannedFile,
 } from '../api/client'
 import { pickFolder } from '../lib/native'
+import { useFolderRevision } from '../hooks/useFolderRevision'
 import { knownStageFor, overrideStageFor, validateClassificationText, type Stage } from '../lib/classification'
 import {
   classifyPreview,
@@ -193,22 +194,39 @@ export function TranscriptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const loadFolder = useCallback(async (signal?: AbortSignal) => {
+  const loadFolder = useCallback(async (signal?: AbortSignal): Promise<ScannedFile[] | undefined> => {
     if (!folder) {
       backendStatusRef.current = 'CONNECTED'
-      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return
+      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return []
     }
     try {
       const [scanned, jobs, drive] = await Promise.all([api.scan(folder, signal), api.jobs(signal), api.driveStatus(signal)])
+      if (signal?.aborted) return undefined
       const matching = jobs.filter((item) => item.folder === folder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
       backendStatusRef.current = 'CONNECTED'
       setFiles(scanned); setJob(matching); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
+      return scanned
     } catch (cause) {
-      if (isRequestAbort(cause)) return
+      if (isRequestAbort(cause)) return undefined
       backendStatusRef.current = 'OFFLINE'
       setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
+      return undefined
     }
   }, [folder])
+
+  // #111 live folder reconcile: re-read disk truth only (same loadFolder
+  // path as startup/manual). New MP3s appear unselected as WAITING rows;
+  // selections whose file vanished are dropped, the rest are kept. Never
+  // creates, starts, retries or re-transcribes a Job.
+  const reconcileFolderChange = useCallback(async (signal: AbortSignal) => {
+    const scanned = await loadFolder(signal)
+    if (!scanned || signal.aborted) return
+    const present = new Set(scanned.map((file) => file.id))
+    setSelectedIds((current) => {
+      const kept = current.filter((id) => present.has(id))
+      return kept.length === current.length ? current : kept
+    })
+  }, [loadFolder])
 
   // A packaged Tauri cold start can have the frontend polling before the
   // backend sidecar is up, so settings/folder adoption must happen again
@@ -306,6 +324,12 @@ export function TranscriptionPage() {
   const isProcessing = Boolean(job && ACTIVE_STATES.has(job.status))
   const canControl = Boolean(job && ['PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING'].includes(job.status))
   const runState: CurrentTaskStatus = job ? (job.status as CurrentTaskStatus) : 'IDLE'
+
+  // Legacy deferred watcher refreshes while transcribing to keep rows stable.
+  // An active Job already refreshes through its own poll, and TXT/JSON/SRT
+  // written mid-run must not trigger per-second rescans; the preflight
+  // renames likewise own their reload. Back to idle reconciles once.
+  useFolderRevision(folder, reconcileFolderChange, isProcessing || isPreflighting)
 
   async function changeFolder() {
     const value = await pickFolder(folder)
