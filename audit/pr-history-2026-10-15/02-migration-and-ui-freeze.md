@@ -2,6 +2,8 @@
 
 > 자료: 원본 PR 본문과 GitHub 원본 변경파일 API의 patch. 모든 HEAD는 현 Integration `38b856a0...` 조상임을 비교 검증. PR CLOSED/unmerged는 GitHub에서 직접 MERGED 처리된 기록이 아니라는 구분 필수.
 
+<a id="pr-78"></a>
+
 ## [PR #78](https://github.com/bongbong90/Sorigul/pull/78) · Migration contract review
 
 - **원본:** Migration contract review and lock; CLOSED / 직접 MERGED 아님; HEAD `94d83d6a6be50bde01e6bfa4410e58e16ead3119`; 원래 base `audit/legacy-feature-parity`.
@@ -12,6 +14,8 @@
 - **PR 본문 검증 흔적:** 본문에 구체 테스트 수치 없음(미확인).
 - **다음 장애 시 확인:** 현재 계약 우선순위를 적용하며 오래된 migration review를 현행 승인으로 오인하지 않음.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
+
+<a id="pr-79"></a>
 
 ## [PR #79](https://github.com/bongbong90/Sorigul/pull/79) · Baseline sync
 
@@ -24,6 +28,8 @@
 - **다음 장애 시 확인:** 프로젝트 초기 설정 및 문서 불일치 시 baseline 문서 히스토리 대조.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
 
+<a id="pr-80"></a>
+
 ## [PR #80](https://github.com/bongbong90/Sorigul/pull/80) · UI gap closure
 
 - **원본:** Close migration-contract UI gaps; CLOSED / 직접 MERGED 아님; HEAD `9005f67596d26f9325c535a72bd10bb8c79c350c`; 원래 base `docs/contract-baseline-sync`.
@@ -34,6 +40,8 @@
 - **PR 본문 검증 흔적:** 본문에 구체 테스트 수치 없음(미확인).
 - **다음 장애 시 확인:** 전사·로그·폴더·설정 화면과 Legacy UI 계약 차이 조사 진입점.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
+
+<a id="pr-81"></a>
 
 ## [PR #81](https://github.com/bongbong90/Sorigul/pull/81) · UI state validation
 
@@ -46,6 +54,8 @@
 - **다음 장애 시 확인:** 상태별 버튼 불일치/시각 오류 시 UI_STATE_MATRIX와 원 검증 기록 참조.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
 
+<a id="pr-82"></a>
+
 ## [PR #82](https://github.com/bongbong90/Sorigul/pull/82) · UI freeze v1
 
 - **원본:** Freeze Sorigul UI v1; CLOSED / 직접 MERGED 아님; HEAD `8b20a0836f82d7e4df55e28b1fef1f2fc8a4f0e7`; 원래 base `validation/ui-state-ux`.
@@ -56,6 +66,8 @@
 - **PR 본문 검증 흔적:** 본문에 구체 테스트 수치 없음(미확인).
 - **다음 장애 시 확인:** 후속 #193/#194 사용자 변경 승인과 초기 Freeze를 구분.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
+
+<a id="pr-83"></a>
 
 ## [PR #83](https://github.com/bongbong90/Sorigul/pull/83) · Backend job foundation
 
@@ -68,6 +80,8 @@
 - **다음 장애 시 확인:** Job API/파일분류 저장 결함 시 기본 migration 코드와 최신 routes/job_manager를 비교.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
 
+<a id="pr-84"></a>
+
 ## [PR #84](https://github.com/bongbong90/Sorigul/pull/84) · Transcription engines
 
 - **원본:** Migrate transcription engines; CLOSED / 직접 MERGED 아님; HEAD `28211075397156fa585ceea27889f3b19a4d1a3b`; 원래 base `feature/core-backend-file-job-migration`.
@@ -78,6 +92,8 @@
 - **PR 본문 검증 흔적:** 본문에 구체 테스트 수치 없음(미확인).
 - **다음 장애 시 확인:** Local/Colab 선택과 실행 오류는 최신 Runtime 소스와 후속 #119/#191 변경 함께 확인.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
+
+<a id="pr-85"></a>
 
 ## [PR #85](https://github.com/bongbong90/Sorigul/pull/85) · Drive and desktop UX
 
@@ -90,6 +106,8 @@
 - **다음 장애 시 확인:** OAuth/업로드/결과 폴더 불일치는 최신 Drive UI/Backend 계약으로 역추적.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
 
+<a id="pr-86"></a>
+
 ## [PR #86](https://github.com/bongbong90/Sorigul/pull/86) · Tauri sidecar OS
 
 - **원본:** Integrate Tauri desktop runtime and sidecar; CLOSED / 직접 MERGED 아님; HEAD `1f9aa647221589543f38ab6e5952d1ac06f04135`; 원래 base `review/drive-results-desktop-ux-clean`.
@@ -100,6 +118,8 @@
 - **PR 본문 검증 흔적:** - #3 Tauri desktop runtime smoke closure.
 - **다음 장애 시 확인:** 실행/중복실행/프로세스 잔류는 Tauri lib.rs·sidecar.rs 후속 #168/#174 참조.
 - **현재 계보:** HEAD는 Integration에 이미 포함. 이후 후속 PR로 내용이 변경·대체됐을 수 있으며 설치형/실제 MP3 동작은 별도 검증 필요.
+
+<a id="pr-87"></a>
 
 ## [PR #87](https://github.com/bongbong90/Sorigul/pull/87) · Parity release gate
 
