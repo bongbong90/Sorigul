@@ -1,3 +1,4 @@
+mod close_guard;
 mod completion_toast;
 mod shutdown;
 mod sidecar;
@@ -11,6 +12,11 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
+
+use close_guard::{
+    close_guard_url, fetch_close_guard, notice_body, CloseCheck, CloseOutcome, CloseRequestAction,
+};
 
 use completion_toast::{
     bottom_right_position, is_opaque_job_id, CompletionToastPayload, CompletionToastRequest,
@@ -32,6 +38,7 @@ struct AppState {
     sidecar_status: Mutex<SidecarStatusPayload>,
     shutdown_gate: ShutdownGate,
     close_behavior: Mutex<String>,
+    close_check: CloseCheck,
     completion_toast: Mutex<CompletionToastState>,
 }
 
@@ -593,10 +600,44 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn show_main_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.close_check.window_reopened();
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Background close-guard check for a `close_behavior = "exit"` close.
+/// Confirmed idle exits through `app.exit(0)`, so RunEvent::ExitRequested
+/// stays the single sidecar cleanup path. Active work or any doubt hides the
+/// window to the tray; the notice is best-effort and never weakens that.
+fn spawn_close_check(app: AppHandle, generation: u64) {
+    std::thread::spawn(move || {
+        let result = fetch_close_guard(&close_guard_url());
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let outcome = state.close_check.finish(generation, result);
+        match outcome {
+            CloseOutcome::ConfirmedExit => app.exit(0),
+            CloseOutcome::Superseded => {}
+            CloseOutcome::ProtectedHide(_) | CloseOutcome::SafeHide => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                if let Some(body) = notice_body(&outcome) {
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Sorigul")
+                        .body(body)
+                        .show();
+                }
+            }
+        }
+    });
 }
 
 pub fn run() {
@@ -613,6 +654,7 @@ pub fn run() {
             sidecar_status: Mutex::new(SidecarStatusPayload::starting()),
             shutdown_gate: ShutdownGate::new(),
             close_behavior: Mutex::new("tray".into()),
+            close_check: CloseCheck::default(),
             completion_toast: Mutex::new(CompletionToastState::default()),
         })
         .invoke_handler(tauri::generate_handler![
@@ -643,9 +685,9 @@ pub fn run() {
                 return;
             }
             if let WindowEvent::Destroyed = event {
-                // "exit" close of the main window: take the hidden toast down
-                // with it, so the last-window-closed exit (and its backend
-                // cleanup) still happens and no orphan toast window remains.
+                // Main window destroyed on a real exit: take the hidden toast
+                // down with it so no orphan toast window remains. A protected
+                // close only hides main, so the toast is left alone.
                 if let Some(toast) = window
                     .app_handle()
                     .get_webview_window(COMPLETION_TOAST_LABEL)
@@ -660,12 +702,19 @@ pub fn run() {
                     return;
                 };
                 let behavior = state.close_behavior.lock().unwrap().clone();
-                if behavior == "tray" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                // Always prevent first: with "exit" the app ends only after
+                // the backend confirms no active work (#128), and that check
+                // never runs on this callback.
+                api.prevent_close();
+                match state.close_check.on_close_requested(&behavior) {
+                    (CloseRequestAction::HideNow, _) => {
+                        let _ = window.hide();
+                    }
+                    (CloseRequestAction::CheckCriticalWork, generation) => {
+                        spawn_close_check(app.clone(), generation);
+                    }
+                    (CloseRequestAction::AlreadyChecking, _) => {}
                 }
-                // "exit": let the close proceed; RunEvent::ExitRequested
-                // below performs the owned-backend cleanup centrally.
             }
         })
         .build(tauri::generate_context!())
