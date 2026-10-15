@@ -19,6 +19,7 @@ from src.domain.transcription import (
     TranscriptionResult,
 )
 from src.services.output_bundle import BundlePaths, OutputBundleValidator
+from src.services.windows_system import resolve_system32_executable
 from src.utils.paths import get_app_data_dir
 
 
@@ -247,7 +248,13 @@ def _reap(process) -> None:
     if os.name == "nt" and getattr(process, "pid", None) is not None:
         try:
             completed = subprocess.run(
-                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                [
+                    str(resolve_system32_executable("taskkill.exe")),
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

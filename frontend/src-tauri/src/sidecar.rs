@@ -563,10 +563,17 @@ impl SidecarManager {
             let pid = owned.child.id();
             #[cfg(target_os = "windows")]
             {
-                let mut kill = Command::new("taskkill.exe");
-                kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-                kill.creation_flags(CREATE_NO_WINDOW);
-                let _ = kill.status();
+                match taskkill_tree_command(pid) {
+                    Ok(mut kill) => {
+                        let _ = kill.status();
+                    }
+                    // No trusted taskkill: kill the owned child directly so
+                    // the wait below cannot hang; the Job Object handle drop
+                    // still takes down the rest of the owned tree.
+                    Err(_) => {
+                        let _ = owned.child.kill();
+                    }
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -578,6 +585,18 @@ impl SidecarManager {
         }
         self.owned.store(false, Ordering::SeqCst);
     }
+}
+
+/// `System32\taskkill.exe /PID <pid> /T /F` by trusted absolute path
+/// (#122); never resolved through `PATH`.
+#[cfg(target_os = "windows")]
+fn taskkill_tree_command(pid: u32) -> Result<Command, String> {
+    let executable = crate::windows_system::SystemUtility::Taskkill.path()?;
+    let mut command = Command::new(executable);
+    command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -1322,5 +1341,28 @@ mod tests {
             .output()
             .expect("tasklist");
         String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    }
+
+    /// Inspects the cleanup command only; the real tree kill is exercised by
+    /// the owned-process cleanup tests above through `cleanup()`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_taskkill_uses_trusted_system32_path_for_owned_pid_only() {
+        let command = taskkill_tree_command(4242).unwrap();
+        let program = std::path::Path::new(command.get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(
+            program,
+            crate::windows_system::SystemUtility::Taskkill
+                .path()
+                .unwrap()
+        );
+        assert!(program
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .eq_ignore_ascii_case("System32"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["/PID", "4242", "/T", "/F"]);
     }
 }

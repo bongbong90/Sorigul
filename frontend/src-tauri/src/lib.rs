@@ -1,6 +1,8 @@
 mod completion_toast;
 mod shutdown;
 mod sidecar;
+#[cfg(target_os = "windows")]
+mod windows_system;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -316,22 +318,7 @@ fn place_completion_toast(app: &AppHandle, toast: &tauri::WebviewWindow) {
 fn open_in_explorer(folder: &str, item_filename: Option<&str>) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        let target = match item_filename {
-            Some(name) => {
-                let mut p = std::path::PathBuf::from(folder);
-                p.push(name);
-                p.to_string_lossy().into_owned()
-            }
-            None => folder.to_owned(),
-        };
-
-        std::process::Command::new("explorer.exe")
-            .arg(&target)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
+        explorer_command(folder, item_filename)?.spawn()?;
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -341,6 +328,33 @@ fn open_in_explorer(folder: &str, item_filename: Option<&str>) -> std::io::Resul
         std::process::Command::new("xdg-open").arg(folder).spawn()?;
         Ok(())
     }
+}
+
+/// `<Windows>\explorer.exe <target>` by trusted absolute path (#122); never
+/// resolved through `PATH`. Built separately so tests inspect it unlaunched.
+#[cfg(target_os = "windows")]
+fn explorer_command(
+    folder: &str,
+    item_filename: Option<&str>,
+) -> std::io::Result<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let target = match item_filename {
+        Some(name) => {
+            let mut p = std::path::PathBuf::from(folder);
+            p.push(name);
+            p.to_string_lossy().into_owned()
+        }
+        None => folder.to_owned(),
+    };
+
+    let explorer = windows_system::SystemUtility::Explorer
+        .path()
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::NotFound, err))?;
+    let mut command = std::process::Command::new(explorer);
+    command.arg(&target).creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
 }
 
 /// Minimal JSON string extractor -- avoids pulling in a full JSON crate
@@ -944,5 +958,29 @@ mod tests {
             extract_json_string(body, "folder"),
             Some("..\\..\\Windows\\System32".to_owned())
         );
+    }
+
+    /// Both `open_folder_by_intent` and `open_notification_folder` reach
+    /// Explorer only through `open_in_explorer` -> `explorer_command`.
+    /// Inspected only; Explorer is never launched here.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_command_uses_trusted_windows_directory_and_single_target_arg() {
+        let command = super::explorer_command("C:\\Lectures\\Week 1", Some("a b.txt")).unwrap();
+        let program = std::path::Path::new(command.get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(
+            program,
+            super::windows_system::SystemUtility::Explorer
+                .path()
+                .unwrap()
+        );
+        assert!(!program
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .eq_ignore_ascii_case("System32"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["C:\\Lectures\\Week 1\\a b.txt"]);
     }
 }
