@@ -52,7 +52,7 @@ drive_auth = GoogleOAuthService(
     app_data_dir / "auth" / "google_oauth_client.json",
     app_data_dir / "auth" / "google_drive_token.json",
 )
-drive_service = DriveUploadService(job_manager, drive_auth)
+drive_service = DriveUploadService(job_manager, drive_auth, settings_manager)
 engine_resolver = DefaultEngineResolver()
 
 

@@ -11,6 +11,7 @@ const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
   close_behavior: 'tray', shutdown: 'disabled',
   transcription_folder: null, last_course: null, last_subject: null, subject_stage_overrides: {},
+  drive_exam_root: '2026 제37회 공인중개사 자격시험',
 }
 const shutdownOptions: Array<[RuntimeSettings['shutdown'], string]> = [
   ['disabled', '사용 안 함'], ['immediate', '즉시'], ['15_seconds', '15초 후'], ['30_seconds', '30초 후'],
@@ -146,6 +147,7 @@ export function SettingsPage() {
           {shutdown?.phase === 'cancelled' ? <div className="setting-note"><Badge tone="cancelled">종료 취소됨</Badge><span>다음 정상 Job 완료 시 저장된 정책을 다시 적용합니다.</span></div> : null}
         </Card>
         <Card className="settings-card settings-card-wide"><div className="settings-card-heading"><Cloud aria-hidden="true" /><div><h3>Google Drive</h3><p>OAuth 인증 상태와 Desktop 브라우저 연결입니다.</p></div></div>
+          <label className="setting-row"><span><strong>Google Drive 시험 폴더</strong><small>결과물이 업로드될 최상위 폴더명</small></span><input type="text" className="text-input" value={settings.drive_exam_root} onChange={(event) => void save({ ...settings, drive_exam_root: event.target.value })} /></label>
           <div className="runtime-state-grid"><div><Badge tone={driveAuth === 'CONNECTED' ? 'done' : driveAuth === 'AUTHORIZING' ? 'preparing' : driveAuth === 'REFRESH_FAILED' || driveAuth === 'REAUTH_REQUIRED' ? 'failed' : 'waiting'}>{driveAuth ? driveAuthLabel[driveAuth] : '확인 중'}</Badge><span>Scope: https://www.googleapis.com/auth/drive</span></div></div>
           <div className="inline-actions"><Button variant="secondary" disabled={!isTauri()} onClick={() => void connectDrive()}>Google Drive 연결</Button></div>
           {driveMessage ? <div className="setting-note"><span>{driveMessage}</span></div> : null}

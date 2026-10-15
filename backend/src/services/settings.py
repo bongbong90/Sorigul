@@ -53,6 +53,7 @@ class RuntimeSettings(BaseModel):
     last_course: Optional[str] = None
     last_subject: Optional[str] = None
     subject_stage_overrides: StageOverrides = Field(default_factory=dict)
+    drive_exam_root: str = "2026 제37회 공인중개사 자격시험"
 
 
 class SettingsPatch(BaseModel):
@@ -65,6 +66,7 @@ class SettingsPatch(BaseModel):
     last_course: Optional[str] = None
     last_subject: Optional[str] = None
     subject_stage_overrides: Optional[StageOverrides] = None
+    drive_exam_root: Optional[str] = None
 
 
 class SettingsManager:
