@@ -8,14 +8,30 @@ use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    assert_eq!(args.len(), 4, "expected synthetic URL, isolated profile, CDP port");
-    assert!(args[1].starts_with("http://127.0.0.1:") && !args[1].starts_with("http://127.0.0.1:8000/"), "only the synthetic loopback fixture is allowed");
+    assert_eq!(
+        args.len(),
+        4,
+        "expected synthetic URL, isolated profile, CDP port"
+    );
+    assert!(
+        args[1].starts_with("http://127.0.0.1:") && !args[1].starts_with("http://127.0.0.1:8000/"),
+        "only the synthetic loopback fixture is allowed"
+    );
     let url = args[1].parse().expect("invalid synthetic URL");
     let profile = std::path::PathBuf::from(&args[2]);
     assert!(profile.is_absolute(), "isolated profile must be absolute");
-    let owned_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tmp").canonicalize().unwrap();
-    assert!(profile.canonicalize().unwrap().starts_with(owned_root), "profile must stay in workspace tmp");
-    let browser_args = format!("--remote-debugging-port={} --disable-background-networking", args[3]);
+    let owned_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tmp")
+        .canonicalize()
+        .unwrap();
+    assert!(
+        profile.canonicalize().unwrap().starts_with(owned_root),
+        "profile must stay in workspace tmp"
+    );
+    let browser_args = format!(
+        "--remote-debugging-port={} --disable-background-networking",
+        args[3]
+    );
     let mut context = tauri::generate_context!();
     context.config_mut().app.windows.clear();
     context.config_mut().app.security.csp = None;
