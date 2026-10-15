@@ -293,6 +293,7 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
+  localRuntimeStatus: (signal?: AbortSignal) => request<{ available: boolean; code: string | null; message: string }>('/runtime/local/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   health: (signal?: AbortSignal) => request<{ status: 'ok' }>('/health', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,

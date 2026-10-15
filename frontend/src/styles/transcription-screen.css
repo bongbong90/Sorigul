@@ -25,6 +25,7 @@
 }
 
 .engine-option {
+  position: relative;
   display: flex;
   min-inline-size: 0;
   align-items: center;
@@ -284,9 +285,9 @@
 
 .overall-progress {
   display: flex;
-  align-items: flex-end;
-  flex-direction: column;
-  gap: var(--space-tight);
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-component);
 }
 
 .current-task-section {
@@ -348,8 +349,20 @@
 }
 
 .queue-table-scroll {
+  position: relative;
   overflow-x: auto;
 }
+
+.run-upload-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-component);
+}
+.run-upload-options > label { flex: 1; }
+.run-upload-options .setting-note { flex-basis: 100%; }
+.current-task-idle { padding-block: var(--space-component); }
+.current-task-idle .current-task-label { margin-block-end: 0; }
 
 .queue-table {
   inline-size: 100%;

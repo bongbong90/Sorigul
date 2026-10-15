@@ -109,6 +109,12 @@ def health():
     return {"status": "ok"}
 
 
+@router.get("/runtime/local/status")
+def local_runtime_status():
+    # Reuse the existing verification/cache without executing transcription.
+    return engine_resolver.local_runtime_status()
+
+
 @router.get("/events")
 def list_events():
     events = []

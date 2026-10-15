@@ -50,6 +50,9 @@ TERMINAL_JOB_EVENTS = {
 
 
 class DefaultEngineResolver:
+    def local_runtime_status(self) -> dict:
+        return self._local.runtime_status()
+
     def __init__(
         self,
         cache_root: Optional[Path] = None,

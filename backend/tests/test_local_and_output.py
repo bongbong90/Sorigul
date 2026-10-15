@@ -63,6 +63,25 @@ def runtime_dir(tmp_path):
     return root
 
 
+@pytest.mark.parametrize("failure", [None, "pairing", "hash", "missing"])
+def test_settings_runtime_probe_never_starts_worker(runtime_dir, failure, monkeypatch):
+    def forbidden_spawn(*args, **kwargs):
+        raise AssertionError("Settings status must never start a worker")
+
+    if failure == "hash":
+        (runtime_dir / "sorigul-local-whisper.exe").write_bytes(b"corrupted synthetic worker")
+    elif failure == "missing":
+        (runtime_dir / "runtime-manifest.json").unlink()
+    engine = LocalWhisperEngine(runtime_dir, core_source_head=("b" if failure == "pairing" else "a") * 40, popen=forbidden_spawn)
+    result = engine.runtime_status()
+    assert result["available"] is (failure is None)
+    assert result["code"] == {None: None, "pairing": "LOCAL_RUNTIME_PROVENANCE_MISMATCH", "hash": "LOCAL_RUNTIME_INVALID", "missing": "LOCAL_RUNTIME_MISSING"}[failure]
+    assert str(runtime_dir) not in result["message"]
+    from src.api import routes
+    monkeypatch.setattr(routes.engine_resolver, "_local", engine)
+    assert routes.local_runtime_status() == result
+
+
 class FakeProcess:
     def __init__(self, returncode=0, *, on_first_wait=None, always_timeout=False):
         self.returncode = returncode

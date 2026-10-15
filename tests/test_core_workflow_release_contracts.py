@@ -118,7 +118,7 @@ def test_transcription_engine_labels_match_the_canonical_runtime_contract():
     assert "Whisper large-v3 · Colab GPU 우선" in engine_source
     assert "Whisper medium (GPU)" not in engine_source
     assert "Direct Colab" not in page_source
-    assert "Google Colab" in page_source
+    assert "Google Colab" in engine_source
 
 
 def test_heavy_transcription_dependencies_stay_outside_core():

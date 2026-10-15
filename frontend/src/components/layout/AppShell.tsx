@@ -108,9 +108,10 @@ export function AppShell({ activeItem, title, onNavigate, children, sidecarStatu
 
       <header className="app-top-bar">
         <h1 className="text-page-title">{title}</h1>
+        <div id="transcription-header-actions" hidden={activeItem !== 'transcription'} />
       </header>
 
-      <main className="app-main" id="main-content">
+      <main className="app-main" id="main-content" tabIndex={0} aria-label={`${title} 콘텐츠`}>
         <div className="app-main-content">
           {sidecarStatus?.state === 'STARTUP_FAILED' ? (
             <div className="sidecar-startup-alert" role="alert">
