@@ -388,6 +388,7 @@ class DirectColabEngine:
             chunks = self.splitter.split(source_path, CHUNK_SECONDS)
             valid_indices = {chunk.index for chunk in chunks}
             completed = {index: result for index, result in completed.items() if index in valid_indices}
+            recovery_cache_used = bool(completed)
             for position, chunk in enumerate(chunks):
                 token.raise_if_requested()
                 if chunk.index not in completed:
@@ -400,6 +401,7 @@ class DirectColabEngine:
                 progress_callback((position + 1) / len(chunks))
             token.raise_if_requested()
             result = self._merge(chunks, completed)
+            result.metadata["colab_recovery_cache_used"] = recovery_cache_used
             self.cache.clear(source_path)
             return result
         except EngineError as exc:

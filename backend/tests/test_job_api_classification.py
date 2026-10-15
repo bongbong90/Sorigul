@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -6,6 +7,87 @@ from src.domain.models import FileMetadata, FileStatus
 from src.services.job_manager import JobManager
 from src.services.normalizer import FilenameNormalizer
 from src.services.settings import SettingsManager
+
+
+def _write_done_bundle(folder, stem):
+    (folder / f"{stem}.mp3").write_bytes(b"mp3")
+    (folder / f"{stem}.txt").write_text("done", encoding="utf-8")
+    (folder / f"{stem}.json").write_text(
+        json.dumps({"text": "done", "segments": []}), encoding="utf-8"
+    )
+    (folder / f"{stem}.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\ndone\n", encoding="utf-8")
+
+
+def _configure_job_route(tmp_path, monkeypatch):
+    import src.api.routes
+
+    job_manager = JobManager(str(tmp_path / "jobs.json"))
+    monkeypatch.setattr(src.api.routes, "job_manager", job_manager)
+    monkeypatch.setattr(
+        src.api.routes, "settings_manager", SettingsManager(tmp_path / "settings.json")
+    )
+    return job_manager
+
+
+def test_create_job_all_incomplete_uses_eligible_target_denominator(tmp_path, monkeypatch):
+    from src.api.routes import CreateJobRequest, create_job
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    done_id = "개념완성_민법_1주차_1강"
+    second_id = "개념완성_민법_1주차_2강"
+    third_id = "개념완성_민법_1주차_3강"
+    _write_done_bundle(folder, done_id)
+    (folder / f"{second_id}.mp3").touch()
+    (folder / f"{third_id}.mp3").touch()
+    job_manager = _configure_job_route(tmp_path, monkeypatch)
+
+    job = create_job(CreateJobRequest(
+        folder=str(folder), scope="all_incomplete", course="개념완성", subject="민법",
+    ))
+
+    assert job_manager.get_job(job.job_id).total_files == 2
+    assert set(job.files) == {second_id, third_id}
+    assert done_id not in job.files
+
+
+def test_create_job_selected_uses_eligible_target_denominator(tmp_path, monkeypatch):
+    from src.api.routes import CreateJobRequest, create_job
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    selected_done = "개념완성_민법_1주차_1강"
+    selected_incomplete = "개념완성_민법_1주차_2강"
+    for stem in (selected_done, selected_incomplete, "개념완성_민법_1주차_3강", "개념완성_민법_1주차_4강"):
+        (folder / f"{stem}.mp3").touch()
+    _write_done_bundle(folder, selected_done)
+    job_manager = _configure_job_route(tmp_path, monkeypatch)
+
+    job = create_job(CreateJobRequest(
+        folder=str(folder), scope="selected", file_ids=[selected_done, selected_incomplete],
+        course="개념완성", subject="민법",
+    ))
+
+    assert job_manager.get_job(job.job_id).total_files == 1
+    assert set(job.files) == {selected_incomplete}
+
+
+def test_create_job_force_retranscribe_includes_done_bundle(tmp_path, monkeypatch):
+    from src.api.routes import CreateJobRequest, create_job
+
+    folder = tmp_path / "전사자료"
+    folder.mkdir()
+    done_id = "개념완성_민법_1주차_1강"
+    _write_done_bundle(folder, done_id)
+    job_manager = _configure_job_route(tmp_path, monkeypatch)
+
+    job = create_job(CreateJobRequest(
+        folder=str(folder), scope="selected", file_ids=[done_id], force_retranscribe=True,
+        course="개념완성", subject="민법",
+    ))
+
+    assert job_manager.get_job(job.job_id).total_files == 1
+    assert set(job.files) == {done_id}
 
 
 # ---------------------------------------------------------------------------
