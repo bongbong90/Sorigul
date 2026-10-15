@@ -4,6 +4,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Set, Tuple
 from pydantic import BaseModel
+from src.services.classification import filename_subject
 
 # Windows-forbidden filename characters and ASCII control characters. Course
 # and subject are free-typed by the user (CORE_WORKFLOW_REFINEMENT_PLAN.md
@@ -211,6 +212,7 @@ class FilenameNormalizer:
         no week at all does the manual week apply, and then only to a name
         carrying a standalone course-wide "N강" counter.
         """
+        subject = filename_subject(subject)
         stem = Path(original_name).stem
         ext = Path(original_name).suffix or ".mp3"
         manual_week_text = str(manual_week) if manual_week is not None else None
@@ -229,7 +231,7 @@ class FilenameNormalizer:
             embedded_subject = standard_match.group("subject")
             week = int(standard_match.group("week"))
             lesson = int(standard_match.group("lesson"))
-            if embedded_course != course or embedded_subject != subject:
+            if embedded_course != course or filename_subject(embedded_subject) != subject:
                 warnings = [
                     f"현재 파일의 분류({embedded_course}/{embedded_subject})가 "
                     f"입력한 과정/과목({course}/{subject})과 다릅니다."
@@ -301,6 +303,19 @@ class FilenameNormalizer:
                 result_type="WEEK_MISMATCH",
                 manual_week=manual_week_text,
                 typed_target_name=target,
+            )
+
+        # #192 grandfather an existing long-form standard name. The exact
+        # approved aliases describe the same classification: adopting it
+        # must remain valid and must never bulk-rename existing standard
+        # files. Newly allocated names still use the short token below.
+        if standard_match and embedded_subject == "공인중개사법" and stem not in existing_stems:
+            return NormalizationPreview(
+                original_name=original_name, suggested_name=original_name,
+                detected_course=course, detected_subject=embedded_subject,
+                detected_week=str(week), detected_lesson=str(lesson),
+                result_type="UNCHANGED", can_apply=False,
+                manual_week=manual_week_text,
             )
 
         # Resolve the target stem -- this applies even when the file is
