@@ -11,7 +11,7 @@ Greenfield 프로젝트이며
 
 현재 Phase:
 
-App Shell
+Transcription Screen — Static UI
 
 관련 공식 문서:
 
@@ -30,6 +30,7 @@ docs/design/
 - Frontend Foundation 완료
 - Design System Foundation 완료
 - App Shell 완료
+- Transcription Screen Static UI 완료
 - 실제 transcription 기능 없음
 - UI/UX First 진행 중
 
