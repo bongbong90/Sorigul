@@ -8,6 +8,7 @@ interface TranscriptionActionsProps {
   canStart: boolean
   canStop: boolean
   canCancel: boolean
+  canRetry: boolean
   retryCount: number
   onStart: () => void
   onStop: () => void
@@ -22,6 +23,7 @@ export function TranscriptionActions({
   canStart,
   canStop,
   canCancel,
+  canRetry,
   retryCount,
   onStart,
   onStop,
@@ -44,7 +46,7 @@ export function TranscriptionActions({
           작업 취소
         </Button>
         {retryCount > 0 ? (
-          <Button variant="secondary" onClick={onRetryFailed}>
+          <Button variant="secondary" disabled={!canRetry} onClick={onRetryFailed}>
             <RotateCcw className="transcription-icon-small" aria-hidden="true" focusable="false" />
             실패 파일 다시 시도 · {retryCount}
           </Button>

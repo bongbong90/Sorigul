@@ -13,6 +13,8 @@ import {
   type ScannedFile,
 } from '../api/client'
 import { pickFolder } from '../lib/native'
+import { useFolderRevision } from '../hooks/useFolderRevision'
+import { useTrayProgress } from '../hooks/useTrayProgress'
 import { knownStageFor, overrideStageFor, validateClassificationText, type Stage } from '../lib/classification'
 import {
   classifyPreview,
@@ -22,6 +24,7 @@ import {
   toFileResolutionsPayload,
   type FileResolution,
 } from '../lib/preflight'
+import { ActiveRunBanner } from '../components/transcription/ActiveRunBanner'
 import { ClassificationSection } from '../components/transcription/ClassificationSection'
 import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transcription/CurrentTaskSection'
 import { FolderSection } from '../components/transcription/FolderSection'
@@ -47,6 +50,7 @@ interface AdoptedClassification {
   fromFileId: string
 }
 const ACTIVE_STATES = new Set(['WAITING', 'PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING', 'CANCEL_REQUESTED'])
+const OTHER_RUN_ACTIVE_MESSAGE = '다른 전사 작업이 진행 중입니다. 기존 작업이 종료된 뒤 다시 시도해 주세요.'
 const drivePresentation: Record<string, { label: string; tone: BadgeTone }> = {
   DISABLED: { label: 'Drive 사용 안 함', tone: 'waiting' }, AUTH_REQUIRED: { label: '인증 필요', tone: 'cancelled' },
   CLASSIFICATION_FAILED: { label: 'Drive 분류 실패', tone: 'failed' }, PENDING: { label: 'Drive 대기', tone: 'waiting' },
@@ -95,7 +99,12 @@ function rowsFrom(files: ScannedFile[], job?: JobModel): QueueRow[] {
 export function TranscriptionPage() {
   const [folder, setFolder] = useState(getSavedFolder)
   const [files, setFiles] = useState<ScannedFile[]>([])
+  // `job` is the current folder's queue Job; `globalActiveJob` is the
+  // backend's single app-wide run (#126), possibly another folder's. They are
+  // never merged: only `job` feeds rowsFrom.
   const [job, setJob] = useState<JobModel>()
+  const [globalActiveJob, setGlobalActiveJob] = useState<JobModel | null>(null)
+  useTrayProgress(globalActiveJob, job)
   const [nowMs, setNowMs] = useState(Date.now)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('STARTING')
@@ -193,22 +202,44 @@ export function TranscriptionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const loadFolder = useCallback(async (signal?: AbortSignal) => {
+  const loadFolder = useCallback(async (signal?: AbortSignal): Promise<ScannedFile[] | undefined> => {
     if (!folder) {
       backendStatusRef.current = 'CONNECTED'
-      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.'); return
+      setBackendStatus('CONNECTED'); setFiles([]); setMessage('전사 폴더를 선택해 주세요.')
+      try {
+        const activeRun = await api.activeJob(signal)
+        if (!signal?.aborted) setGlobalActiveJob(activeRun)
+      } catch { /* the health poll owns connectivity state */ }
+      return []
     }
     try {
-      const [scanned, jobs, drive] = await Promise.all([api.scan(folder, signal), api.jobs(signal), api.driveStatus(signal)])
+      const [scanned, jobs, drive, activeRun] = await Promise.all([api.scan(folder, signal), api.jobs(signal), api.driveStatus(signal), api.activeJob(signal)])
+      if (signal?.aborted) return undefined
       const matching = jobs.filter((item) => item.folder === folder).sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]
       backendStatusRef.current = 'CONNECTED'
-      setFiles(scanned); setJob(matching); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
+      setFiles(scanned); setJob(matching); setGlobalActiveJob(activeRun); setDriveAuth(drive.auth_state); setBackendStatus('CONNECTED'); setMessage(`실제 디스크에서 ${scanned.length}개 MP3를 확인했습니다.`)
+      return scanned
     } catch (cause) {
-      if (isRequestAbort(cause)) return
+      if (isRequestAbort(cause)) return undefined
       backendStatusRef.current = 'OFFLINE'
       setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
+      return undefined
     }
   }, [folder])
+
+  // #111 live folder reconcile: re-read disk truth only (same loadFolder
+  // path as startup/manual). New MP3s appear unselected as WAITING rows;
+  // selections whose file vanished are dropped, the rest are kept. Never
+  // creates, starts, retries or re-transcribes a Job.
+  const reconcileFolderChange = useCallback(async (signal: AbortSignal) => {
+    const scanned = await loadFolder(signal)
+    if (!scanned || signal.aborted) return
+    const present = new Set(scanned.map((file) => file.id))
+    setSelectedIds((current) => {
+      const kept = current.filter((id) => present.has(id))
+      return kept.length === current.length ? current : kept
+    })
+  }, [loadFolder])
 
   // A packaged Tauri cold start can have the frontend polling before the
   // backend sidecar is up, so settings/folder adoption must happen again
@@ -267,7 +298,10 @@ export function TranscriptionPage() {
           if (active) await loadFolder(controller.signal)
           return
         }
-        if (active) setJob(updated)
+        if (active) {
+          setJob(updated)
+          setGlobalActiveJob((current) => current?.job_id === updated.job_id ? updated : current)
+        }
       } catch (cause) {
         if (active && !isRequestAbort(cause)) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
       }
@@ -280,6 +314,40 @@ export function TranscriptionPage() {
       controller?.abort()
     }
   }, [activeJobId, activeJobStatus, loadFolder])
+
+  // The app-wide run is polled only when the current Job poll does not
+  // already cover it: another folder's run, or a run whose terminal state is
+  // persisted but whose runner has not returned yet. The banner and the
+  // Start lock clear only once the backend reports no unfinished run.
+  const globalRunCoveredByJobPoll = Boolean(
+    globalActiveJob && job?.job_id === globalActiveJob.job_id && ACTIVE_STATES.has(job.status),
+  )
+  const pollGlobalRun = globalActiveJob !== null && !globalRunCoveredByJobPoll
+  useEffect(() => {
+    if (!pollGlobalRun) return
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const pollActiveRun = async () => {
+      controller = new AbortController()
+      try {
+        const next = await api.activeJob(controller.signal)
+        if (!active) return
+        setGlobalActiveJob(next)
+        if (!next) return
+        setJob((current) => current?.job_id === next.job_id ? next : current)
+      } catch (cause) {
+        if (active && !isRequestAbort(cause)) { setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause)) }
+      }
+      if (active) timer = window.setTimeout(() => void pollActiveRun(), 1500)
+    }
+    timer = window.setTimeout(() => void pollActiveRun(), 1500)
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
+    }
+  }, [pollGlobalRun])
 
   const runStartMs = latestRunStartMs(job?.events ?? [])
   const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab')
@@ -306,6 +374,14 @@ export function TranscriptionPage() {
   const isProcessing = Boolean(job && ACTIVE_STATES.has(job.status))
   const canControl = Boolean(job && ['PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING'].includes(job.status))
   const runState: CurrentTaskStatus = job ? (job.status as CurrentTaskStatus) : 'IDLE'
+  const globalRunActive = globalActiveJob !== null
+  const otherActiveRun = globalActiveJob && globalActiveJob.job_id !== job?.job_id ? globalActiveJob : null
+
+  // Legacy deferred watcher refreshes while transcribing to keep rows stable.
+  // An active Job already refreshes through its own poll, and TXT/JSON/SRT
+  // written mid-run must not trigger per-second rescans; the preflight
+  // renames likewise own their reload. Back to idle reconciles once.
+  useFolderRevision(folder, reconcileFolderChange, isProcessing || isPreflighting)
 
   async function changeFolder() {
     const value = await pickFolder(folder)
@@ -375,6 +451,7 @@ export function TranscriptionPage() {
 
   function handleStart() {
     if (!folder || isProcessing) return
+    if (globalRunActive) { setMessage(OTHER_RUN_ACTIVE_MESSAGE); return }
     const courseCheck = validateClassificationText(course, '과정명')
     const subjectCheck = validateClassificationText(subject, '과목명')
     setCourseError(courseCheck.error); setSubjectError(subjectCheck.error)
@@ -390,6 +467,11 @@ export function TranscriptionPage() {
   }
 
   function startAttempt(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
+    if (globalRunActive) {
+      setMessage(OTHER_RUN_ACTIVE_MESSAGE)
+      setDialog(null)
+      return
+    }
     if (engine === 'direct_colab' && !connectedBaseUrl) {
       setMessage('Colab 연결을 먼저 완료해 주세요.')
       setDialog(null)
@@ -527,31 +609,53 @@ export function TranscriptionPage() {
       })
       setJob(created); setDialog(null); setPendingIds([]); setFileResolutions(new Map())
       setMessage('Job을 생성했습니다. 전사를 시작합니다.')
-      setJob(await api.startJob(created.job_id))
+      const started = await api.startJob(created.job_id)
+      setJob(started); setGlobalActiveJob(started)
       // Only remember a course/subject that actually produced a valid Job.
       if (settings) {
         try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: engine })) }
         catch { /* best-effort */ }
       }
       releasePreflight()
-    } catch (cause) { setMessage(getUserMessage(cause)); setDialog(null); releasePreflight() }
+    } catch (cause) {
+      setMessage(getUserMessage(cause)); setDialog(null); releasePreflight()
+      try { setGlobalActiveJob(await api.activeJob()) } catch { /* best-effort refresh */ }
+    }
   }
 
-  async function action(actionName: 'stop' | 'cancel' | 'retry') {
-    if (!job) return
+  // One action path for both the current folder Job and the app-wide run
+  // shown in ActiveRunBanner; each response updates whichever view owns it.
+  function syncJob(updated: JobModel) {
+    setJob((current) => current?.job_id === updated.job_id ? updated : current)
+    setGlobalActiveJob((current) => current?.job_id === updated.job_id ? updated : current)
+  }
+
+  async function runJobAction(target: JobModel, actionName: 'stop' | 'cancel' | 'retry') {
+    if (actionName === 'retry' && globalActiveJob && globalActiveJob.job_id !== target.job_id) {
+      setMessage(OTHER_RUN_ACTIVE_MESSAGE)
+      return
+    }
     try {
-      const updated = await api.actionJob(job.job_id, actionName)
-      setJob(updated)
-      if (actionName === 'retry' && updated.status === 'WAITING') setJob(await api.startJob(job.job_id))
+      const updated = await api.actionJob(target.job_id, actionName)
+      syncJob(updated)
+      if (actionName === 'retry' && updated.status === 'WAITING') {
+        const started = await api.startJob(target.job_id)
+        syncJob(started); setGlobalActiveJob(started)
+      }
     } catch (cause) {
       setMessage(getUserMessage(cause))
       if (isRequestTimeout(cause)) {
         try {
-          setJob(await api.job(job.job_id))
+          syncJob(await api.job(target.job_id))
           setMessage('요청 시간이 초과되어 현재 작업 상태를 다시 확인했습니다.')
         } catch { /* preserve the uncertain-result timeout message */ }
       }
     }
+  }
+
+  async function action(actionName: 'stop' | 'cancel' | 'retry') {
+    if (!job) return
+    await runJobAction(job, actionName)
   }
 
   async function uploadDrive(retry = false) {
@@ -675,6 +779,7 @@ export function TranscriptionPage() {
     <div className="transcription-page">
       <RuntimeBanner status={backendStatus} message={message} onReconnect={() => void reconnect()} />
       <FolderSection folderPath={folder || '선택된 폴더 없음'} onChangeFolder={() => { if (!isPreflighting) void changeFolder() }} />
+      {otherActiveRun ? <ActiveRunBanner activeJob={otherActiveRun} sameFolder={otherActiveRun.folder === folder} onStop={() => void runJobAction(otherActiveRun, 'stop')} onCancel={() => void runJobAction(otherActiveRun, 'cancel')} /> : null}
       <ClassificationSection
         course={course}
         subject={subject}
@@ -689,15 +794,15 @@ export function TranscriptionPage() {
         onEditOverride={() => { if (!isPreflighting) setEditingOverride(true) }}
         disabled={isProcessing || isPreflighting}
       />
-      {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" onClick={() => { if (!isPreflighting) void action('retry') }}>다시 시도</Button></div> : null}
-      <TranscriptionActions progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting} canStop={canControl} canCancel={canControl} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
+      {crashed ? <div className="status-banner status-banner-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>이전 작업이 비정상적으로 종료되었습니다.</strong><span>완료 파일은 유지되며 자동 재개하지 않습니다.</span></div><Button variant="secondary" disabled={otherActiveRun !== null} onClick={() => { if (!isPreflighting) void action('retry') }}>다시 시도</Button></div> : null}
+      <TranscriptionActions progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} canStart={backendStatus === 'CONNECTED' && Boolean(folder) && !isProcessing && !isPreflighting && !globalRunActive} canStop={canControl} canCancel={canControl} canRetry={otherActiveRun === null} retryCount={failedRows.length} onStart={handleStart} onStop={() => void action('stop')} onCancel={() => void action('cancel')} onRetryFailed={() => { if (!isPreflighting) void action('retry') }} />
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
       <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
-      <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} />
+      <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} actionsDisabled={globalRunActive} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
-        <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || (job != null && ['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
-        <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
+        <EngineSection engine={engine} onChangeEngine={changeEngine} connectedBaseUrl={connectedBaseUrl} onBaseUrlChange={setConnectedBaseUrl} disabled={isPreflighting || globalRunActive || (job != null &&['WAITING','PREPARING','TRANSCRIBING','SAVING','VERIFYING'].includes(job.status))} />
+        <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
         <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
           <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>
           {uploadToDrive ? <DrivePathPreview course={course} subject={subject} settings={settings} /> : null}

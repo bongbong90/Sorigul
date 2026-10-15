@@ -563,10 +563,17 @@ impl SidecarManager {
             let pid = owned.child.id();
             #[cfg(target_os = "windows")]
             {
-                let mut kill = Command::new("taskkill.exe");
-                kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-                kill.creation_flags(CREATE_NO_WINDOW);
-                let _ = kill.status();
+                match taskkill_tree_command(pid) {
+                    Ok(mut kill) => {
+                        let _ = kill.status();
+                    }
+                    // No trusted taskkill: kill the owned child directly so
+                    // the wait below cannot hang; the Job Object handle drop
+                    // still takes down the rest of the owned tree.
+                    Err(_) => {
+                        let _ = owned.child.kill();
+                    }
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -578,6 +585,18 @@ impl SidecarManager {
         }
         self.owned.store(false, Ordering::SeqCst);
     }
+}
+
+/// `System32\taskkill.exe /PID <pid> /T /F` by trusted absolute path
+/// (#122); never resolved through `PATH`.
+#[cfg(target_os = "windows")]
+fn taskkill_tree_command(pid: u32) -> Result<Command, String> {
+    let executable = crate::windows_system::SystemUtility::Taskkill.path()?;
+    let mut command = Command::new(executable);
+    command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -829,11 +848,9 @@ mod tests {
         }
         manager.owned.store(false, Ordering::SeqCst);
 
-        std::thread::sleep(Duration::from_millis(500));
-
-        assert!(
-            !process_is_running(pid),
-            "kill-on-close Job Object should terminate the owned process once its handle closes"
+        assert_job_close_terminated(
+            &[pid],
+            "kill-on-close Job Object should terminate the owned process once its handle closes",
         );
     }
 
@@ -877,18 +894,64 @@ mod tests {
         }
         manager.owned.store(false, Ordering::SeqCst);
 
-        std::thread::sleep(Duration::from_millis(800));
-
-        assert!(
-            !process_is_running(root_pid),
-            "root process should be terminated"
+        // Root and every spawned child share one deadline; the child PIDs
+        // stay in the set so this still proves the tree died, not just the root.
+        let mut pids = vec![root_pid];
+        pids.extend(&child_pids);
+        assert_job_close_terminated(
+            &pids,
+            "kill-on-close Job Object should terminate the owned root and every child it spawned",
         );
-        for pid in child_pids {
-            assert!(
-                !process_is_running(pid),
-                "kill-on-close Job Object should terminate a child the owned root spawned, not just the root itself"
-            );
+    }
+
+    /// Upper bound for Windows to tear down a closed kill-on-close Job
+    /// Object's processes. Termination is asynchronous; a live PID past this
+    /// is a real regression, not a slow test (issue #138).
+    #[cfg(target_os = "windows")]
+    const JOB_CLOSE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
+    #[cfg(target_os = "windows")]
+    const JOB_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// Polls until every PID has exited or the monotonic deadline passes.
+    /// Returns the PIDs still running at the deadline (empty on success).
+    #[cfg(target_os = "windows")]
+    fn wait_until_processes_stop(pids: &[u32], timeout: Duration, poll: Duration) -> Vec<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining: Vec<u32> = pids
+                .iter()
+                .copied()
+                .filter(|pid| process_is_running(*pid))
+                .collect();
+            if remaining.is_empty() || Instant::now() >= deadline {
+                return remaining;
+            }
+            std::thread::sleep(poll);
         }
+    }
+
+    /// Asserts the Job Object close alone terminated `pids` within the
+    /// bounded window. On timeout the failure is decided first, then the
+    /// test-owned survivors are force-killed so no PowerShell orphans leak,
+    /// then the test fails -- the teardown can never turn a failure into a pass.
+    #[cfg(target_os = "windows")]
+    fn assert_job_close_terminated(pids: &[u32], message: &str) {
+        let began = Instant::now();
+        let remaining =
+            wait_until_processes_stop(pids, JOB_CLOSE_TERMINATION_TIMEOUT, JOB_CLOSE_POLL_INTERVAL);
+        let elapsed = began.elapsed();
+        if remaining.is_empty() {
+            return;
+        }
+        for pid in &remaining {
+            if let Ok(mut teardown) = taskkill_tree_command(*pid) {
+                let _ = teardown.output();
+            }
+        }
+        panic!(
+            "{message}: Job Object kill-on-close timed out after {elapsed:?} \
+             (limit {JOB_CLOSE_TERMINATION_TIMEOUT:?}); remaining PIDs: {remaining:?} of {pids:?}"
+        );
     }
 
     #[test]
@@ -1322,5 +1385,28 @@ mod tests {
             .output()
             .expect("tasklist");
         String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+    }
+
+    /// Inspects the cleanup command only; the real tree kill is exercised by
+    /// the owned-process cleanup tests above through `cleanup()`.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_taskkill_uses_trusted_system32_path_for_owned_pid_only() {
+        let command = taskkill_tree_command(4242).unwrap();
+        let program = std::path::Path::new(command.get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(
+            program,
+            crate::windows_system::SystemUtility::Taskkill
+                .path()
+                .unwrap()
+        );
+        assert!(program
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .eq_ignore_ascii_case("System32"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["/PID", "4242", "/T", "/F"]);
     }
 }
