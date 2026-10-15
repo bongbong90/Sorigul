@@ -311,15 +311,15 @@ fn start_backend(app: AppHandle, sidecar: Arc<SidecarManager>) {
             url: health_url(),
             timeout: Duration::from_millis(800),
         };
+        // `start_and_wait` terminates an owned child the moment startup
+        // fails, before the failure status is emitted -- never at app exit.
         let resolved = match spawn_spec_for_current_build(&app) {
-            Ok(spec) => match sidecar.start(&probe, spec) {
-                SidecarStatus::Starting => sidecar.wait_until_healthy(
-                    &probe,
-                    startup_timeout_for_current_build(),
-                    Duration::from_millis(400),
-                ),
-                other => other,
-            },
+            Ok(spec) => sidecar.start_and_wait(
+                &probe,
+                spec,
+                startup_timeout_for_current_build(),
+                Duration::from_millis(400),
+            ),
             Err(reason) => SidecarStatus::StartupFailed(reason),
         };
         let _ = app.emit("sorigul://sidecar-status", format!("{resolved:?}"));
