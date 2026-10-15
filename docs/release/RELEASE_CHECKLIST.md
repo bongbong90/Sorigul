@@ -1,0 +1,24 @@
+# Release Checklist 0.1.0
+
+- [x] Contract
+- [x] ACTIVE 43
+- [x] Intentional Changes
+- [x] UI Freeze
+- [x] Backend
+- [x] Frontend
+- [x] Rust
+- [ ] Local — actual Korean MP3 required
+- [ ] Colab — endpoint required
+- [ ] Drive — OAuth credential + mutation approval required
+- [x] Results
+- [x] Native UX
+- [x] Installer
+- [x] Unicode
+- [x] Orphan
+- [x] Licenses
+- [x] Credentials
+- [x] Generated artifact
+- [x] User data
+- [x] Known risks
+- [ ] Actual Windows shutdown — manual supervised check pending
+- [x] Release verdict
