@@ -39,6 +39,43 @@ def test_repository_owns_one_guard_and_activation_boundary():
     assert "inline/ad-hoc guard" in rules
 
 
+def read_json_function(source):
+    start = source.index("function Read-Json(")
+    return source[start:source.index("\nfunction ", start + 1)]
+
+
+def test_read_json_missing_retry_is_opt_in_for_heartbeat_only():
+    source = SCRIPT.read_text(encoding="utf-8")
+    body = read_json_function(source)
+    # [switch] defaults to OFF: missing evidence keeps fail-fast semantics.
+    assert body.startswith("function Read-Json([string]$Path, [switch]$RetryMissing) {")
+    assert "$NativeCode = $_.Exception.HResult -band 65535" in body
+    assert "$NativeCode -in @(32, 33)" in body
+    assert "($RetryMissing -and $NativeCode -eq 2)" in body
+    assert "@(2" not in body and "2, 32" not in body
+    # Bounded: the pre-existing 10 attempts x 20ms, then the original exception.
+    assert "for ($Attempt = 0; $Attempt -lt 10; $Attempt++)" in body
+    assert "[Threading.Thread]::Sleep(20)" in body
+    assert "if (-not $Retryable -or $Attempt -eq 9) { throw }" in body
+    assert body.count("catch") == 1 and "catch [IO.IOException]" in body
+    for fallback in ("return $null", "'{}'", '"{}"', "@{}", "SilentlyContinue"):
+        assert fallback not in body
+    calls = [line.strip() for line in source.splitlines()
+             if "Read-Json " in line and "function Read-Json" not in line]
+    opted = [line for line in calls if "-RetryMissing" in line]
+    assert opted == ["$Heartbeat = Read-Json (Join-Path $Config.session 'LOCK_HEARTBEAT.json') -RetryMissing"]
+    assert source.count("-RetryMissing") == 1
+    for name in ("$FreezeFile", "SESSION_BOOTSTRAPPING.json", "GUARD_OWNER.json", "$Stop",
+                 "$Request", "$BaselinePath", "SESSION_STOPPED.json", "$Settings"):
+        assert any(name in line for line in calls), name
+        assert not any(name in line and "-RetryMissing" in line for line in calls), name
+    # The writer, staleness and stabilization contracts are unchanged.
+    assert "[IO.File]::Replace($Temporary, $Path, [System.Management.Automation.Language.NullString]::Value)" in source
+    assert "-notin @(32, 33) -or $Attempt -eq 9) { throw }" in source
+    assert ".TotalSeconds -gt 10 -or" in source
+    assert "[ValidateRange(3, 120)][int]$StableSeconds = 6" in source
+
+
 def git(cwd, *args):
     return subprocess.check_output(["git", "-C", str(cwd), *args], text=True, encoding="utf-8").strip()
 
@@ -182,9 +219,9 @@ def kill_owned_guard(pid):
     assert result.returncode == 0, result.stderr
 
 
-def assert_lock_reacquirable(sandbox):
+def assert_lock_reacquirable(sandbox, lock=None):
     root = sandbox[0]
-    lock = root / ".git/sorigul-113-single-writer.lock"
+    lock = lock or root / ".git/sorigul-113-single-writer.lock"
     harness = sandbox[3] / "lock reacquisition.ps1"
     harness.write_text(
         "param([string]$Path)\n$ErrorActionPreference='Stop'\n"
@@ -371,3 +408,92 @@ def test_synthetic_activation_baseline_status_and_controlled_stop(sandbox):
         assert stopped.returncode == 0, stopped.stdout + stopped.stderr
         assert_pid_gone(owner["pid"])
         assert_lock_reacquirable(sandbox)
+
+
+HEARTBEAT_WRITE = "            Write-AtomicJson (Join-Path $SessionPath 'LOCK_HEARTBEAT.json') @{"
+HEARTBEAT_READ = "        $Heartbeat = Read-Json (Join-Path $Config.session 'LOCK_HEARTBEAT.json') -RetryMissing"
+
+
+def inject_heartbeat_missing_window(sandbox, opt_in=True):
+    # Disposable fixture only: widen the File.Replace not-found gap into a
+    # deterministic 60ms window, and make every parent heartbeat read land in it.
+    root, script, _, _ = sandbox
+    source = script.read_text(encoding="utf-8")
+    assert source.count(HEARTBEAT_WRITE) == source.count(HEARTBEAT_READ) == 1
+    source = source.replace(HEARTBEAT_WRITE, (
+        "            $RaceHeartbeat = Join-Path $SessionPath 'LOCK_HEARTBEAT.json'\n"
+        "            if ([IO.File]::Exists($RaceHeartbeat)) { [IO.File]::Delete($RaceHeartbeat); [Threading.Thread]::Sleep(60) }\n"
+    ) + HEARTBEAT_WRITE)
+    read = HEARTBEAT_READ if opt_in else HEARTBEAT_READ.replace(" -RetryMissing", "")
+    source = source.replace(HEARTBEAT_READ, (
+        "        $RaceHeartbeat = Join-Path $Config.session 'LOCK_HEARTBEAT.json'\n"
+        "        $RaceTimer = [Diagnostics.Stopwatch]::StartNew()\n"
+        "        while ([IO.File]::Exists($RaceHeartbeat) -and $RaceTimer.ElapsedMilliseconds -lt 3000) { [Threading.Thread]::Sleep(2) }\n"
+        "        if (-not [IO.File]::Exists($RaceHeartbeat)) { [IO.File]::AppendAllText((Join-Path $Config.session 'RACE_WINDOW_HITS.log'), \"missing`n\") }\n"
+    ) + read)
+    script.write_text(source, encoding="utf-8-sig")
+    git(root, "add", "scripts/" + SCRIPT.name)
+    git(root, "commit", "-m", "Synthetic #164 heartbeat missing window")
+    git(root, "push")
+
+
+def race_hits(session):
+    return (session / "RACE_WINDOW_HITS.log").read_text(encoding="utf-8").count("missing")
+
+
+@WINDOWS
+def test_parent_semantics_fail_on_transient_heartbeat_missing_window(sandbox):
+    # Reproduces the Sorigul_20261007_035db13_94f463015bad failure mode: without
+    # the heartbeat opt-in a transient Win32 2 is fatal during stabilization.
+    inject_heartbeat_missing_window(sandbox, opt_in=False)
+    result = invoke(sandbox, "Probe", "-StableSeconds", 3)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "BOOTSTRAP FAILED / ARTIFACT SESSION NOT STARTED" in result.stdout
+    session = next(sandbox[3].glob("Sorigul_113_Probe_*"))
+    invalid = json.loads((session / "SESSION_INVALID.json").read_text(encoding="utf-8-sig"))
+    assert invalid["state"] == "BOOTSTRAP_FAILED"
+    assert "LOCK_HEARTBEAT.json" in invalid["reason"]
+    assert race_hits(session) >= 1
+    owner = json.loads((session / "GUARD_OWNER.json").read_text(encoding="utf-8-sig"))
+    assert_pid_gone(owner["pid"])
+    assert_lock_reacquirable(sandbox, session / "probe.lock")
+
+
+@WINDOWS
+def test_probe_recovers_from_transient_heartbeat_missing_window(sandbox):
+    inject_heartbeat_missing_window(sandbox)
+    result = invoke(sandbox, "Probe", "-StableSeconds", 3)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CANONICAL SINGLE WRITER BOOTSTRAP PROBE: PASS" in result.stdout
+    data = json.JSONDecoder().raw_decode(result.stdout)[0]
+    assert data["heartbeats"] >= 3
+    assert data["competing_acquisition"] == "DENIED"
+    assert data["monitored_source"] == "PASS"
+    assert data["controlled_stop"] == data["lock_release"] == "PASS"
+    assert data["orphan"] == 0
+    session = Path(data["evidence"])
+    assert race_hits(session) >= 3
+    assert not (session / "SESSION_INVALID.json").exists()
+    assert_pid_gone(data["guard_pid"])
+    assert_lock_reacquirable(sandbox, session / "probe.lock")
+
+
+@WINDOWS
+def test_start_status_stop_recover_from_transient_heartbeat_missing_window(sandbox):
+    inject_heartbeat_missing_window(sandbox)
+    result = invoke(sandbox, "Start", *start_args(sandbox))
+    assert result.returncode == 0, result.stdout + result.stderr
+    session = marker(sandbox, "SESSION_ACTIVE.json")[0].parent
+    owner = json.loads((session / "GUARD_OWNER.json").read_text(encoding="utf-8-sig"))
+    try:
+        status = invoke(sandbox, "Status", "-SessionPath", session)
+        assert status.returncode == 0, status.stdout + status.stderr
+        assert "#113 ARTIFACT SESSION = ACTIVE" in status.stdout
+    finally:
+        stopped = invoke(sandbox, "Stop", "-SessionPath", session)
+        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert "CONTROLLED STOP = PASS; LOCK RELEASE = PASS; ORPHAN = 0" in stopped.stdout
+    assert race_hits(session) >= 3
+    assert not (session / "SESSION_INVALID.json").exists()
+    assert_pid_gone(owner["pid"])
+    assert_lock_reacquirable(sandbox)
