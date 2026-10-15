@@ -52,6 +52,7 @@ class RuntimeSettings(BaseModel):
     transcription_folder: Optional[str] = None
     last_course: Optional[str] = None
     last_subject: Optional[str] = None
+    last_engine: Literal["local_whisper", "direct_colab"] = "local_whisper"
     subject_stage_overrides: StageOverrides = Field(default_factory=dict)
     drive_exam_root: str = "2026 제37회 공인중개사 자격시험"
 
@@ -65,6 +66,7 @@ class SettingsPatch(BaseModel):
     transcription_folder: Optional[str] = None
     last_course: Optional[str] = None
     last_subject: Optional[str] = None
+    last_engine: Optional[Literal["local_whisper", "direct_colab"]] = None
     subject_stage_overrides: Optional[StageOverrides] = None
     drive_exam_root: Optional[str] = None
 

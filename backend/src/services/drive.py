@@ -132,6 +132,9 @@ class DriveClient(Protocol):
     def find_file(self, parent_id: str, name: str) -> Optional[str]: ...
     def create_file(self, parent_id: str, name: str, local_path: Path) -> str: ...
     def update_file(self, file_id: str, name: str, local_path: Path) -> str: ...
+    def create_text_file(self, parent_id: str, name: str, content: str) -> str: ...
+    def update_text_file(self, file_id: str, name: str, content: str) -> str: ...
+    def read_text_file(self, file_id: str) -> str: ...
 
 
 class DriveAuth(Protocol):
@@ -197,6 +200,40 @@ class GoogleDriveClient:
             fields="id",
         ).execute()
         return updated["id"]
+
+    def create_text_file(self, parent_id: str, name: str, content: str) -> str:
+        from googleapiclient.http import MediaIoBaseUpload
+        import io
+        media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="application/json", resumable=False)
+        created = self.service.files().create(
+            body={"name": name, "parents": [parent_id]},
+            media_body=media,
+            fields="id",
+        ).execute()
+        return created["id"]
+
+    def update_text_file(self, file_id: str, name: str, content: str) -> str:
+        from googleapiclient.http import MediaIoBaseUpload
+        import io
+        media = MediaIoBaseUpload(io.BytesIO(content.encode("utf-8")), mimetype="application/json", resumable=False)
+        updated = self.service.files().update(
+            fileId=file_id,
+            body={"name": name},
+            media_body=media,
+            fields="id",
+        ).execute()
+        return updated["id"]
+
+    def read_text_file(self, file_id: str) -> str:
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+        request = self.service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        return fh.getvalue().decode("utf-8")
 
 
 _CALLBACK_SUCCESS_HTML = (

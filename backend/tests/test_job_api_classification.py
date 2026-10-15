@@ -328,3 +328,90 @@ def test_job_creation_rejects_normalized_without_rename(tmp_path):
     )
     with pytest.raises(HTTPException, match="파일명 정규화를 먼저 적용해 주세요"):
         create_job(req_c)
+
+def test_create_job_direct_colab_normalization(tmp_path):
+    from src.api.routes import create_job, CreateJobRequest
+    from src.services.job_manager import JobManager
+    from src.services.settings import SettingsManager
+    import src.api.routes
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    sm = SettingsManager(tmp_path / "settings.json")
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = sm
+
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
+
+    req = CreateJobRequest(
+        folder=str(tmp_path),
+        file_ids=["개념완성_민법_1주차_1강"],
+        course="개념완성",
+        subject="민법",
+        engine="direct_colab",
+        colab_url="https://example.test/health"
+    )
+
+    res = create_job(req)
+    job = jm.get_job(res.job_id)
+
+    assert job.engine == "direct_colab"
+    assert job.engine_config.get("base_url") == "https://example.test"
+
+def test_create_job_invalid_colab_url(tmp_path):
+    from src.api.routes import create_job, CreateJobRequest
+    from src.services.job_manager import JobManager
+    from src.services.settings import SettingsManager
+    from fastapi import HTTPException
+    import src.api.routes
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    sm = SettingsManager(tmp_path / "settings.json")
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = sm
+
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
+
+    req = CreateJobRequest(
+        folder=str(tmp_path),
+        file_ids=["개념완성_민법_1주차_1강"],
+        course="개념완성",
+        subject="민법",
+        engine="direct_colab",
+        colab_url="https://example.test/other"
+    )
+
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as excinfo:
+        create_job(req)
+    assert excinfo.value.status_code == 400
+
+def test_create_job_local_engine(tmp_path):
+    from src.api.routes import create_job, CreateJobRequest
+    from src.services.job_manager import JobManager
+    from src.services.settings import SettingsManager
+    import src.api.routes
+
+    jm = JobManager(str(tmp_path / "jobs.json"))
+    sm = SettingsManager(tmp_path / "settings.json")
+    src.api.routes.job_manager = jm
+    src.api.routes.settings_manager = sm
+
+    test_mp3 = tmp_path / "개념완성_민법_1주차_1강.mp3"
+    test_mp3.write_bytes(b"dummy")
+
+    req = CreateJobRequest(
+        folder=str(tmp_path),
+        file_ids=["개념완성_민법_1주차_1강"],
+        course="개념완성",
+        subject="민법",
+        engine="local_whisper"
+    )
+
+    res = create_job(req)
+    job = jm.get_job(res.job_id)
+
+    assert job.engine == "local_whisper"
+    assert "base_url" not in job.engine_config
