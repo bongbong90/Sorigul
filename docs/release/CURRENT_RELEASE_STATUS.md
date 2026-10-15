@@ -19,14 +19,20 @@ from the frozen Release Candidate HEAD passes clean install, installed Core/Loca
 pairing and installed CUDA synthetic validation, followed by the real Local gate. Prior isolated
 or stopped-attempt artifacts are historical evidence only and cannot satisfy fresh #113.
 
-#150, #154, #159 and #161 are complete. The latest #113 attempt stopped before
-artifact build because backend pytest was invoked from the wrong working directory; no
-product/source defect was established by that STOP.
+#150, #154, #159, #161 and #55 canonical preflight orchestration are complete.
+#113 remains OPEN / BLOCKED. The stopped run `Sorigul_20261003_14c72f0_35d302a0f2b7`
+acquired a lock and denied competing acquisition, but its ad-hoc PS5 guard could not use
+Get-FileHash and exited before protected baseline capture. Artifact invocation count was 0.
+This is a release harness/bootstrap defect; no product/runtime/artifact defect was established.
 
-The current sequence is #55 canonical preflight orchestration → exact source Freeze →
-canonical preflight rehearsal PASS → new artifact run_id + Single Writer → #113 Fresh
-Artifact / Install Gate. The preflight rehearsal is deliberately outside the artifact session
+The current sequence is #164 repository-owned session bootstrap → final-HEAD canonical
+preflight rehearsal PASS including bootstrap probe → exact source Freeze → separately
+authorized BOOTSTRAPPING → protected baseline + final recheck → SESSION_ACTIVE →
+#113 Fresh Artifact / Install Gate. The preflight rehearsal is deliberately outside the artifact session
 and must not build Local/Core/MSI artifacts or install/uninstall Sorigul.
+Probe uses the same guard without an actual run_id or activation. The canonical script is
+`scripts/run_113_session_bootstrap.ps1`; inline/ad-hoc guard commands are not the contract.
+This work unit does not start a real artifact session, build, install, use actual MP3 or merge.
 
 ## CUDA release requirement
 
@@ -72,16 +78,20 @@ the failed stage under the same run_id and record the prior attempt as supersede
 HARD STOP and checkpoint invalidation remain mandatory for source/release-input changes,
 artifact content/self-test failure, hash/provenance mismatch, manifest/source ambiguity,
 MSI identity ambiguity, install identity ambiguity, protected-user-data mutation,
-orphan/port cleanup failure or restoration failure.
+orphan/port cleanup failure or restoration failure. Single Writer loss after SESSION_ACTIVE
+is HARD STOP. Before activation a bootstrap failure is ARTIFACT SESSION NOT STARTED,
+with provisional evidence retained and owned child/lock cleanup required. Only runs that
+passed SESSION_ACTIVE may supply final artifact evidence. Canonical Status PASS/ACTIVE
+is mandatory at each stage boundary and revalidates full release-input SHA256.
 
 ## Required official release gate
 
 The order is fixed:
 
 1. source-changing work complete and source regression PASS
-2. Release Freeze: exact Release Candidate HEAD
-3. canonical #113 preflight rehearsal PASS with no Local/Core/MSI build or install
-4. issue new artifact run_id and acquire the Single Writer lock
+2. canonical #113 preflight rehearsal PASS including shared guard probe; no artifact session/build/install
+3. Release Freeze: exact final Release Candidate HEAD and all tracked-file SHA256 identities
+4. canonical session bootstrap: provisional run_id, repository-wide Single Writer, stable heartbeats, competing DENIED, protected baseline, final recheck, atomic SESSION_ACTIVE
 5. fresh Local Runtime build, isolated CUDA self-test and Local identity/manifest/hash
 6. fresh Core build, isolated Core self-test, Core provenance/size/hash and payload exclusions
 7. fresh MSI from the same frozen HEAD and current-run Core manifest/hash

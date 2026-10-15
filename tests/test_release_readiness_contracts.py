@@ -175,9 +175,9 @@ def test_current_release_gate_orders_preflight_before_fresh_artifacts_and_instal
     status = read_repo("docs/release/CURRENT_RELEASE_STATUS.md")
     steps = re.findall(r"^\d+\. (.+)$", status, re.MULTILINE)
     gates = (
-        "Release Freeze:",
         "canonical #113 preflight rehearsal",
-        "issue new artifact run_id",
+        "Release Freeze:",
+        "canonical session bootstrap:",
         "fresh Local Runtime build",
         "fresh Core build",
         "fresh MSI",
