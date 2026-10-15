@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from src import local_runtime_main
+from src.domain.models import FileStatus
 from src.engines import local_whisper
 from src.domain.transcription import (
     CancellationToken,
@@ -27,6 +29,8 @@ from src.engines.local_whisper import (
     verify_runtime,
 )
 from src.services.output_bundle import BundlePaths, OutputBundleValidator, OutputBundleWriter
+from src.services.job_manager import JobManager
+from src.services.transcription_runner import TranscriptionRunner
 
 
 def quiet_event(*_args):
@@ -515,7 +519,8 @@ def test_runtime_file_errors_are_not_retried_as_fp16(tmp_path, monkeypatch, fail
 def test_worker_failure_protocol_uses_stdout_without_traceback(monkeypatch):
     stdout = local_runtime_main.sys.stdout
     stderr = local_runtime_main.sys.stderr
-    fake_stdout = io.StringIO()
+    stdout_bytes = io.BytesIO()
+    fake_stdout = io.TextIOWrapper(stdout_bytes, encoding="cp949", errors="strict")
     fake_stderr = io.StringIO()
     fake_stdin = io.StringIO("not-json")
     monkeypatch.setattr(local_runtime_main.sys, "stdout", fake_stdout)
@@ -527,11 +532,192 @@ def test_worker_failure_protocol_uses_stdout_without_traceback(monkeypatch):
         local_runtime_main.sys.stdout = stdout
         local_runtime_main.sys.stderr = stderr
 
-    response = json.loads(fake_stdout.getvalue())
+    text = stdout_bytes.getvalue().decode("utf-8", errors="strict")
+    response = json.loads(text)
     assert response["status"] == "FAILED"
     assert response["error"]["code"] == "LOCAL_RUNTIME_ERROR"
-    assert "Traceback" not in fake_stdout.getvalue()
+    assert "Traceback" not in text
     assert fake_stderr.getvalue() == ""
+
+
+@pytest.mark.parametrize("encoding", ["cp949", "ascii", "utf-8"])
+@pytest.mark.parametrize("failed", [False, True], ids=["done", "failed"])
+def test_self_test_response_uses_utf8_byte_protocol(monkeypatch, encoding, failed):
+    stdout_bytes = io.BytesIO()
+    stdout = io.TextIOWrapper(stdout_bytes, encoding=encoding, errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    def self_test():
+        if failed:
+            raise ValueError("CUDA 확인 실패 🧪")
+        return {
+            "protocol_version": PROTOCOL_VERSION,
+            "ok": True,
+            "status": "DONE",
+            "device": "cuda",
+            "outputs": {},
+            "error": None,
+        }
+
+    monkeypatch.setattr(local_runtime_main, "_self_test", self_test)
+
+    assert local_runtime_main.main(["--self-test"]) == (1 if failed else 0)
+
+    text = local_whisper._stdout_text(io.BytesIO(stdout_bytes.getvalue()))
+    response = LocalWhisperEngine._parse_response(text)
+    assert response["status"] == ("FAILED" if failed else "DONE")
+    assert text.endswith("\n") and len(text.splitlines()) == 1
+    if failed:
+        assert response["error"]["message"] == "CUDA 확인 실패 🧪"
+
+
+@pytest.mark.parametrize(
+    "invalid_bytes",
+    [json.dumps({"error": "전사 실패"}, ensure_ascii=False).encode("cp949"), b"\xff"],
+    ids=["cp949-json", "malformed-utf8"],
+)
+def test_core_stdout_protocol_still_rejects_non_utf8(invalid_bytes):
+    with pytest.raises(EngineError) as caught:
+        local_whisper._stdout_text(io.BytesIO(invalid_bytes))
+    assert caught.value.code == "LOCAL_RUNTIME_RESPONSE_INVALID"
+    assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
+
+@pytest.fixture
+def utf8_worker_child(tmp_path):
+    """Real worker entrypoint; only model inference is synthetic (no GPU/cache)."""
+    script = tmp_path / "synthetic_worker.py"
+    script.write_text(
+        '''import sys
+from types import SimpleNamespace
+
+mode = sys.argv.pop(1)
+print("stdout_encoding=" + sys.stdout.encoding, file=sys.stderr, flush=True)
+
+class Model:
+    def transcribe(self, path, **options):
+        print("inference diagnostic", flush=True)
+        if mode == "failed":
+            raise ValueError("전사 실패: " + path + " 🧪")
+        return {
+            "text": "안녕하세요",
+            "segments": [{"start": 0, "end": 1.25, "text": "안녕하세요"}],
+            "language": "ko",
+        }
+
+sys.modules["torch"] = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+sys.modules["whisper"] = SimpleNamespace(load_model=lambda *args, **kwargs: Model())
+from src.local_runtime_main import main
+raise SystemExit(main())
+''',
+        encoding="utf-8",
+    )
+
+    def command(request_args, *, mode="done", encoding="cp949"):
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = encoding + ":strict"
+        environment["PYTHONUTF8"] = "0"
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        return [sys.executable, str(script), mode, *request_args], environment
+
+    return command
+
+
+PROTOCOL_SOURCE_PATHS = (
+    "lecture.mp3",
+    "전사자료/민법.mp3",
+    "한글 폴더/민법 1강.mp3",
+    "유니코드 🧪/강의 🧪.mp3",
+)
+
+
+@pytest.mark.parametrize("source_name", PROTOCOL_SOURCE_PATHS)
+@pytest.mark.parametrize("encoding", ["cp949", "ascii", "utf-8"])
+@pytest.mark.parametrize("mode", ["done", "failed"])
+def test_worker_child_stdout_is_strict_utf8(
+    tmp_path, utf8_worker_child, source_name, encoding, mode
+):
+    source = tmp_path / source_name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.touch()
+    output = tmp_path / "결과 폴더"
+    output.mkdir()
+    request = {
+        "protocol_version": PROTOCOL_VERSION,
+        "action": "transcribe",
+        "input_path": str(source),
+        "output_dir": str(output),
+        "model": "medium",
+        "options": dict(LocalWhisperEngine.TRANSCRIBE_OPTIONS),
+    }
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+    command, environment = utf8_worker_child(
+        ["--request", str(request_path)], mode=mode, encoding=encoding
+    )
+
+    child = subprocess.run(command, env=environment, capture_output=True, timeout=20)
+
+    assert child.returncode == (0 if mode == "done" else 1), child.stderr
+    assert f"stdout_encoding={encoding}".encode("ascii") in child.stderr
+    # Decode actual OS-pipe bytes, then exercise the unchanged Core consumer.
+    text = child.stdout.decode("utf-8", errors="strict")
+    assert local_whisper._stdout_text(io.BytesIO(child.stdout)) == text
+    assert text.endswith("\n") and len(text.splitlines()) == 1
+    assert "\\u" not in text, "non-ASCII JSON must not be escaped to hide encoding bugs"
+    assert "inference diagnostic" not in text
+    assert b"inference diagnostic" in child.stderr
+    assert b"Traceback" not in child.stderr
+    response = LocalWhisperEngine._parse_response(text)
+    assert response["status"] == ("DONE" if mode == "done" else "FAILED")
+    assert response["ok"] is (mode == "done")
+    if mode == "done":
+        expected = {key: str(output / f"{source.stem}.{key}") for key in ("txt", "json", "srt")}
+        assert response["outputs"] == expected
+        result = LocalWhisperEngine._result_from_outputs(response, output, source.stem)
+        assert result.text == "안녕하세요"
+    else:
+        assert response["error"]["code"] == "LOCAL_RUNTIME_ERROR"
+        assert response["error"]["message"] == f"전사 실패: {source} 🧪"
+        assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize("source_name", PROTOCOL_SOURCE_PATHS)
+def test_synthetic_local_job_with_cp949_child_finishes_done(
+    tmp_path, runtime_dir, utf8_worker_child, source_name
+):
+    source = tmp_path / source_name
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.touch()
+    children = []
+    requests = []
+
+    def popen(command, **kwargs):
+        requests.append(json.loads(Path(command[2]).read_text(encoding="utf-8")))
+        child_command, environment = utf8_worker_child(command[1:])
+        child = subprocess.Popen(child_command, env=environment, **kwargs)
+        children.append(child)
+        return child
+
+    engine = LocalWhisperEngine(runtime_dir, popen=popen, timeout_seconds=20)
+    manager = JobManager(str(tmp_path / "state" / "jobs.json"))
+    job = manager.create_job(str(source.parent), [source.stem])
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    finished = manager.get_job(job.job_id)
+    assert finished.status == FileStatus.DONE
+    assert finished.files == {source.stem: FileStatus.DONE}
+    assert finished.done_files == 1 and finished.failed_files == 0
+    assert finished.error is None
+    assert finished.batch_completed is True
+    assert len(children) == 1 and children[0].poll() == 0
+    assert not Path(requests[0]["output_dir"]).exists()
+    paths = BundlePaths(**{key: source.with_suffix(f".{key}") for key in ("txt", "json", "srt")})
+    OutputBundleValidator().validate(paths)
+    assert paths.txt.read_text(encoding="utf-8") == "안녕하세요"
+    assert json.loads(paths.json.read_text(encoding="utf-8"))["text"] == "안녕하세요"
+    assert "안녕하세요" in paths.srt.read_text(encoding="utf-8")
 
 
 @pytest.fixture
