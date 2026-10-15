@@ -17,6 +17,27 @@ import sys
 from pathlib import Path
 
 
+def _cuda_build_detail(torch_module) -> str:
+    cuda_version = torch_module.version.cuda
+    if cuda_version is None:
+        raise RuntimeError(f"CPU-only torch build: {torch_module.__version__}")
+    return f"torch={torch_module.__version__}, cuda={cuda_version}"
+
+
+def _cuda_available_detail(torch_module) -> str:
+    device_count = torch_module.cuda.device_count()
+    if not torch_module.cuda.is_available() or device_count < 1:
+        raise RuntimeError(
+            "CUDA runtime unavailable"
+            f" (torch={torch_module.__version__}, cuda={torch_module.version.cuda},"
+            f" devices={device_count})"
+        )
+    device_name = torch_module.cuda.get_device_name(0)
+    if not device_name:
+        raise RuntimeError("CUDA device name unavailable")
+    return f"torch={torch_module.__version__}, cuda={torch_module.version.cuda}, device={device_name}"
+
+
 def _self_test() -> int:
     results: list[tuple[str, bool, str]] = []
 
@@ -46,6 +67,16 @@ def _self_test() -> int:
     def check_torch() -> None:
         import torch  # noqa: F401
 
+    def check_torch_cuda_build() -> None:
+        import torch
+
+        _cuda_build_detail(torch)
+
+    def check_torch_cuda_available() -> None:
+        import torch
+
+        _cuda_available_detail(torch)
+
     def check_ffmpeg() -> None:
         from src.utils.ffmpeg_runtime import resolve_ffmpeg_path
 
@@ -68,6 +99,8 @@ def _self_test() -> int:
     check("google_drive_runtime_import", check_google_drive_runtime)
     check("whisper_import", check_whisper)
     check("torch_import", check_torch)
+    check("torch_cuda_build", check_torch_cuda_build)
+    check("torch_cuda_available", check_torch_cuda_available)
     check("ffmpeg_availability", check_ffmpeg)
     check("audio_metadata_service_import", check_audio_metadata)
     check("runtime_path_initialization", check_runtime_paths)
