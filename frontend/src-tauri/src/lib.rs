@@ -637,6 +637,15 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Runs in the FIRST instance when Sorigul is launched again (#168). The
+/// second process never reaches `setup` (no tray, no backend) and exits
+/// inside the single-instance plugin; here the existing main window is only
+/// shown and focused -- hidden-to-tray included. The second launch's argv/cwd
+/// are deliberately ignored: no file open, folder change or command dispatch.
+fn handle_second_instance(app: &AppHandle, _argv: Vec<String>, _cwd: String) {
+    show_main_window(app);
+}
+
 /// Background close-guard check for a `close_behavior = "exit"` close.
 /// Confirmed idle exits through `app.exit(0)`, so RunEvent::ExitRequested
 /// stays the single sidecar cleanup path. Active work or any doubt hides the
@@ -674,6 +683,10 @@ pub fn run() {
     let sidecar_for_setup = sidecar.clone();
 
     let app = tauri::Builder::default()
+        // Must stay the first plugin: a second launch exits inside this
+        // plugin's setup before any other plugin, the tray or the backend
+        // sidecar is initialised (#168).
+        .plugin(tauri_plugin_single_instance::init(handle_second_instance))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
