@@ -358,13 +358,27 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
 
     $CandidateExeMetadata = Get-FileMetadata $CandidateExe
     $CandidateFfmpegMetadata = Get-FileMetadata $CandidateFfmpeg
-    $TorchRequirement = (
-        Get-Content -LiteralPath (Join-Path $RepoRoot "tools\requirements-torch-cuda.txt") |
-        Where-Object { $_ -match '^torch==' } |
-        Select-Object -First 1
+    $TorchRequirementPath = Join-Path $RepoRoot "tools\requirements-torch-cuda.txt"
+    $TorchRequirementLines = @(
+        foreach ($Line in [System.IO.File]::ReadAllLines($TorchRequirementPath)) {
+            $TrimmedLine = [string]$Line.Trim()
+            if ($TrimmedLine -match '^torch==[^\s]+$') {
+                $TrimmedLine
+            }
+        }
     )
-    if ([string]::IsNullOrWhiteSpace($TorchRequirement)) {
+    if ($TorchRequirementLines.Count -eq 0) {
         throw "BUILD_MANIFEST_TORCH_REQUIREMENT_MISSING"
+    }
+    if ($TorchRequirementLines.Count -ne 1) {
+        throw "BUILD_MANIFEST_TORCH_REQUIREMENT_AMBIGUOUS"
+    }
+    $TorchRequirement = [string]$TorchRequirementLines[0]
+    if (-not ($TorchRequirement -is [string])) {
+        throw "BUILD_MANIFEST_TORCH_REQUIREMENT_NOT_SCALAR"
+    }
+    if ($TorchRequirement -cne "torch==2.13.0+cu130") {
+        throw "BUILD_MANIFEST_TORCH_REQUIREMENT_MISMATCH"
     }
     $CriticalInputs = [ordered]@{}
     $CriticalInputPaths = [ordered]@{
@@ -391,10 +405,27 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         ffmpeg_sha256 = $CandidateFfmpegMetadata.sha256
         release_input_sha256 = $CriticalInputs
     }
+    $ManifestJson = ($Manifest | ConvertTo-Json -Depth 4) + "`n"
+    try {
+        $RoundTrippedManifest = $ManifestJson | ConvertFrom-Json
+    } catch {
+        throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
+    }
+    if (
+        -not ($RoundTrippedManifest.torch_requirement -is [string]) -or
+        $RoundTrippedManifest.torch_requirement -cne "torch==2.13.0+cu130" -or
+        -not ($RoundTrippedManifest.expected_cuda -is [string]) -or
+        $RoundTrippedManifest.expected_cuda -cne "13.0" -or
+        -not ($RoundTrippedManifest.source_head -is [string]) -or
+        $RoundTrippedManifest.source_head -cne $SourceHead
+    ) {
+        throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
+    }
+
     $CandidateManifest = Join-Path $CandidateDir "sorigul-build-manifest.json"
     [System.IO.File]::WriteAllText(
         $CandidateManifest,
-        ($Manifest | ConvertTo-Json -Depth 4) + "`n",
+        $ManifestJson,
         (New-Object System.Text.UTF8Encoding($false))
     )
     if (-not (Test-Path -LiteralPath $CandidateManifest -PathType Leaf)) {
