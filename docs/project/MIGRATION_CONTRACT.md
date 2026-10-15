@@ -1,6 +1,6 @@
 # Sorigul Migration Contract
 
-Status: `LOCK CANDIDATE — USER REVIEW REQUIRED`
+Status: `LOCKED`
 
 ## 1. Purpose
 

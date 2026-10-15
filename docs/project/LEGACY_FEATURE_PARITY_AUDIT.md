@@ -6,6 +6,8 @@
 >
 > Legacy baseline: `bongbong90/jeonsa_doumi` `main` / `fbc86313a179a62a586386551f99384a9fce5fc8`
 
+> **Decision resolution:** 이 문서는 위 baseline에서 수집한 Legacy 증거와 당시의 conflict/open question 기록을 보존한다. 이후 확정된 제품 정책은 `MIGRATION_CONTRACT.md`가 우선한다. 따라서 21–22절의 intentional change candidates/open questions는 Contract에서 해결되었고, Dashboard는 Legacy에서 ACTIVE였다는 증거를 유지하되 Sorigul에서는 D10 `INTENTIONAL_CHANGE`로 제거한다. 23절 B08은 Dashboard 완성이 아니라 독립 Log Screen과 Dashboard 제거 결정의 반영으로 해석한다. 제품 행동이 아닌 D09 Result 탐색/API 구조만 deferred technical decision으로 남는다.
+
 ## 1. Audit Scope
 
 이 문서는 `jeonsa_doumi`의 현재 `main`에서 사용자에게 실제 제공되거나 최신 검증으로 확인된 기능 계약을 추출하고, 현재 Sorigul 문서·화면 설계가 이를 수용하는지 판정한다. Sorigul 및 Legacy의 코드는 변경하거나 실행하지 않았고, 외부 API·Whisper·MP3도 실행하지 않았다. Cloud 범위는 Google Drive 단일 지원이며 MYBOX와 다중 provider 설계는 범위 밖이다.
