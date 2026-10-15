@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
@@ -10,6 +11,26 @@ export interface SidecarStatus {
   owned: boolean | null
   code: string | null
   message: string | null
+}
+
+export interface TrayProgressPayload {
+  status: string
+  currentFile: string | null
+  currentProgress: number | null
+}
+
+function filenameOnly(value: string | null): string | null {
+  if (!value) return null
+  const filename = value.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/[\r\n]/g, ' ').trim()
+  return filename || null
+}
+
+/** Updates the one native tray icon; browser development has no tray. */
+export async function setTrayProgress(payload: TrayProgressPayload): Promise<void> {
+  if (!isTauri()) return
+  await invoke('set_tray_progress', {
+    payload: { ...payload, currentFile: filenameOnly(payload.currentFile) },
+  })
 }
 
 /** Subscribe first, then read the latest snapshot so startup events cannot be lost. */
@@ -61,6 +82,61 @@ export async function pickFolder(currentValue: string): Promise<string | undefin
 export async function openInExplorer(scanId: string, itemId?: string | null): Promise<void> {
   if (!isTauri()) return
   await invoke('open_folder_by_intent', { scanId, itemId: itemId ?? null })
+}
+
+/** Label of the single reusable completion toast window (tauri.conf.json). */
+export const COMPLETION_TOAST_WINDOW = 'completion-toast'
+
+export type CompletionIntent = 'FILE_COMPLETED' | 'JOB_COMPLETED'
+
+/**
+ * One completion event for the Sorigul toast. Opaque identities only: the
+ * transcription folder is resolved by the backend from job_id when the user
+ * clicks 폴더 열기, and never reaches the frontend.
+ */
+export interface CompletionToastRequest {
+  desktop_intent: CompletionIntent
+  job_id: string
+  file_id: string | null
+  message: string
+}
+
+export interface CompletionToast extends CompletionToastRequest {
+  generation: number
+}
+
+export function isCompletionToastWindow(): boolean {
+  return isTauri() && getCurrentWindow().label === COMPLETION_TOAST_WINDOW
+}
+
+/** Replaces the toast content and shows it; rejects if the toast cannot be shown. */
+export async function showCompletionToast(request: CompletionToastRequest): Promise<void> {
+  await invoke('show_completion_toast', { request })
+}
+
+/** Subscribe first, then read the current toast so the first event cannot be lost. */
+export async function watchCompletionToast(
+  onToast: (toast: CompletionToast | null) => void,
+): Promise<() => void> {
+  const unlisten = await listen<CompletionToast>('sorigul://completion-toast', (event) => {
+    onToast(event.payload)
+  })
+  try {
+    onToast(await invoke<CompletionToast | null>('get_completion_toast'))
+  } catch (error) {
+    unlisten()
+    throw error
+  }
+  return unlisten
+}
+
+/** Toast 폴더 열기: the Rust command asks the backend for the Job's validated folder. */
+export async function openNotificationFolder(jobId: string): Promise<void> {
+  await invoke('open_notification_folder', { jobId })
+}
+
+export async function dismissCompletionToast(): Promise<void> {
+  await invoke('dismiss_completion_toast')
 }
 
 /** Opens a URL in the user's default system browser (Drive OAuth handoff). */

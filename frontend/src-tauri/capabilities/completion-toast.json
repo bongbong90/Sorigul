@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "completion-toast",
+  "description": "Completion toast window (Issue #110): may only listen for its own content event. Show/hide and the job-scoped 폴더 열기 go through Rust commands that take an opaque job_id and validate the folder through the backend; no opener, shell, filesystem, notification or window-control permission is granted.",
+  "windows": ["completion-toast"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

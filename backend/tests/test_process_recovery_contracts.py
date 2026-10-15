@@ -1,5 +1,5 @@
 """Package B runtime contracts: stop/cancel acknowledgement, the output
-commit boundary, Local Whisper's honest mid-call limitation, auto-Drive
+commit boundary, Local Runtime child cleanup, auto-Drive
 isolation and bounded Drive I/O, and Job storage failure policy.
 
 Every test uses temp fixtures and fakes only: no real Whisper model, no
@@ -7,14 +7,14 @@ real ffmpeg, no real Google API, no user MP3. Races are made deterministic
 with injected callbacks and threading.Event -- never sleeps.
 """
 
+import hashlib
 import json
 import socket
+import subprocess
 import threading
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
-
 from src.domain.models import DriveAuthState, DriveStatus, FileStatus, JobEvent
 from src.domain.transcription import CancellationToken, TranscriptionResult
 from src.engines.local_whisper import LocalWhisperEngine
@@ -265,47 +265,66 @@ def test_completion_callback_failure_never_fails_a_committed_file(tmp_path):
     assert finished.status == FileStatus.DONE
 
 
-# -- Stop/Cancel acknowledgement + Local Whisper blocking call (AUD-LOC-001) -----
+# -- Stop/Cancel acknowledgement + Local Runtime cleanup (AUD-LOC-001) -----------
 
 
-class BlockingModel:
-    """Fake Whisper model whose transcribe() blocks like a long native call."""
-
+class BlockingWorker:
     def __init__(self):
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.terminated = False
+        self.killed = False
+        self.pid = 4321
 
-    def transcribe(self, path, **options):
+    def wait(self, timeout):
         self.entered.set()
-        assert self.release.wait(WAIT), "test never released the blocking call"
-        return {"text": "늦게 끝난 결과", "segments": [{"start": 0, "end": 1, "text": "늦게 끝난 결과"}]}
+        if not self.release.wait(timeout):
+            raise subprocess.TimeoutExpired("local-worker", timeout)
+        return -15
 
+    def terminate(self):
+        self.terminated = True
+        self.release.set()
 
-class FakeCuda:
-    def is_available(self):
-        return False
-
-
-class FakeTorch:
-    cuda = FakeCuda()
-
-
-class FakeWhisper:
-    def __init__(self, model):
-        self.model = model
-
-    def load_model(self, name, device):
-        return self.model
+    def kill(self):
+        self.killed = True
+        self.release.set()
 
 
 @pytest.fixture
 def blocking_local_setup(tmp_path, monkeypatch, routes):
     folder = make_folder(tmp_path, ["A", "B"])
     manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
-    model = BlockingModel()
+    runtime_dir = tmp_path / "local-runtime"
+    runtime_dir.mkdir()
+    executable = runtime_dir / "sorigul-local-whisper.exe"
+    executable.write_bytes(b"fake-worker")
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    (runtime_dir / "runtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "runtime_type": "sorigul-local-whisper",
+                "runtime_version": 1,
+                "protocol_version": 1,
+                "torch_requirement": "torch==2.13.0+cu130",
+                "expected_cuda": "13.0",
+                "worker_sha256": digest,
+                "artifact_sha256": digest,
+                "source_head": "a" * 40,
+                "tracked_tree_clean": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker = BlockingWorker()
+    def reap_worker(process):
+        process.terminate()
+        process.wait(timeout=10)
+
     engine = LocalWhisperEngine(
-        whisper_loader=lambda: FakeWhisper(model),
-        torch_loader=lambda: FakeTorch(),
+        runtime_dir,
+        popen=lambda *_args, **_kwargs: worker,
+        reap=reap_worker,
     )
     service = BackgroundExecutionService(TranscriptionRunner(manager, lambda _job: engine), max_workers=1)
     monkeypatch.setattr(routes, "job_manager", manager)
@@ -313,27 +332,19 @@ def blocking_local_setup(tmp_path, monkeypatch, routes):
     job = manager.create_job(str(folder), ["A", "B"])
     assert service.start(job.job_id)
     future = service._futures[job.job_id]
-    assert model.entered.wait(WAIT)
-    return folder, manager, service, model, job, future
+    assert worker.entered.wait(WAIT)
+    return folder, manager, service, worker, job, future
 
 
-def test_stop_during_blocking_local_call_is_only_a_request_until_observed(blocking_local_setup, routes):
-    folder, manager, service, model, job, future = blocking_local_setup
+def test_stop_during_local_worker_reaps_before_acknowledgement(blocking_local_setup, routes):
+    folder, manager, service, worker, job, future = blocking_local_setup
 
     response = routes.job_action(job.job_id, routes.JobActionRequest(action="stop"))
     again = routes.job_action(job.job_id, routes.JobActionRequest(action="stop"))
 
-    # Acknowledged, but the Job still reports the truth: still transcribing.
     assert response.status == FileStatus.TRANSCRIBING
     assert response.files["A"] == FileStatus.TRANSCRIBING
     assert [e.message for e in again.events].count("중지 요청됨") == 1
-    assert FileStatus.STOPPED not in again.files.values()
-    # Retry cannot start a new run before the stop is actually persisted.
-    with pytest.raises(HTTPException) as caught:
-        routes.job_action(job.job_id, routes.JobActionRequest(action="retry"))
-    assert caught.value.status_code == 409
-
-    model.release.set()
     future.result(timeout=WAIT)
 
     finished = manager.get_job(job.job_id)
@@ -342,24 +353,20 @@ def test_stop_during_blocking_local_call_is_only_a_request_until_observed(blocki
     assert not (folder / "A.txt").exists(), "a requested run must never commit output"
     assert staged_leftovers(folder) == []
     assert terminal_job_events(finished) == ["Job 중지됨"]
+    assert worker.terminated is True
     assert not service.is_active(job.job_id)
     retried = routes.job_action(job.job_id, routes.JobActionRequest(action="retry"))
     assert retried.status == FileStatus.WAITING
 
 
-def test_cancel_during_blocking_local_call_is_only_a_request_until_observed(blocking_local_setup, routes):
-    folder, manager, service, model, job, future = blocking_local_setup
+def test_cancel_during_local_worker_reaps_before_acknowledgement(blocking_local_setup, routes):
+    folder, manager, service, worker, job, future = blocking_local_setup
 
     response = routes.job_action(job.job_id, routes.JobActionRequest(action="cancel"))
 
     assert response.status == FileStatus.CANCEL_REQUESTED
     assert response.files == {"A": FileStatus.CANCEL_REQUESTED, "B": FileStatus.WAITING}
     assert FileStatus.CANCELLED not in response.files.values()
-    with pytest.raises(HTTPException) as caught:
-        routes.job_action(job.job_id, routes.JobActionRequest(action="retry"))
-    assert caught.value.status_code == 409
-
-    model.release.set()
     future.result(timeout=WAIT)
 
     finished = manager.get_job(job.job_id)
@@ -368,6 +375,7 @@ def test_cancel_during_blocking_local_call_is_only_a_request_until_observed(bloc
     assert not (folder / "A.txt").exists()
     assert staged_leftovers(folder) == []
     assert terminal_job_events(finished) == ["Job 취소됨"]
+    assert worker.terminated is True
 
 
 def test_request_after_terminal_persisted_is_not_acknowledged(tmp_path):

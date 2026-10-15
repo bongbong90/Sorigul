@@ -14,15 +14,12 @@ console window for the backend child. `sidecar_main.py`'s `--self-test`
 mode compensates by also writing its result to a log file next to the exe,
 since a windowed PyInstaller build has no attached stdio to print to.
 
-The Whisper `medium` model weight is intentionally NOT bundled here -- it is
-downloaded/cached by openai-whisper at first real use, same as the existing
-dev-mode contract (see docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md
--> Whisper Runtime).
+Local Whisper, torch and CUDA are deliberately excluded from this Core
+artifact. They are built by `sorigul_local_runtime.spec` and installed into
+the versioned per-user runtime directory. FFmpeg remains a Core resource.
 """
 
 from pathlib import Path
-
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 BACKEND_ROOT = Path(SPECPATH).resolve().parent  # backend/packaging -> backend
 
@@ -42,24 +39,18 @@ hidden_imports = [
     "googleapiclient.discovery",
     "googleapiclient.discovery_cache",
     "googleapiclient.http",
-    "whisper",
-    "tiktoken_ext",
-    "tiktoken_ext.openai_public",
 ]
-
-datas = collect_data_files("whisper") + collect_data_files("tiktoken_ext")
-torch_binaries = collect_dynamic_libs("torch")
 
 a = Analysis(
     [str(BACKEND_ROOT / "src" / "sidecar_main.py")],
     pathex=[str(BACKEND_ROOT)],
-    binaries=torch_binaries,
-    datas=datas,
+    binaries=[],
+    datas=[],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["torch", "whisper", "numba", "llvmlite"],
     noarchive=False,
 )
 

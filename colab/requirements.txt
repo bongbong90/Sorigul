@@ -1,4 +1,6 @@
-openai-whisper==20250625
+# faster-whisper 1.2.1 supports Python >=3.9 and the canonical
+# WhisperModel(...).transcribe(...) API used by the zero-cost Colab runtime.
+faster-whisper==1.2.1
 fastapi==0.141.1
 uvicorn==0.52.4
 python-multipart==0.0.32
