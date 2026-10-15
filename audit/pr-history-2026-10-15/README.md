@@ -11,6 +11,10 @@
 - 후속 PR들이 같은 파일을 재수정했을 수 있다. 여기 적힌 **당시 변경 목적·검증 표기와 현재 코드의 구현 진실은 별도로 구분**한다. Source of Truth는 현 `docs/project/CURRENT_PRODUCT_CONTRACT.md`를 따른다.
 - 개인 MP3/경로/Drive 인증/로그 원문은 복사하지 않는다. 감사 브랜치는 Integration에서 독립했고 아직 현재 릴리스 HEAD에 병합하지 않았다.
 
+## 전체 커밋·PR·브랜치 통합 대조
+
+- [전체 153개 커밋 / 89개 PR / 91개 원격 브랜치 대조 및 병합 판단](./COMMIT_PR_FULL_RECONCILIATION_2026-10-15.md): 기존 74건 개별 감사기록의 상위 원장으로, 최초 커밋부터 현재 Integration HEAD까지의 commit SHA·PR 상태와 병합 보류 사유를 정리한다. **코드 병합 및 installed PASS를 의미하지 않는다.**
+
 ## 찾아보기
 
 | 기록 파일 | 범위/대상 | PR 수 |
