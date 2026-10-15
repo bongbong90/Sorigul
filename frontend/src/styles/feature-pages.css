@@ -586,6 +586,11 @@
   gap: var(--space-compact);
 }
 
+.drive-path-preview {
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
 .shutdown-options {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

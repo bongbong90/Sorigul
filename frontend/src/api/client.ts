@@ -156,7 +156,7 @@ export interface ShutdownState {
 }
 
 export interface RendezvousState {
-  state: 'WAITING' | 'FOUND' | 'CONNECTED' | 'FAILED' | 'EXPIRED' | 'AUTH_REQUIRED'
+  state: 'WAITING' | 'FOUND' | 'CONNECTED' | 'FAILED' | 'EXPIRED' | 'AUTH_REQUIRED' | 'PAIRING_REQUIRED'
   base_url?: string | null
   request_id?: string | null
 }
@@ -296,7 +296,9 @@ export const api = {
   }),
   startColabRendezvous: () => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST' }),
   pollColabRendezvous: (requestId: string) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId)),
-  verifyColabUrl: (url: string) => request<RendezvousState>('/colab/verify', { method: 'POST', body: JSON.stringify({ url }) }),
+  verifyColabUrl: (url: string, requestId: string) => request<RendezvousState>('/colab/verify', {
+    method: 'POST', body: JSON.stringify({ url, request_id: requestId }),
+  }),
   shutdown: () => request<ShutdownState>('/desktop/shutdown'),
   cancelShutdown: () => request<ShutdownState>('/desktop/shutdown/cancel', { method: 'POST' }),
 }

@@ -2,3 +2,4 @@ openai-whisper==20250625
 fastapi
 uvicorn
 python-multipart
+cryptography

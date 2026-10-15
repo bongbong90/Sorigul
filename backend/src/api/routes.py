@@ -619,7 +619,8 @@ def poll_colab_rendezvous(request_id: str):
 
 class ColabVerifyRequest(BaseModel):
     url: str
+    request_id: str = Field(min_length=1)
 
 @router.post('/colab/verify', response_model=RendezvousState)
 def verify_colab_url(req: ColabVerifyRequest):
-    return colab_rendezvous_service.verify_url(req.url)
+    return colab_rendezvous_service.verify_url(req.url, req.request_id)

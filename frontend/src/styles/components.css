@@ -194,30 +194,53 @@
 /* Progress — 시각 표현만 담당하며 실제 job 진행률 계산/polling은 포함하지 않는다. */
 
 .progress {
+  display: block;
   width: 100%;
   height: var(--space-compact);
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-control);
   background-color: var(--color-surface-soft);
+  color: var(--color-primary);
   overflow: hidden;
+  appearance: none;
 }
 
-.progress-fill {
-  height: 100%;
+.progress::-webkit-progress-bar {
+  border-radius: var(--radius-control);
+  background-color: var(--color-surface-soft);
+}
+
+.progress::-webkit-progress-value {
+  border-radius: var(--radius-control);
   background-color: var(--color-primary);
 }
 
-.progress-indeterminate {
-  overflow: hidden;
+.progress::-moz-progress-bar {
+  border-radius: var(--radius-control);
+  background-color: var(--color-primary);
 }
 
-.progress-indeterminate .progress-fill {
-  width: 35%;
+.progress-indeterminate::-webkit-progress-bar {
+  background-color: var(--color-surface-soft);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 32.5%,
+    var(--color-primary) 32.5%,
+    var(--color-primary) 67.5%,
+    transparent 67.5%,
+    transparent 100%
+  );
+  background-position: -100% 0;
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
   animation: progress-indeterminate 1.2s ease-in-out infinite;
 }
 
 @keyframes progress-indeterminate {
-  from { transform: translateX(-120%); }
-  to { transform: translateX(300%); }
+  from { background-position: -100% 0; }
+  to { background-position: 100% 0; }
 }
 
 /* Card / Surface */

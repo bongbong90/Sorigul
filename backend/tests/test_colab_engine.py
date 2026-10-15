@@ -23,6 +23,14 @@ from src.engines.colab import (
 )
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import TranscriptionRunner
+from src.services.colab_security import PairingRegistry
+
+
+def paired_session(base_url="https://example.invalid"):
+    registry = PairingRegistry()
+    session = registry.create()
+    registry.bind(session.request_id, base_url)
+    return session
 
 
 class FakeSplitter:
@@ -282,7 +290,9 @@ def test_http_client_classifies_status_without_network(
         )
 
     monkeypatch.setattr("urllib.request.urlopen", fail_request)
-    client = DirectColabHttpClient("https://example.invalid")
+    client = DirectColabHttpClient(
+        "https://example.invalid", paired_session("https://example.invalid")
+    )
     with pytest.raises(EngineError) as caught:
         client.transcribe(chunk)
     assert caught.value.retryable is retryable
@@ -344,7 +354,9 @@ def run_two_file_http_job(tmp_path, monkeypatch, transcribe_outcomes):
     manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
     job = manager.create_job(str(folder), ["A", "B"])
     engine = DirectColabEngine(
-        DirectColabHttpClient("https://example.invalid"),
+        DirectColabHttpClient(
+            "https://example.invalid", paired_session("https://example.invalid")
+        ),
         FakeSplitter(tmp_path, [0]),
         ColabRecoveryCache(tmp_path / "cache"),
         retry_delay_seconds=0,
@@ -422,7 +434,10 @@ def test_colab_url_normalization():
     assert normalize_colab_base_url('https://example.test/') == 'https://example.test'
     assert normalize_colab_base_url('https://example.test/health') == 'https://example.test'
     assert normalize_colab_base_url('https://example.test/transcribe') == 'https://example.test'
-    assert normalize_colab_base_url('  http://local:8080/health  ') == 'http://local:8080'
+    assert normalize_colab_base_url('  http://localhost:8080/health  ') == 'http://localhost:8080'
+
+    with pytest.raises(ColabUrlError):
+        normalize_colab_base_url('http://local:8080/health')
 
     with pytest.raises(ColabUrlError):
         normalize_colab_base_url('ftp://example.test')
@@ -450,7 +465,9 @@ def test_http_client_url_construction(monkeypatch):
 
     monkeypatch.setattr('urllib.request.urlopen', mock_urlopen)
 
-    client = DirectColabHttpClient('https://example.test/health')
+    client = DirectColabHttpClient(
+        'https://example.test/health', paired_session('https://example.test')
+    )
     assert client.base_url == 'https://example.test'
 
     client.check_health()

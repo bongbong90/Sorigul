@@ -676,7 +676,7 @@ function DrivePathPreview({ course, subject, settings }: { course: string; subje
 
   return (
     <div className="setting-note">
-      <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+      <div className="drive-path-preview">
         {driveRoot}
 {'\n/ '}전사자료
 {'\n/ '}{trimmedCourse}
