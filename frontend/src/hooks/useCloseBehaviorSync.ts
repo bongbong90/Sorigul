@@ -27,8 +27,8 @@ export function useCloseBehaviorSync(): void {
       try {
         const settings = await api.settings(controller.signal)
         if (!active) return
-        synced = true
         await invoke('set_close_behavior', { behavior: settings.close_behavior })
+        synced = true
       } catch {
         // Backend not ready yet; retry on the next tick.
       } finally {
