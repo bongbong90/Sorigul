@@ -1,0 +1,30 @@
+STEP 1-A manual implementation review (no operational activation)
+================================================================
+
+Reviewer: implementation author; not an independent approval or merge review.
+Issues: #208 classification, #210 runner failure and termination boundaries.
+
+Reviewed properties:
+- No private operating script, path, SID, credentials or historical snapshot
+  is part of the tracked addition. Synthetic SID generation is test-local.
+- No product source, bootstrap, installer or Runtime is imported/executed.
+- Fixture guards reject operating roots. Audit state is a sibling of roots.
+- I/O failure cannot skip freshness checks into a successful result.
+- PID and creation identity plus live process are checked before permission.
+- Final success needs a later same-run nonce-bearing committed observation.
+- Mixed changes use maximum risk. New admissions remain protected thereafter.
+- #189 is literal directory/path/field matching; files, prefix siblings,
+  reparse and extra metadata changes cannot use that exception.
+- Raw differences and policy decisions remain separate and append-only.
+- Failed/partial runs refuse resumption; historical evidence is never reset.
+
+Post-first-run review improvement:
+Explicitly reject unavailable/zero inode identity and revalidate the identity
+record and critical pointer-file reparse status on every gate read. T12 now
+injects an unavailable identity. This was a static coverage improvement after
+the first 32-test PASS, not a failed safety test. A full post-change run is
+required before commit. Both run reports must remain private and preserved.
+
+Residual limits are documented in README.txt. The production adapter and
+independent operational review are pending separate approval. Draft PR only;
+no main/Integration merge, Phase B entry or policy activation is authorized.
