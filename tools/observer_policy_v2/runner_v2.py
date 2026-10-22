@@ -12,7 +12,8 @@ import uuid
 
 from observer_v2 import (ObservationError, PERMIT, ROOTS, VERSION, check_ancestors,
                          digest, exclusive_json, file_hash, journal_lock, load,
-                         process_start, require_fixture)
+                         process_start, require_fixture, publish_json, latch_stop,
+                         snapshot)
 
 
 class Gate:
@@ -115,6 +116,65 @@ def stop_owned(process):
             process.wait(timeout=3)
 
 
+def final_state(gate, heartbeat):
+    expected = load(gate.audit / f"state-{heartbeat['sequence']:08d}.json")["snapshot"]
+    if snapshot(gate.root) != expected or snapshot(gate.root) != expected:
+        raise ObservationError("POST_NONCE_OBSERVATION_CHANGED")
+    return digest(expected)
+
+
+def verify_completion(gate, heartbeat):
+    """Caller holds journal lock. Existence or a candidate result is insufficient."""
+    for name in ("FINAL_REQUEST.json", "RUNNER_RESULT.json", "COMPLETION.json"):
+        check_ancestors(gate.audit / name)
+    request = load(gate.audit / "FINAL_REQUEST.json")
+    result = load(gate.audit / "RUNNER_RESULT.json")
+    completion = load(gate.audit / "COMPLETION.json")
+    seal = result.pop("seal", None)
+    if seal != digest(result):
+        raise ObservationError("RESULT_SEAL_INVALID")
+    binding = {k: heartbeat[k] for k in ("run_id", "sequence", "policy_hash", "baseline_hash", "observer", "final_nonce", "commit_hash")}
+    if (not isinstance(request.get("nonce"), str) or not re.fullmatch(r"[0-9a-f]{32}", request["nonce"])
+            or request.get("run_id") != gate.run_id or request.get("nonce") != heartbeat["final_nonce"]
+            or heartbeat["at"] < request["at"] or heartbeat["sequence"] <= request["after_sequence"]
+            or result.get("binding") != binding
+            or result.get("snapshot_hash") != final_state(gate, heartbeat)
+            or any(result.get(k) != v for k, v in {"run_id": gate.run_id, "success": True,
+                   "permit": True, "child_exit": 0, "runner_exit": 0, "cleanup_verified": True}.items())
+            or completion != {"run_id": gate.run_id, "final_nonce": request["nonce"],
+                              "result_sha256": file_hash(gate.audit / "RUNNER_RESULT.json"),
+                              "commit_hash": heartbeat["commit_hash"]}):
+        raise ObservationError("COMPLETION_CONTRACT_INVALID")
+    if (gate.audit / "STOP.json").exists() or (gate.audit / "RUNNER_FAILURE.json").exists():
+        raise ObservationError("COMPLETION_STOP_LATCHED")
+    return result
+
+
+def finalize(gate, result, nonce, request_at, after_sequence):
+    # Candidate + completion commit, both create-new atomic publications. Completion
+    # is the success boundary; a latched STOP invalidates both records for readers.
+    with journal_lock(gate.audit):
+        hb = gate._validate(nonce, request_at, after_sequence)
+        candidate = {**result, "success": True, "permit": True, "runner_exit": 0,
+                     "cleanup_verified": True, "reason": "FINAL_OBSERVATION_CONFIRMED",
+                     "binding": {k: hb[k] for k in ("run_id", "sequence", "policy_hash", "baseline_hash", "observer", "final_nonce", "commit_hash")},
+                     "snapshot_hash": final_state(gate, hb)}
+        candidate["seal"] = digest(candidate)
+        try:
+            publish_json(gate.audit / "RUNNER_RESULT.json", candidate)
+        except Exception as error:
+            raise ObservationError("RESULT_AUDIT_FAILED") from error
+        gate._validate(nonce, request_at, after_sequence)
+        final_state(gate, hb)
+        publish_json(gate.audit / "COMPLETION.json",
+                     {"run_id": gate.run_id, "final_nonce": nonce,
+                      "result_sha256": file_hash(gate.audit / "RUNNER_RESULT.json"),
+                      "commit_hash": hb["commit_hash"]})
+        # Detect STOP injected during publication, including noncooperating writers.
+        hb = gate._validate(nonce, request_at, after_sequence)
+        return verify_completion(gate, hb)
+
+
 def run_guarded(fixture, run_id, command, max_age=2.0, final_timeout=3.0, task_timeout=5.0):
     root = require_fixture(fixture, run_id)
     # A CLI build adapter is deliberately absent in STEP 1-A. This API also restricts
@@ -124,12 +184,13 @@ def run_guarded(fixture, run_id, command, max_age=2.0, final_timeout=3.0, task_t
             or Path(command[1]).resolve() != helper or command[2] != str(root)
             or command[3] != run_id or command[4] not in {"success", "wait", "stop-at-exit"}):
         raise ObservationError("SYNTHETIC_CHILD_ONLY")
-    gate = Gate(root, run_id, max_age)
+    gate = None
     process = None
     result = {"run_id": run_id, "success": False, "permit": False, "child_started": False,
               "child_exit": None, "runner_exit": 1, "reason": None}
     started_at = time.monotonic()
     try:
+        gate = Gate(root, run_id, max_age)
         gate.validate()  # Before process creation, including a fast exit-0 child.
         process = subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         result["child_started"] = True
@@ -148,29 +209,41 @@ def run_guarded(fixture, run_id, command, max_age=2.0, final_timeout=3.0, task_t
         request_at = time.time()
         nonce = uuid.uuid4().hex
         with journal_lock(gate.audit):
-            exclusive_json(gate.audit / "FINAL_REQUEST.json",
-                           {"run_id": run_id, "nonce": nonce, "at": request_at})
+            publish_json(gate.audit / "FINAL_REQUEST.json",
+                           {"run_id": run_id, "nonce": nonce, "at": request_at,
+                            "after_sequence": after_sequence})
         deadline = time.monotonic() + final_timeout
         while True:
             heartbeat = gate.validate()
             if heartbeat.get("final_nonce") == nonce:
-                gate.validate(nonce, request_at, after_sequence)
-                result.update(success=True, permit=True, runner_exit=0, reason="FINAL_OBSERVATION_CONFIRMED")
+                # Owned child must be cleaned up BEFORE any success record exists.
+                stop_owned(process)
+                if process.poll() != 0:
+                    raise ObservationError("OWNED_PROCESS_CLEANUP_UNVERIFIED")
+                result.update(finalize(gate, result, nonce, request_at, after_sequence))
                 break
             if time.monotonic() >= deadline:
                 raise ObservationError("FINAL_OBSERVATION_TIMEOUT")
             time.sleep(0.02)
     except Exception as error:
         result["reason"] = type(error).__name__ + ":" + str(error)
-    finally:
-        if process is not None:
-            stop_owned(process)
-            result["child_exit"] = process.returncode
-        # A failure to store the result cannot preserve a successful outcome.
+        if str(error) == "RESULT_AUDIT_FAILED":
+            result["reason"] = "RESULT_AUDIT_FAILED"
+    if not result["success"]:
+        result.update(success=False, permit=False, runner_exit=1)
         try:
-            exclusive_json(root / "audit" / "RUNNER_RESULT.json", result)
+            if process is not None:
+                stop_owned(process)
+                result["child_exit"] = process.returncode
+        except Exception as error:
+            result["reason"] = "OWNED_PROCESS_CLEANUP_FAILED:" + type(error).__name__
+        try:
+            latch_stop(root / "audit", run_id, result["reason"])
+            publish_json(root / "audit" / "RUNNER_FAILURE.json", result)
+            if not (root / "audit" / "RUNNER_RESULT.json").exists():
+                publish_json(root / "audit" / "RUNNER_RESULT.json", result)
         except Exception:
-            result.update(success=False, permit=False, runner_exit=1, reason="RESULT_AUDIT_FAILED")
+            result["reason"] = "RESULT_AUDIT_FAILED"
     return result
 
 

@@ -1,4 +1,4 @@
-Observer Policy V2 -- STEP 1-A fixture implementation
+Observer Policy V2 -- STEP 1-A + STEP 1-C fixture implementation
 ===================================================
 
 Related: GitHub issues #208 and #210. No issue is closed by this tooling.
@@ -34,17 +34,21 @@ their later modification/deletion stops. A stopped/partial run cannot resume.
 Priority: HARD_STOP > INVESTIGATE_HOLD > WARN_RECORDED > ALLOW_RECORDED
 > NO_CHANGE. Existing-entry changes/deletions stop, except for the literal
 #189 EBWebView directory write_ticks-only boundary. New sensitive, reparse,
-unsupported or unproven additions hold. Document extensions and owner SID
-alone never permit. Synthetic provenance must bind file identity, metadata,
-ordinary-document classification, independent user context, confirmation,
-ancestor ACL review and build-write denial. The fixture evidence contract
-is not a production creator-attribution collector or malware scanner.
+audio-registration-ambiguous or scope-unverified additions hold. Only the
+baseline-pinned noncore general scope can admit plain additions, with intact
+synthetic isolation and complete observation. Registered paths and sensitive
+prefixes cannot qualify. Extension/name/owner SID do not provide permission.
+Creator PID is unnecessary: actor is recorded as UNKNOWN. Conflicting supplied
+identity/metadata still holds. Admission records bind identity and metadata;
+the original baseline and canonical raw differences are never rewritten.
+The fixture isolation assertion does NOT prove real-account ACL isolation.
 
 Audit and runner behavior
 -------------------------
 Each observation creates new raw, decision, state and hash-chained commit
 files with exclusive creation and fsync. Only heartbeat.json is a replaceable
-pointer. STOP, final request and runner result use create-new semantics.
+pointer. STOP is a permanent create-new latch. Final request, candidate result
+and completion use flushed staging + atomic create-new hard-link publication.
 A bounded cross-process journal lock serializes commit publication and reads.
 Partial transactions, audit changes or I/O failure cannot reuse permission.
 The audit directory is outside observed roots, preventing self-observation.
@@ -54,14 +58,23 @@ audit chain, PID/creation identity, process liveness and heartbeat age (never
 more than 90 seconds). It validates before spawning a synthetic-only child,
 throughout execution, and after exit 0. A new final request nonce requires
 a later committed same-run observation. The observer remains alive until
-the runner result is stored. Result-storage failure returns exit 1.
+the sealed candidate and COMPLETION.json are fully validated. Candidate result
+existence alone is never success. Completion binds run, nonce, final committed
+sequence, snapshot and result hash; reads require an intact fresh audit chain
+and no STOP/failure latch. Both sides observe data after the final nonce.
+Owned-child cleanup precedes finalization. Any cleanup, observation, staging,
+publication or completion-validation failure returns nonzero and latches STOP.
+STOP during candidate/completion publication is checked again. Completion is
+the finite success boundary; this does not claim to freeze future user actions
+or prove absence of transient changes between metadata samples. A later STOP
+invalidates completion for subsequent readers, without rewriting history.
 Termination uses the retained Popen process handle, never a process-name
 filter. The shipped synthetic child has no descendants or build commands.
 
 Exit codes: observer 0 = controlled final handshake, 5 = HARD_STOP,
 6 = observation/audit/startup failure, 7 = INVESTIGATE_HOLD.
 Runner 0 requires a successful child AND confirmed final observation AND
-stored result; every failure returns 1. An individual fault-test returning
+validated completion; every failure returns 1. An individual fault-test returning
 runner 1 is an expected safety result, not a failed test.
 
 Running the approved tests
@@ -71,6 +84,14 @@ Use the repository's existing Python, without installing dependencies:
   <python> -B tools/observer_policy_v2/test_step1a.py
     --preservation-manifest <private-evidence>/preservation-before.json
     --report <private-evidence>/test-report-unique.json
+
+For approved C01/C05 changes plus the full 32-test regression, use test_step1c.py
+with the same arguments. It runs 13 focused tests first and stops on the first
+failure. T12's two creator-evidence cases now expect ALLOW only inside pinned
+noncore scope; stale metadata, sensitive roots and executable disguise still
+HOLD. Prior STEP 1-A reports/commit remain historical evidence, not rewritten.
+Host CPU/process-I/O counters exclude child processes; process I/O is not
+physical disk throughput. Small-fixture results are not scale/performance PASS.
 
 The preservation manifest is a private JSON list of path/sha256 records for
 the original observer, runner, V1/V2, old STOPs, official bootstrap, Freeze

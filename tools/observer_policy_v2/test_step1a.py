@@ -158,7 +158,8 @@ class Safety(unittest.TestCase):
 
     def test_B07_lost_observer_process_no_child(self):
         exclusive_json(self.root / "audit" / "baseline.json",
-                       {"run_id": self.run, "snapshot": snapshot(self.root), "fixture_only": True})
+                       {"run_id": self.run, "snapshot": snapshot(self.root), "fixture_only": True,
+                        "scope": observer.fixture_scope()})
         command = [sys.executable, "-c", "from observer_v2 import Observer; import sys; Observer(sys.argv[1],sys.argv[2]).record()", str(self.root), self.run]
         result = subprocess.run(command, cwd=TOOLS, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0)
@@ -179,7 +180,8 @@ class Safety(unittest.TestCase):
 
     def test_B10_native_ps5_positive_final_handshake(self):
         exclusive_json(self.root / "audit" / "baseline.json",
-                       {"run_id": self.run, "snapshot": snapshot(self.root), "fixture_only": True})
+                       {"run_id": self.run, "snapshot": snapshot(self.root), "fixture_only": True,
+                        "scope": observer.fixture_scope()})
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         watcher = subprocess.Popen(self.native_command(), env=self.native_environment("watch-existing-user-v2.ps1"),
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
@@ -453,7 +455,10 @@ class Safety(unittest.TestCase):
                     proof = {"general/document.pdf": {"owner_sid": "synthetic-owner"}}
                 else:
                     proof["general/document.pdf"]["metadata_sha256"] = "stale"
-                self.record("INVESTIGATE_HOLD", proof)
+                # STEP 1-C: pinned noncore scope + addition-only is sufficient;
+                # absence of creator evidence is not uncertainty about scope.
+                self.record("INVESTIGATE_HOLD" if proof_kind == "stale_bound_evidence"
+                            else "ALLOW_RECORDED", proof)
         self.fixture()
         self.initialize()
         self.record("INVESTIGATE_HOLD", self.add_document("not-a-document.exe.pdf"))

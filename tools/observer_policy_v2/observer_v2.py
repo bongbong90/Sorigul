@@ -14,7 +14,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "observer-policy-v2-step1a"
+VERSION = "observer-policy-v2-step1c"
 PERMIT = {"NO_CHANGE", "ALLOW_RECORDED", "WARN_RECORDED"}
 RANK = {"NO_CHANGE": 0, "ALLOW_RECORDED": 1, "WARN_RECORDED": 2,
         "INVESTIGATE_HOLD": 3, "HARD_STOP": 4}
@@ -118,6 +118,36 @@ def exclusive_json(path, value):
         stream.write(encoded(value))
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def publish_json(path, value):
+    """Flush a private stage, then publish atomically without replacing history."""
+    check_ancestors(path)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".pending")
+    try:
+        exclusive_json(temporary, value)
+        os.link(temporary, path)  # create-new, same-volume NTFS fixture only
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def latch_stop(audit, run_id, reason):
+    # STOP is monotonic and independent of the journal lock. Never clear/rewrite it.
+    try:
+        exclusive_json(audit / "STOP.json", {"run_id": run_id, "reason": reason})
+    except FileExistsError:
+        pass
+
+
+def fixture_scope():
+    # Synthetic isolation assertion, NOT evidence about a real build account/ACL.
+    # The production R01-R10/F01-F08 mapping remains an unimplemented adapter.
+    return {"version": 1, "noncore_roots": ["general"],
+            "isolation_intact": True, "observation_complete": True,
+            "registered_paths": [], "sensitive_prefixes": [
+                "general/settings", "general/jobs", "general/auth", "general/core",
+                "general/runtime", "general/results", "general/installed"]}
 
 
 def atomic_pointer(path, value):
@@ -273,34 +303,41 @@ def allowed_mtime(event):
             == {k: v for k, v in b.items() if k != "write_ticks"})
 
 
-def classify(events, evidence):
+def classify(events, evidence, scope):
     decisions = []
     for event in events:
         row = event["after"]
         status, reason = "INVESTIGATE_HOLD", "INSUFFICIENT_EVIDENCE"
         proof = evidence.get(event["root"] + "/" + event["path"], {})
+        key = (event["root"] + "/" + event["path"].replace("\\", "/")).casefold()
+        sensitive = any(key == p.casefold() or key.startswith(p.casefold() + "/")
+                        for p in scope.get("sensitive_prefixes", []))
         if event["kind"] in {"modified", "deleted"}:
             status, reason = ("WARN_RECORDED", "EXACT_189_DIRECTORY_MTIME") if allowed_mtime(event) else ("HARD_STOP", "EXISTING_ENTRY_CHANGED")
         elif proof.get("build_account_intrusion") is True:
             status, reason = "HARD_STOP", "BUILD_ACCOUNT_INTRUSION"
         elif row["reparse"] or row["links"] != 1:
             reason = "REPARSE_OR_AMBIGUOUS_IDENTITY"
-        elif event["root"] != "general" or row["directory"]:
-            reason = "SENSITIVE_OR_NON_DOCUMENT_ADDITION"
-        elif (Path(row["path"]).suffix.lower() not in {".pdf", ".txt", ".md", ".docx", ".odt"}
+        elif (scope.get("version") != 1 or scope.get("isolation_intact") is not True
+              or scope.get("observation_complete") is not True):
+            reason = "SCOPE_OR_ISOLATION_UNVERIFIED"
+        elif (event["root"] != "general" or event["root"] not in scope.get("noncore_roots", []) or row["directory"]
+              or sensitive or key in {p.casefold() for p in scope.get("registered_paths", [])}):
+            reason = "SENSITIVE_OR_REGISTERED_ADDITION"
+        elif (Path(row["path"]).suffix.lower() in {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".opus", ".mp4", ".srt", ".json", ".msi", ".dll", ".pyd", ".bin"}
               or any(part.lower() in {"exe", "com", "lnk", "ps1", "bat", "cmd", "scr", "js", "vbs"}
                      for part in row["path"].split("\\")[-1].split("."))):
-            reason = "UNSUPPORTED_OR_EXECUTABLE_DOCUMENT_TYPE"
-        elif (proof.get("fixture_only") is True and proof.get("kind") == "ordinary_document"
-              and proof.get("user_confirmed") is True
-              and proof.get("writer_context") == "independent_user_action"
-              and proof.get("build_write_denied") is True
-              and proof.get("ancestor_acl_reviewed") is True
-              and proof.get("metadata_sha256") == digest(row)
-              and proof.get("file_identity") == row["identity"]):
-            status, reason = "ALLOW_RECORDED", "BOUND_MULTI_FACTOR_FIXTURE_EVIDENCE"
-        decisions.append({"root": event["root"], "path": event["path"], "kind": event["kind"],
-                          "classification": status, "reason": reason})
+            reason = "AUDIO_REGISTRATION_OR_SENSITIVE_TYPE_UNRESOLVED"
+        elif (("metadata_sha256" in proof and proof["metadata_sha256"] != digest(row))
+              or ("file_identity" in proof and proof["file_identity"] != row["identity"])):
+            reason = "CONFLICTING_BOUND_METADATA"
+        else:
+            status, reason = "ALLOW_RECORDED", "NONCORE_ADDITION_ONLY_PINNED_SCOPE"
+        item = {"root": event["root"], "path": event["path"], "kind": event["kind"],
+                "classification": status, "reason": reason, "actor": "UNKNOWN"}
+        if status == "ALLOW_RECORDED":
+            item["admission"] = {"identity": row["identity"], "metadata_sha256": digest(row)}
+        decisions.append(item)
     status = max((d["classification"] for d in decisions), key=RANK.get, default="NO_CHANGE")
     return {"classification": status, "permit": status in PERMIT, "events": decisions}
 
@@ -317,6 +354,8 @@ class Observer:
         if self.baseline["run_id"] != run_id:
             raise ObservationError("BASELINE_RUN_MISMATCH")
         self.expected = self.baseline["snapshot"]
+        self.scope = self.baseline.get("scope", {})
+        self.admissions = []
         self.sequence = 0
         self.previous_commit = None
         # Resuming a stopped/partial run is forbidden; a new fixture/run is required.
@@ -329,7 +368,8 @@ class Observer:
     def initialize(cls, fixture, run_id):
         root = require_fixture(fixture, run_id)
         exclusive_json(root / "audit" / "baseline.json",
-                       {"run_id": run_id, "snapshot": snapshot(root), "fixture_only": True})
+                       {"run_id": run_id, "snapshot": snapshot(root), "fixture_only": True,
+                        "scope": fixture_scope()})
         return cls(root, run_id)
 
     def record(self, evidence=None, final_nonce=None):
@@ -346,14 +386,16 @@ class Observer:
         if current != snapshot(self.root):
             raise ObservationError("OBSERVATION_RACE")
         events = path_delta(self.expected, current)
-        decision = classify(events, evidence or {})
+        decision = classify(events, evidence or {}, self.scope)
         raw = {"canonical": canonical_raw(self.baseline["snapshot"], current),
                "path_delta": events}
         sequence = self.sequence + 1
         common = {"run_id": self.run_id, "sequence": sequence, "policy_hash": self.policy_hash,
                   "baseline_hash": self.baseline_hash, "at": time.time(), "final_nonce": final_nonce,
                   "observer": self.identity}
-        state = {**common, "snapshot": current}
+        admissions = self.admissions + [{**e, "sequence": sequence} for e in decision["events"]
+                                       if "admission" in e]
+        state = {**common, "snapshot": current, "admissions": admissions}
         payloads = {"raw": {**common, **raw}, "decision": {**common, "decision": decision}, "state": state}
         for kind, payload in payloads.items():
             exclusive_json(self.audit / f"{kind}-{sequence:08d}.json", payload)
@@ -370,6 +412,7 @@ class Observer:
             # The on-disk original baseline is never rewritten. Committed state records
             # admit additions, so their subsequent modification/deletion is blocking.
             self.expected = current
+            self.admissions = admissions
         return decision
 
 
@@ -392,10 +435,17 @@ def watch(root, run_id, interval=0.05):
             if decision["classification"] == "INVESTIGATE_HOLD":
                 return 7
             if nonce:
+                from runner_v2 import Gate, verify_completion
+                gate = Gate(root, run_id)
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    if (root / "audit" / "RUNNER_RESULT.json").exists():
-                        return 0
+                    with journal_lock(observer.audit):
+                        hb = gate._validate(nonce, request["at"], request["after_sequence"])
+                        if snapshot(root) != observer.expected or snapshot(root) != observer.expected:
+                            raise ObservationError("POST_NONCE_OBSERVATION_CHANGED")
+                        if (observer.audit / "COMPLETION.json").exists():
+                            verify_completion(gate, hb)
+                            return 0
                     time.sleep(0.01)
                 raise ObservationError("FINAL_RESULT_NOT_ACKNOWLEDGED")
             time.sleep(interval)
@@ -403,7 +453,7 @@ def watch(root, run_id, interval=0.05):
         # Never publish a success heartbeat on any audit/observation error. If even
         # STOP storage fails, the runner's bounded observation failure still stops.
         try:
-            exclusive_json(root / "audit" / "STOP.json", {"run_id": run_id, "classification": "INVESTIGATE_HOLD", "reason": "OBSERVATION_OR_AUDIT_FAILED"})
+            latch_stop(root / "audit", run_id, "OBSERVATION_OR_AUDIT_FAILED")
         except OSError:
             pass
         return 6
