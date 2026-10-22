@@ -167,7 +167,7 @@ $TauriDir = Join-Path $FrontendDir "src-tauri"
 Write-Step "Building frontend production bundle"
 Push-Location $FrontendDir
 try {
-    npm run build
+    npm.cmd run build
     if ($LASTEXITCODE -ne 0) { throw "npm run build failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location
