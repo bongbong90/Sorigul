@@ -153,6 +153,26 @@ def _invoke_helper(ps5, scripts_dir, child_source):
     )
 
 
+def test_installer_npm_npx_calls_resolve_to_cmd_shims_in_ps5_ast(ps5):
+    # #208: bare `npm`/`npx` resolve to npm.ps1/npx.ps1 and fail under Restricted.
+    # Parse only (no execution) with the actual PS5.1 parser.
+    quoted = "'" + str(INSTALLER).replace("'", "''") + "'"
+    result = _run(
+        ps5,
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8\n"
+        "$tokens = $null; $errors = $null\n"
+        f"$ast = [System.Management.Automation.Language.Parser]::ParseFile({quoted}, [ref]$tokens, [ref]$errors)\n"
+        "if ($errors.Count) { throw 'INSTALLER_PARSE_FAILED' }\n"
+        "$ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) |"
+        " ForEach-Object { $_.GetCommandName() } | Where-Object { $_ -match '^np[mx]' }\n",
+    )
+    assert result.returncode == 0, result.stderr
+    names = result.stdout.split()
+    assert names, "installer must invoke npm/npx"
+    assert "npm.cmd" in names and "npx.cmd" in names
+    assert set(names) <= {"npm.cmd", "npx.cmd"}, names
+
+
 def test_direct_child_ps1_invocation_is_blocked_under_restricted(ps5, restricted, scripts_dir):
     child = scripts_dir / "build_backend_sidecar.ps1"
     child.write_text("exit 0\n", encoding="utf-8-sig")
