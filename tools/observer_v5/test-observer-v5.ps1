@@ -130,6 +130,19 @@ Test 'T01c_registered_replace_same_size_and_mtime_stop' { Expect-Stop { param($F
         $Old = New-Object IO.FileInfo($F.reg_mp3); $Tmp = Join-Path $F.base 'replacement.bin'; Write-Bytes $Tmp 3000
         [IO.File]::SetLastWriteTimeUtc($Tmp, $Old.LastWriteTimeUtc); [IO.File]::Delete($F.reg_mp3); [IO.File]::Move($Tmp, $F.reg_mp3) } @('REGISTERED_REPLACED') }
 
+Test 'T01d_registered_delete_then_recreate_identical_stop' { Expect-Stop { param($F)
+        $Old = New-Object IO.FileInfo($F.reg_mp3); $Write = $Old.LastWriteTimeUtc; $Create = $Old.CreationTimeUtc
+        [IO.File]::Delete($F.reg_mp3); Write-Bytes $F.reg_mp3 3000
+        [IO.File]::SetCreationTimeUtc($F.reg_mp3, $Create); [IO.File]::SetLastWriteTimeUtc($F.reg_mp3, $Write) } @('REGISTERED_REPLACED') }
+Test 'T01e_file_id_carries_volume_serial_and_index' {
+    $F = New-Fixture
+    $Id = Get-V5FileId $F.reg_mp3
+    $Vol = [regex]::Match((& cmd.exe /c vol ([IO.Path]::GetPathRoot($F.reg_mp3).TrimEnd('\')) | Out-String), '([0-9A-F]{4})-([0-9A-F]{4})').Groups
+    $Expected = ($Vol[1].Value + $Vol[2].Value).ToLowerInvariant()
+    $Parts = $Id.Split(':')
+    return @{ pass = ($Parts.Count -eq 2 -and $Parts[0] -ceq $Expected -and $Parts[1].Length -eq 16 -and $Parts[1] -cne ('0' * 16) -and $Parts[1].Substring(8) -cne '00000000'); info = @{ volume_matches = ($Parts[0] -ceq $Expected); index_len = $Parts[1].Length } }
+}
+
 # 2 + 7. Unregistered activity is recorded, non-blocking; Korean names and order shifts cause no false STOP
 Test 'T02_unregistered_add_modify_delete_nonblocking_recorded' {
     $F = New-Fixture; $B = Build-Baseline $F; if ($B.exit) { return @{ pass = $false; info = $B.err } }

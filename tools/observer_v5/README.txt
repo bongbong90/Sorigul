@@ -33,6 +33,10 @@ Launch (Windows PowerShell 5.1, execution policy unchanged)
   powershell.exe -NoProfile -NonInteractive -Command "$t=$null;$e=$null;$a=[Management.Automation.Language.Parser]::ParseFile('<path>\watch-existing-user-v5.ps1',[ref]$t,[ref]$e);& $a.GetScriptBlock() -BaselinePath '<v5>' -BaselineSha256 '<sha>' -StateDir '<dir>'"
 
 Limits
-  Metadata only for media (no content reads). Changes that revert between two polls, and a replacement that
-  restores size, write time and creation time, are outside the guarantee. History is hashed at start and at
-  the final scan only. Activation for a real build needs separate approval.
+  Content is hashed only for top-level hash_names (settings.json, jobs.json) and preserved files. Every other
+  file (media, nested core files, registered SRT/TXT/JSON) is checked by metadata (size, write/creation time,
+  attributes) and, for registered Downloads entries, NTFS file id: an in-place edit that keeps the size and
+  restores the write time is not detected. Changes that revert between two polls are outside the guarantee.
+  History is hashed at start and at the final scan only. Reparse directories (e.g. cloud-file placeholders)
+  are recorded but not traversed. Every cycle hashes all preserved files; the cycle must stay well below the
+  runner's 90 s heartbeat limit (measure before use). Activation for a real build needs separate approval.

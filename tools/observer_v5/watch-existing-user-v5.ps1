@@ -109,8 +109,12 @@ function Save-V5Scan($Scan, [string]$Stage) {
 
 try {
     if ([IO.File]::Exists($StopRequired)) { throw 'PRIOR_STOP_REQUIRED_PRESENT' }
-    if ((Get-V5Sha256 $BaselinePath) -cne $BaselineSha256) { Write-StopRequired ([ordered]@{ reason = 'BASELINE_SHA_MISMATCH' }); exit 5 }
-    $Baseline = Read-V5Json $BaselinePath
+    # Hash and parse the same bytes so a swap between the two cannot load an unverified baseline.
+    $BaselineBytes = [IO.File]::ReadAllBytes($BaselinePath)
+    $Hasher = [Security.Cryptography.SHA256]::Create()
+    try { $LoadedSha = ([BitConverter]::ToString($Hasher.ComputeHash($BaselineBytes))).Replace('-', '').ToLowerInvariant() } finally { $Hasher.Dispose() }
+    if ($LoadedSha -cne $BaselineSha256) { Write-StopRequired ([ordered]@{ reason = 'BASELINE_SHA_MISMATCH' }); exit 5 }
+    $Baseline = $script:V5Utf8.GetString($BaselineBytes) | ConvertFrom-Json
     if ($Baseline.format -cne 'sorigul-preservation-v5') { Write-StopRequired ([ordered]@{ reason = 'BASELINE_FORMAT_INVALID' }); exit 5 }
     $StateFull = [IO.Path]::GetFullPath($StateDir).TrimEnd('\') + '\'
     foreach ($Base in $Baseline.roots) { if ($StateFull.StartsWith(([IO.Path]::GetFullPath($Base.root).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw 'STATE_DIR_INSIDE_PROTECTED_ROOT' } }

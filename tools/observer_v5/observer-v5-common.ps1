@@ -48,7 +48,13 @@ function Get-V5Inventory([string]$Root, [string[]]$Exclude = @(), [string[]]$Has
         $Queue = New-Object 'Collections.Generic.Queue[IO.DirectoryInfo]'
         $Queue.Enqueue($RootInfo)
         while ($Queue.Count -gt 0) {
-            foreach ($Item in $Queue.Dequeue().GetFileSystemInfos()) {
+            $Parent = $Queue.Dequeue()
+            # A subdirectory that vanished after it was listed contributes no children; its
+            # entries then compare as REMOVED (blocking in protected scopes). The root and any
+            # other error (e.g. access denied) still fail closed.
+            try { $Children = $Parent.GetFileSystemInfos() }
+            catch [IO.DirectoryNotFoundException] { if ($Parent.FullName -ceq $RootInfo.FullName) { throw }; continue }
+            foreach ($Item in $Children) {
                 $Relative = $Item.FullName.Substring($Prefix)
                 if ($Exclude -contains $Relative) { continue }
                 $Directory = ($Item.Attributes -band [IO.FileAttributes]::Directory) -ne 0
@@ -100,7 +106,8 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 namespace SorigulV5 {
     public static class FileId {
-        [StructLayout(LayoutKind.Sequential)]
+        // BY_HANDLE_FILE_INFORMATION: FILETIME is 4-byte aligned, so no padding after Attributes.
+        [StructLayout(LayoutKind.Sequential, Pack = 4)]
         struct Info { public uint Attributes; public long Created, Accessed, Written; public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow; }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
