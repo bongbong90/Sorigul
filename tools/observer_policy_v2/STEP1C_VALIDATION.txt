@@ -1,0 +1,122 @@
+STEP 1-C C01/C05 minimal fixture implementation -- NOT ACTIVATED
+Related: #208, #210; Draft PR #211 / DO NOT MERGE.
+Phase B STOP / Fresh MSI 0 / STUDY USE READY = NO.
+
+One fail-fast run: 45/45 PASS, exit 0. No failed safety assertion/retry.
+C01 focused 6/6; C05 focused 7/7; complete STEP 1-A regression 32/32.
+97 retained random TEMP fixtures. Python 3.13.14, Windows, native PS5 Desktop.
+Original STEP 1-A commit and evidence remain historical and unchanged.
+
+Changed files, compared to the preserved STEP 1-A commit:
+  observer_v2.py: pinned synthetic scope, UNKNOWN actor, explicit admissions;
+    existing-entry STOP and exact #189 mtime rule unchanged. Canonical raw
+    differences remain separate; admitted entries remain in expected state.
+  runner_v2.py: fail-closed cleanup; sealed candidate + completion contract;
+    repeated final observation/STOP checks; atomic create-new publication.
+  test_step1a.py: manual baseline setup includes pinned synthetic scope;
+    T12 missing-creator and owner-only cases now ALLOW inside declared noncore
+    scope. They do not ALLOW because of SID/extension. Stale metadata still
+    HOLD, along with executable disguise, sensitive scope and other negatives.
+    All 32 test methods retained, none skipped.
+  test_step1c.py: 13 focused tests, then complete regression; host CPU/I/O.
+  README.txt and this file: current contracts, evidence and limits.
+
+Command (private path arguments redacted):
+  <existing-python> -B tools/observer_policy_v2/test_step1c.py
+    --preservation-manifest <private-before.json>
+    --report <private-new-report.json>
+  Exit 0. Actual command/log/report retained privately; no original logs,
+  private operating scripts, real paths or credentials are published.
+
+Measurement boundary:
+  Framework wall 14.752277 s; external invocation wall 15.909852 s.
+  Test-host user CPU 1.109375 s; kernel CPU 4.250000 s.
+  Test-host process I/O: 13,219 read operations / 259,539,880 transfer bytes;
+    1,895 write operations / 732,305 transfer bytes;
+    272,688 other operations / 12,779,182 transfer bytes.
+  Includes preservation hash reads and test work, excludes child-process
+  CPU/I/O and fixture post-run accounting. Process I/O includes cached/file/
+  device I/O; it is not physical disk throughput or a whole-process-tree sum.
+  Small fixtures only. NO operational-scale performance PASS is claimed.
+
+Preservation/read-only gate check:
+  Nine originals (operating Observer/runner, V1/V2, old STOPs, Bootstrap,
+    Freeze, original index) + four accepted prior evidence files: all 13
+    SHA256, byte size and UTC modification ticks unchanged before/after.
+  Main Integration HEAD/tree/tracked state unchanged. No official Source,
+    Freeze, configuration, baseline, ACL or protected user data was changed.
+  Existing official session baseline: nine roots, zero lexical overlap with
+    normal-user R10. Current protected-path metadata access was denied by
+    the OS; current/physical overlap is UNVERIFIED, not assumed disjoint.
+  No actual same-addition official blocking evidence. Official gate unchanged;
+    either gate STOP continues to mean overall STOP.
+
+Author review (not independent approval):
+  Only generic fixture tooling/docs are in the change. No product imports,
+    account switching, Runtime, MSI, actual transcription or build commands.
+  Only baseline-pinned general scope can admit; protected/webview additions,
+    registered paths, sensitive prefixes, audio ambiguity, reparse/collision,
+    incomplete observation and unknown isolation cannot silently permit.
+  Completion requires full result/hash binding, same run/nonce and fresh
+    committed observation with no STOP/failure latch. Candidate existence,
+    malformed or partial records never suffice. Staging is not history;
+    published audit records are create-new and never rewritten on failure.
+  Completion is the finite success boundary. Later STOP invalidates records
+    for subsequent readers; metadata polling cannot freeze future actions or
+    prove absence of transient/same-metadata media changes between samples.
+
+Remaining operational blockers:
+  Real R01-R10/F01-F08 root/registered-job/isolation mapping is not implemented.
+  No real-account ACL attestation or current official-root overlap proof.
+  Owned synthetic child has no descendants; real Windows process-tree/job
+    cleanup, crash durability and deployment supervision require separate work.
+  No production-size hashing/audit-chain/heartbeat timing benchmark.
+  New audio registration lifecycle remains HOLD if ambiguous.
+  Production connection/activation and merge require separate approval.
+
+Per-test results (next lines generated from the actual private report):
+test_C01_01_one_unknown_actor_extension_independent PASS
+test_C01_02_six_unknown_actor_additions PASS
+test_C01_03_mixed_mp3_and_normal_addition PASS
+test_C01_04_admitted_modify_and_delete PASS
+test_C01_05_sensitive_registered_audio_and_missing_contract PASS
+test_C01_06_collision_reparse_and_incomplete_snapshot PASS
+test_C05_01_positive_sealed_completion PASS
+test_C05_02_stop_after_nonce_before_finalization PASS
+test_C05_03_stop_during_candidate_and_completion_publication PASS
+test_C05_04_result_save_failure_and_partial_stage PASS
+test_C05_05_post_nonce_mutation_and_stale_replay PASS
+test_C05_06_cleanup_failure_is_nonzero PASS
+test_C05_07_watcher_rejects_result_existence_only PASS
+test_B01_missing_heartbeat_no_child PASS
+test_B02_native_heartbeat_read_lock_no_child PASS
+test_B03_expired_and_future_heartbeat_no_child PASS
+test_B04_wrong_run_or_pinned_policy_no_child PASS
+test_B05_sequence_mismatch_and_boolean_no_child PASS
+test_B06_audit_missing_tampered_and_partial_no_child PASS
+test_B07_lost_observer_process_no_child PASS
+test_B08_exit_zero_without_new_final_observation_fails PASS
+test_B09_stop_immediately_before_child_exit_zero_fails PASS
+test_B10_native_ps5_positive_final_handshake PASS
+test_B11_pid_start_identity_mismatch_no_child PASS
+test_B12_old_sequence_replay_no_child PASS
+test_B13_runner_result_storage_failure_is_not_success PASS
+test_B14_non_fixture_and_non_synthetic_child_rejected PASS
+test_B15_audit_storage_does_not_observe_itself PASS
+test_B16_io_loss_while_child_running_is_bounded_failure PASS
+test_B17_wrong_final_nonce_and_reused_sequence_rejected PASS
+test_T01_unchanged PASS
+test_T02_one_proven_document_raw_not_rewritten PASS
+test_T03_six_documents_then_modification_or_deletion_stops PASS
+test_T04_existing_mp3_bytes_size_time_change PASS
+test_T05_existing_mp3_delete_rename PASS
+test_T06_existing_transcript_each_change_delete PASS
+test_T07_settings_jobs_runtime_manifest_change PASS
+test_T08_restricted_token_fixture_acl PASS
+test_T09_native_junction_not_traversed PASS
+test_T10_mixed_normal_add_and_existing_change_hard_stop PASS
+test_T11_exact_189_mtime_boundary PASS
+test_T12_audit_race_and_unproven_identity_fail_closed PASS
+test_T13_originals_and_baselines_sha_unchanged PASS
+test_T14_historical_stop_never_reclassified PASS
+test_T15_source_freeze_originals_unchanged PASS
