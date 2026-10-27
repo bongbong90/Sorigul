@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { Bell, Cloud, MonitorCog, Power, Server, XCircle } from 'lucide-react'
-import { api, getUserMessage, isRequestAbort, isRequestTimeout, type DriveAuthState, type RuntimeSettings, type ShutdownState } from '../api/client'
+import { api, getUserMessage, isRequestAbort, isRequestTimeout, type DriveAuthState, type JobModel, type RuntimeSettings, type ShutdownState } from '../api/client'
+import { EngineSection, type EngineConnection } from '../components/transcription/EngineSection'
 import { isTauri, openInBrowser } from '../lib/native'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -9,7 +10,7 @@ import { Card } from '../components/ui/Card'
 
 const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
-  close_behavior: 'tray', shutdown: 'disabled',
+  close_behavior: 'exit', shutdown: 'disabled',
   transcription_folder: null, last_course: null, last_subject: null,
   last_engine: 'local_whisper', subject_stage_overrides: {},
   drive_exam_root: '2026 제37회 공인중개사 자격시험',
@@ -32,7 +33,7 @@ function pollDelay(ms: number, signal: AbortSignal): Promise<boolean> {
   })
 }
 
-export function SettingsPage() {
+export function SettingsPage({ connection }: { connection?: EngineConnection } = {}) {
   const [settings, setSettings] = useState<RuntimeSettings>(defaults)
   const [shutdown, setShutdown] = useState<ShutdownState>()
   const [driveAuth, setDriveAuth] = useState<DriveAuthState>()
@@ -41,14 +42,27 @@ export function SettingsPage() {
   const drivePollController = useRef<AbortController | null>(null)
   const [backend, setBackend] = useState<'STARTING' | 'CONNECTED' | 'OFFLINE'>('STARTING')
   const [message, setMessage] = useState('설정을 불러오는 중입니다.')
+  const [jobs, setJobs] = useState<JobModel[]>([])
+  const [criticalWork, setCriticalWork] = useState(true)
+  const [localRuntime, setLocalRuntime] = useState<Awaited<ReturnType<typeof api.localRuntimeStatus>>>()
+  const [runtimeMessage, setRuntimeMessage] = useState('Runtime 확인 중')
+  const [retrying, setRetrying] = useState<string | null>(null)
   const shutdownTriggered = useRef(false)
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setBackend('STARTING')
     try {
       await api.health(signal)
-      const [saved, state, drive] = await Promise.all([api.settings(signal), api.shutdown(signal), api.driveStatus(signal)])
+      const [saved, state, drive, history, activeJob] = await Promise.all([api.settings(signal), api.shutdown(signal), api.driveStatus(signal), api.jobs(signal), api.activeJob(signal)])
       setSettings(saved); setShutdown(state); setDriveAuth(drive.auth_state); setBackend('CONNECTED'); setMessage('저장된 설정을 불러왔습니다.')
+      setJobs(history); setCriticalWork(activeJob !== null)
+      // Runtime file verification can take longer than Backend health; an
+      // unavailable Local Runtime must not block Drive or Colab management.
+      void api.localRuntimeStatus(signal).then((status) => {
+        if (!signal?.aborted) { setLocalRuntime(status); setRuntimeMessage(status.message) }
+      }).catch((cause) => {
+        if (!isRequestAbort(cause)) { setLocalRuntime(undefined); setRuntimeMessage(getUserMessage(cause)) }
+      })
     } catch (cause) {
       if (isRequestAbort(cause)) return
       setBackend('OFFLINE'); setMessage(getUserMessage(cause))
@@ -67,7 +81,10 @@ export function SettingsPage() {
     let controller: AbortController | undefined
     const poll = async () => {
       controller = new AbortController()
-      try { setShutdown(await api.shutdown(controller.signal)) }
+      try {
+        const [state, history, activeJob, drive] = await Promise.all([api.shutdown(controller.signal), api.jobs(controller.signal), api.activeJob(controller.signal), api.driveStatus(controller.signal)])
+        if (active) { setShutdown(state); setJobs(history); setCriticalWork(activeJob !== null); setDriveAuth(drive.auth_state) }
+      }
       catch (cause) { if (active && !isRequestAbort(cause)) setBackend('OFFLINE') }
       finally { if (active) timer = window.setTimeout(() => void poll(), 1000) }
     }
@@ -84,9 +101,9 @@ export function SettingsPage() {
   // Tauri caches close_behavior synchronously so the window "close" handler
   // never has to make a blocking HTTP call.
   useEffect(() => {
-    if (!isTauri()) return
+    if (!isTauri() || backend !== 'CONNECTED') return
     void invoke('set_close_behavior', { behavior: settings.close_behavior }).catch(() => {})
-  }, [settings.close_behavior])
+  }, [settings.close_behavior, backend])
 
   // Native shutdown boundary: only fires from the ready_to_shutdown phase,
   // re-confirms with a fresh read right before executing (stale-poll/cancel
@@ -180,6 +197,17 @@ export function SettingsPage() {
   }
 
   const countdownVisible = shutdown?.phase === 'counting_down' || shutdown?.phase === 'ready_to_shutdown'
+  const driveEntries = jobs.flatMap((job) => Object.entries(job.drive).filter(([, state]) => state.status !== 'DISABLED').map(([id, state]) => ({ job, id, state })))
+  async function retryDrive(job: JobModel, id: string) {
+    const key = `${job.job_id}:${id}`
+    setRetrying(key)
+    try {
+      await api.uploadDrive(job.job_id, id, true)
+      setJobs(await api.jobs())
+      setDriveMessage('Drive 다시 시도를 요청했습니다. 전사는 다시 실행하지 않습니다.')
+    } catch (cause) { setDriveMessage(getUserMessage(cause)) }
+    finally { setRetrying(null) }
+  }
   return (
     <div className="feature-page settings-page">
       <div className="page-intro"><div><p className="eyebrow">Desktop UX</p><h2>알림과 종료 동작을 설정하세요</h2><p>{message}</p></div></div>
@@ -189,8 +217,8 @@ export function SettingsPage() {
           <label className="setting-row"><span><strong>전체 완료 알림</strong><small>성공과 실패 수를 구분한 Desktop 알림 요청</small></span><input type="checkbox" checked={settings.notifications.job_complete} onChange={(event) => void save({ ...settings, notifications: { ...settings.notifications, job_complete: event.target.checked } })} /></label>
         </Card>
         <Card className="settings-card"><div className="settings-card-heading"><MonitorCog aria-hidden="true" /><div><h3>Tray</h3><p>창을 닫을 때 Desktop runtime이 소비할 동작입니다.</p></div></div>
-          <label className="setting-row"><span><strong>실행 중 창을 닫으면 Tray로 이동</strong><small>실제 hide/show는 Tauri runtime에서 수행</small></span><input type="checkbox" checked={settings.close_behavior === 'tray'} onChange={(event) => void save({ ...settings, close_behavior: event.target.checked ? 'tray' : 'exit' })} /></label>
-          <div className="setting-note"><Badge tone={settings.close_behavior === 'tray' ? 'done' : 'waiting'}>{settings.close_behavior === 'tray' ? 'Tray로 숨김' : '앱 종료'}</Badge><span>{isTauri() ? 'Tauri runtime이 실제 창 hide/show를 수행합니다.' : '웹 개발 모드에서는 실제 OS 동작을 수행하지 않습니다.'}</span></div>
+          <label className="setting-row"><span><strong>유휴 상태에서도 Tray로 이동</strong><small>전사 또는 Drive 작업 중에는 이 설정과 관계없이 안전을 위해 Tray로 이동합니다.</small></span><input type="checkbox" checked={settings.close_behavior === 'tray'} onChange={(event) => void save({ ...settings, close_behavior: event.target.checked ? 'tray' : 'exit' })} /></label>
+          <div className="setting-note"><Badge tone={settings.close_behavior === 'tray' ? 'done' : 'waiting'}>{settings.close_behavior === 'tray' ? '항상 Tray로 숨김' : '유휴 시 앱 종료'}</Badge><span>{isTauri() ? 'Tauri runtime이 실제 창 hide/show를 수행합니다.' : '웹 개발 모드에서는 실제 OS 동작을 수행하지 않습니다.'}</span></div>
         </Card>
         <Card className="settings-card settings-card-wide"><div className="settings-card-heading"><Power aria-hidden="true" /><div><h3>완료 후 PC 종료</h3><p>정상 완료 Job 뒤 application countdown을 준비합니다.</p></div></div>
           <div className="shutdown-options" role="radiogroup" aria-label="완료 후 PC 종료 시간">{shutdownOptions.map(([value, label]) => <label key={value} className={settings.shutdown === value ? 'radio-option radio-option-selected' : 'radio-option'}><input type="radio" name="shutdown" value={value} checked={settings.shutdown === value} onChange={() => void save({ ...settings, shutdown: value })} />{label}</label>)}</div>
@@ -203,10 +231,13 @@ export function SettingsPage() {
           <div className="inline-actions"><Button variant="secondary" disabled={!isTauri()} onClick={() => void connectDrive()}>Google Drive 연결</Button></div>
           {driveMessage ? <div className="setting-note"><span>{driveMessage}</span></div> : null}
           {!isTauri() ? <div className="setting-note"><span>웹 개발 모드에서는 브라우저 handoff를 수행하지 않습니다.</span></div> : null}
+          <div className="drive-retry-list">{driveEntries.map(({ job, id, state }) => <div className="setting-row" key={`${job.job_id}:${id}`}><span><strong>{id}</strong><small>{state.status === 'DONE' ? 'Drive 업로드 완료' : state.status === 'UPLOADING' ? 'Drive 업로드 중' : state.status === 'FAILED' ? 'Drive 업로드 실패' : state.status}{state.error ? ` · ${state.error}` : ''}</small></span>{state.status === 'FAILED' ? <Button variant="secondary" disabled={backend !== 'CONNECTED' || retrying !== null || job.files[id] !== 'DONE'} onClick={() => void retryDrive(job, id)}>Drive 실패 다시 시도</Button> : null}</div>)}{driveEntries.length === 0 ? <p className="text-caption">아직 Drive 업로드 기록이 없습니다.</p> : null}</div>
         </Card>
+        {connection ? <div className="settings-card-wide"><EngineSection {...connection} disabled={backend !== 'CONNECTED' || criticalWork} /></div> : null}
         <Card className="settings-card settings-card-wide"><div className="settings-card-heading"><Server aria-hidden="true" /><div><h3>Backend / Runtime</h3><p>실제 health 상태를 표시합니다.</p></div></div>
           <div className="runtime-state-grid"><div><Badge tone={backend === 'CONNECTED' ? 'done' : backend === 'STARTING' ? 'preparing' : 'failed'}>{backend === 'CONNECTED' ? 'Backend 연결됨' : backend === 'STARTING' ? 'Backend 시작 중' : 'Backend 오프라인'}</Badge><span>{backend === 'CONNECTED' ? '상태 확인 완료' : '전사를 시작할 수 없음'}</span></div></div>
           <Button variant="secondary" disabled={backend === 'STARTING'} onClick={() => void load()}>다시 연결</Button>
+          <div className="setting-note" role={localRuntime?.available === false ? 'alert' : 'status'}><Badge tone={localRuntime?.available ? 'done' : localRuntime ? 'failed' : 'waiting'}>Local Whisper Runtime · {localRuntime?.available ? '호환성 확인됨' : localRuntime ? '사용 불가' : '확인 필요'}</Badge><span>{runtimeMessage}</span></div>
         </Card>
       </div>
     </div>
