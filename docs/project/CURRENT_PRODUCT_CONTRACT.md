@@ -134,6 +134,17 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - TXT preview/full view는 **display only** bounded encoding fallback을 사용한다: `utf-8-sig → utf-8 → cp949 → euc-kr → utf-8 errors=replace`. Sorigul이 생성하는 TXT는 계속 UTF-8이며 source TXT를 rewrite/transcode하지 않는다. (#127 A5)
 - completed-job shutdown은 immediate/15 sec/30 sec, countdown과 cancel을 지원한다.
 - backend/process tree를 정리하고 orphan을 남기지 않는다.
+- #59 사용자 승인(2026-11-01): `다시 연결`은 health 재조회 의미를 유지한다.
+  정상 기동 후 소유 Backend의 실제 종료와 Job Object 자손 부재가 확인될 때만
+  별도의 `Backend 다시 시작`을 제공하고 사용자 클릭으로만 실행한다.
+  살아 있는 Backend/Worker, 포트 충돌, 진행 중 또는 확인 불가능한 저장 Job/Drive
+  상태는 재시작을 차단한다. 자동 백그라운드 재시작은 도입하지 않는다.
+  재기동 health의 listener 소유권을 확인하고 Settings/Jobs/현재 폴더를 동기화한다.
+  실패 시 오류와 OFFLINE을 유지하며 Jobs/결과를 초기화하지 않는다.
+  Backend 응답 실패 중 종료는 소유 트리 종료·저장 작업 유휴·포트 반환이 모두
+  증명될 때만 중앙 정상 종료 경로로 진행한다. 그 외에는 HOLD와 사유 안내로
+  전사/Drive 보호를 유지한다. 저장 기록 부재/손상/읽기 실패도 HOLD다.
+  창 닫기의 `tray` 동작 자체는 종료 실패가 아니다. 설치형 재검증은 별도 릴리스 게이트다.
 - Windows와 Unicode/Korean path를 지원한다.
 
 ### #127 parity decision lock

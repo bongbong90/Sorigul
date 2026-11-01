@@ -110,6 +110,6 @@ def test_main_setup_still_owns_the_only_tray_and_backend_start():
     assert source.count("build_tray(app)?") == 1
     assert source.count("TrayIconBuilder::with_id(TRAY_ID)") == 1
     # start_backend: definition, setup, and the explicit STARTUP_FAILED retry only.
-    assert source.count("start_backend(") == 3
+    assert len(re.findall(r"\bstart_backend\(", source)) == 3
     exit_hook = block_after(source, "app.run(move |_app_handle, event|")
     assert "RunEvent::ExitRequested" in exit_hook and "sidecar_for_exit.cleanup()" in exit_hook

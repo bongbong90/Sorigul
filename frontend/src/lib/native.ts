@@ -55,6 +55,23 @@ export async function retrySidecarStartup(): Promise<void> {
   await invoke('retry_sidecar_startup')
 }
 
+export interface BackendRecoveryStatus {
+  backend_exited: boolean
+  can_restart: boolean
+  code: string | null
+  message: string | null
+}
+
+export async function getBackendRecoveryStatus(): Promise<BackendRecoveryStatus | null> {
+  return isTauri() ? invoke<BackendRecoveryStatus>('get_backend_recovery_status') : null
+}
+
+/** Only call from the explicit Backend 다시 시작 button. */
+export async function restartBackend(): Promise<void> {
+  if (!isTauri()) throw new Error('Desktop에서만 Backend를 다시 시작할 수 있습니다.')
+  await invoke('restart_backend')
+}
+
 /**
  * Native Windows folder picker when running under Tauri; falls back to a
  * text prompt in plain-browser development. Cancelling the picker is not
