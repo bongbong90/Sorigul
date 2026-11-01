@@ -87,7 +87,23 @@ def test_no_new_dependencies_for_close_protection():
     cargo = read(TAURI / "Cargo.toml")
     deps = cargo[cargo.index("[dependencies]") : cargo.index("[target.")]
     assert 'tauri-plugin-notification = "2"' in deps
-    assert "serde_json" not in deps
+    # #128: the close guard keeps its hand-rolled parse; serde_json never
+    # enters the close/exit protection path.
+    for name in ("close_guard.rs", "shutdown.rs"):
+        assert "serde_json" not in read(TAURI / "src" / name), name
+
+
+def test_serde_json_is_approved_only_for_59_saved_job_check():
+    # #59 approved exception: recovery.rs deserializes the saved jobs.json
+    # (read-only) before an offline restart/exit. Scoped to that one file.
+    cargo = read(TAURI / "Cargo.toml")
+    deps = cargo[cargo.index("[dependencies]") : cargo.index("[target.")]
+    assert re.findall(r"^serde_json\b.*$", deps, re.M) == ['serde_json = "1"']
+    users = sorted(p.name for p in (TAURI / "src").glob("*.rs") if "serde_json" in read(p))
+    assert users == ["recovery.rs"]
+    recovery = read(TAURI / "src" / "recovery.rs")
+    assert recovery.count("serde_json::") == 1 and "serde_json::from_slice(" in recovery
+    assert "serde_json::to_" not in recovery and "fs::write" not in recovery.split("#[cfg(test)]")[0]
 
 
 def test_settings_copy_matches_the_protected_close_semantics():

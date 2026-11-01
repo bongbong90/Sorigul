@@ -99,6 +99,49 @@ mod tests {
             );
         }
     }
+    // Shape of JobManager._save_jobs_unlocked: model_dump(mode="json"),
+    // indent=2, ensure_ascii=False, with fields this check ignores.
+    const SAVED: &str = r#"{
+  "job-1": {
+    "job_id": "job-1",
+    "created_at": "2026-10-31T10:00:00.123456",
+    "updated_at": "2026-10-31T10:09:20.654321",
+    "status": "FILE_STATUS",
+    "folder": "C:\\Users\\User\\Desktop\\전사\\민법",
+    "engine": "local_whisper",
+    "engine_config": {"model": "large-v3", "device": "cuda"},
+    "force_retranscribe": false,
+    "upload_to_drive": true,
+    "total_files": 1,
+    "done_files": 1,
+    "failed_files": 0,
+    "current_file": null,
+    "current_progress": null,
+    "eta_seconds": null,
+    "files": {"f1": "FILE_STATUS"},
+    "events": [{"timestamp": "2026-10-31T10:00:00", "level": "warning", "category": "CRASHED", "message": "이전 작업이 비정상 종료되어 복구되었습니다.", "file_id": null, "filename": null}],
+    "drive": {"f1": {"status": "DRIVE_STATUS", "error": null, "remote_file_ids": {}, "updated_at": "2026-10-31T10:09:20"}},
+    "error": null,
+    "course": "민법",
+    "subject": null,
+    "stage": "1차",
+    "file_metadata": {"f1": {"week": "1", "lesson": null, "normalized_name": null}}
+  }
+}"#;
+    #[test]
+    fn real_saved_job_shape_is_read() {
+        let saved = |file: &str, drive: &str| {
+            check(
+                &SAVED
+                    .replace("FILE_STATUS", file)
+                    .replace("DRIVE_STATUS", drive),
+            )
+        };
+        assert_eq!(saved("DONE", "DONE"), Ok(()));
+        assert_eq!(saved("CRASHED", "AUTH_REQUIRED"), Ok(()));
+        assert!(saved("TRANSCRIBING", "DONE").is_err());
+        assert!(saved("DONE", "UPLOADING").is_err());
+    }
     #[test]
     fn active_unknown_and_malformed_history_hold() {
         for status in ["WAITING", "TRANSCRIBING", "CANCEL_REQUESTED", "NEW_STATE"] {
