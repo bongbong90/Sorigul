@@ -31,6 +31,7 @@ def test_59_saved_job_parser_matches_backend_status_enums():
     root = Path(__file__).resolve().parents[1]
     recovery = (root / "frontend/src-tauri/src/recovery.rs").read_text(encoding="utf-8")
     models = (root / "backend/src/domain/models.py").read_text(encoding="utf-8")
+    assert "!terminal(&job.status)" in recovery and "!terminal(s)" in recovery
     file_terminal = _rust_matches(recovery, "let terminal =")
     drive_terminal = _rust_matches(recovery, "job.drive.values()")
     assert file_terminal == {"DONE", "FAILED", "STOPPED", "CANCELLED", "CRASHED"}

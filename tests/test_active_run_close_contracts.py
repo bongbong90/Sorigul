@@ -87,8 +87,8 @@ def test_no_new_dependencies_for_close_protection():
     cargo = read(TAURI / "Cargo.toml")
     deps = cargo[cargo.index("[dependencies]") : cargo.index("[target.")]
     assert 'tauri-plugin-notification = "2"' in deps
-    # #128: the close guard keeps its hand-rolled parse; serde_json never
-    # enters the close/exit protection path.
+    # #128: the close-guard response parse stays hand-rolled; serde_json is
+    # reachable from close/exit only via recovery.rs's offline saved-job fallback.
     for name in ("close_guard.rs", "shutdown.rs"):
         assert "serde_json" not in read(TAURI / "src" / name), name
 
@@ -99,9 +99,16 @@ def test_serde_json_is_approved_only_for_59_saved_job_check():
     cargo = read(TAURI / "Cargo.toml")
     deps = cargo[cargo.index("[dependencies]") : cargo.index("[target.")]
     assert re.findall(r"^serde_json\b.*$", deps, re.M) == ['serde_json = "1"']
-    users = sorted(p.name for p in (TAURI / "src").glob("*.rs") if "serde_json" in read(p))
+    assert re.findall(r"^serde_json\b", cargo, re.M) == ["serde_json"], "no other section"
+    assert 'package = "serde_json"' not in cargo, "no renamed serde_json"
+    users = sorted(
+        p.relative_to(TAURI / "src").as_posix()
+        for p in (TAURI / "src").rglob("*.rs")
+        if "serde_json" in read(p)
+    )
     assert users == ["recovery.rs"]
     recovery = read(TAURI / "src" / "recovery.rs")
+    assert "serde_json as" not in recovery
     assert recovery.count("serde_json::") == 1 and "serde_json::from_slice(" in recovery
     assert "serde_json::to_" not in recovery and "fs::write" not in recovery.split("#[cfg(test)]")[0]
 
