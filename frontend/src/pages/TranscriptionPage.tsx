@@ -13,6 +13,7 @@ import {
   type ScannedFile,
 } from '../api/client'
 import { pickFolder } from '../lib/native'
+import { BackendRestart } from '../components/transcription/BackendRestart'
 import { useFolderRevision } from '../hooks/useFolderRevision'
 import { knownStageFor, overrideStageFor, validateClassificationText, validateWeekInput, type Stage } from '../lib/classification'
 import {
@@ -161,6 +162,8 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const scanGenerationRef = useRef(0)
   const scanControllerRef = useRef<AbortController | null>(null)
   const engineHydratedRef = useRef(false)
+  const backendRestartingRef = useRef(false)
+  const backendRecoveryFailedRef = useRef(false)
   const [preflightActive, setPreflightActive] = useState(false)
   const isPreflighting = preflightActive
 
@@ -182,7 +185,7 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   // from before this upgrade is non-destructively adopted rather than
   // dropped (D22). last_course/last_subject prefill the classification
   // inputs.
-  const loadSettings = useCallback(async (signal?: AbortSignal) => {
+  const loadSettings = useCallback(async (signal?: AbortSignal, strict = false) => {
     try {
       const loaded = await api.settings(signal)
       if (signal?.aborted) return
@@ -222,7 +225,8 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
         setEngine(loaded.last_engine === 'direct_colab' ? 'direct_colab' : 'local_whisper')
         engineHydratedRef.current = true
       }
-    } catch {
+    } catch (cause) {
+      if (strict) throw cause
       // Backend offline at startup: fall back to whatever localStorage has;
       // the health/reconnect flow will retry settings once connected.
     }
@@ -291,19 +295,22 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   // once the backend actually answers -- not just once at mount (Section
   // 14). loadSettings is idempotent (guards its own writes), so calling it
   // again here on every successful reconnect is safe.
-  const reconnect = useCallback(async (signal?: AbortSignal) => {
+  const reconnect = useCallback(async (signal?: AbortSignal, strict = false) => {
     backendStatusRef.current = 'STARTING'
     setBackendStatus('STARTING')
     try {
       await api.health(signal)
       if (signal?.aborted) return
-      await loadSettings(signal)
-      await loadFolder(folderRef.current, signal)
+      await loadSettings(signal, strict)
+      if (strict) await api.jobs(signal)
+      const scanned = await loadFolder(folderRef.current, signal)
+      if (strict && scanned === undefined) throw new Error('현재 폴더 상태를 동기화하지 못했습니다.')
     }
     catch (cause) {
       if (isRequestAbort(cause)) return
       backendStatusRef.current = 'OFFLINE'
       setBackendStatus('OFFLINE'); setMessage(getUserMessage(cause))
+      if (strict) throw cause
     }
   }, [loadSettings, loadFolder])
 
@@ -314,10 +321,11 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
     const pollHealth = async () => {
       controller = new AbortController()
       try {
+        if (backendRestartingRef.current || backendRecoveryFailedRef.current) return
         if (backendStatusRef.current !== 'CONNECTED') await reconnect(controller.signal)
         else {
           await api.health(controller.signal)
-          if (active) setBackendStatus('CONNECTED')
+          if (active && !backendRestartingRef.current && !backendRecoveryFailedRef.current) setBackendStatus('CONNECTED')
         }
       } catch (cause) {
         if (active && !isRequestAbort(cause)) {
@@ -887,7 +895,10 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const crashed = rows.some((row) => row.status === 'CRASHED')
   return (
     <div className="transcription-page">
-      <RuntimeBanner status={backendStatus} message={message} onReconnect={() => void reconnect()} />
+      <RuntimeBanner status={backendStatus} message={message} onReconnect={() => { backendRecoveryFailedRef.current = false; void reconnect() }} />
+      <BackendRestart offline={backendStatus !== 'CONNECTED'} onRecovered={() => reconnect(undefined, true)}
+        onRestarting={(busy) => { backendRestartingRef.current = busy; if (busy) backendRecoveryFailedRef.current = false }}
+        onFailure={(reason) => { backendRecoveryFailedRef.current = true; backendStatusRef.current = 'OFFLINE'; setBackendStatus('OFFLINE'); setMessage(reason) }} />
       <FolderSection folderPath={folder || '선택된 폴더 없음'} onChangeFolder={() => { if (!isPreflighting) void changeFolder() }} />
       {otherActiveRun ? <ActiveRunBanner activeJob={otherActiveRun} sameFolder={otherActiveRun.folder === folder} onStop={() => void runJobAction(otherActiveRun, 'stop')} onCancel={() => void runJobAction(otherActiveRun, 'cancel')} /> : null}
       <ClassificationSection

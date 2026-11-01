@@ -1,5 +1,6 @@
 mod close_guard;
 mod completion_toast;
+mod recovery;
 mod shutdown;
 mod sidecar;
 mod tray_tooltip;
@@ -117,6 +118,59 @@ fn retry_sidecar_startup(app: AppHandle, state: State<AppState>) {
     let sidecar = state.sidecar.clone();
     publish_sidecar_status(&app, SidecarStatusPayload::starting());
     start_backend(app, sidecar);
+}
+
+#[derive(Serialize)]
+struct BackendRecoveryStatus {
+    backend_exited: bool,
+    can_restart: bool,
+    code: Option<String>,
+    message: Option<String>,
+}
+
+#[tauri::command]
+async fn get_backend_recovery_status(
+    state: State<'_, AppState>,
+) -> Result<BackendRecoveryStatus, String> {
+    let sidecar = state.sidecar.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let backend_exited = sidecar.is_owned_process_alive() == Some(false);
+        let result = sidecar.check_recovery(|| recovery::confirm_offline_idle(BACKEND_PORT));
+        BackendRecoveryStatus {
+            backend_exited,
+            can_restart: result.is_ok(),
+            message: result
+                .as_ref()
+                .err()
+                .map(|code| recovery::message(code).to_string()),
+            code: result.err(),
+        }
+    })
+    .await
+    .map_err(|_| "PROCESS_STATE_UNKNOWN".to_string())
+}
+
+#[tauri::command]
+async fn restart_backend(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let sidecar = state.sidecar.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let probe = HttpHealthProbe {
+            url: health_url(),
+            timeout: Duration::from_millis(800),
+        };
+        let spec = spawn_spec_for_current_build(&app)?;
+        let result = sidecar.restart(
+            &probe,
+            spec,
+            startup_timeout_for_current_build(),
+            Duration::from_millis(400),
+            || recovery::confirm_offline_idle(BACKEND_PORT),
+        )?;
+        publish_sidecar_status(&app, SidecarStatusPayload::from_status(&result));
+        Ok(())
+    })
+    .await
+    .map_err(|_| "PROCESS_STATE_UNKNOWN".to_string())?
 }
 
 #[tauri::command]
@@ -660,11 +714,28 @@ fn request_guarded_exit(app: &AppHandle) {
 /// window to the tray; the notice is best-effort and never weakens that.
 fn spawn_close_check(app: AppHandle, generation: u64) {
     std::thread::spawn(move || {
-        let result = fetch_close_guard(&close_guard_url());
+        let mut result = fetch_close_guard(&close_guard_url());
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
+        let mut offline_hold = None;
+        let mut reserved = false;
+        if result.is_err() {
+            match state
+                .sidecar
+                .reserve_offline_exit(|| recovery::confirm_offline_idle(BACKEND_PORT))
+            {
+                Ok(()) => {
+                    reserved = true;
+                    result = Ok(close_guard::GuardReport::Idle);
+                }
+                Err(code) => offline_hold = Some(format!("{} ({code})", recovery::message(&code))),
+            }
+        }
         let outcome = state.close_check.finish(generation, result);
+        if reserved && outcome != CloseOutcome::ConfirmedExit {
+            state.sidecar.release_offline_exit();
+        }
         match outcome {
             CloseOutcome::ConfirmedExit => app.exit(0),
             CloseOutcome::Superseded => {}
@@ -672,7 +743,7 @@ fn spawn_close_check(app: AppHandle, generation: u64) {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
-                if let Some(body) = notice_body(&outcome) {
+                if let Some(body) = offline_hold.or_else(|| notice_body(&outcome)) {
                     let _ = app
                         .notification()
                         .builder()
@@ -719,6 +790,8 @@ pub fn run() {
             dismiss_completion_toast,
             get_sidecar_status,
             retry_sidecar_startup,
+            get_backend_recovery_status,
+            restart_backend,
         ])
         .setup(move |app| {
             build_tray(app)?;
