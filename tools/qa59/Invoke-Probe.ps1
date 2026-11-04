@@ -7,14 +7,17 @@ function Read-WebDiagnostic {
     if ((Get-Item -LiteralPath $Path).Length -gt 32768) { throw 'Diagnostic size rejected' }
     $d = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
     $boolKeys = 'initialized navigation_requested navigation_completed_success navigation_source_match navigation_cancelled dom_loaded doc_ready doc_button_exists doc_source_match doc_nonce_match legacy_message_match legacy_source_match click_diag_received click_source_match click_nonce_match event_trusted uia_started uia_found uia_usable uia_name_match uia_offscreen uia_rect_valid focus_view focus_foreground cursor_attempted cursor_success sendinput_attempted clicked legacy_trusted legacy_predicate diagnostic_pass'.Split(' ')
+    $boolKeys += 'navigation_permit_armed navigation_permit_closed navigation_content_match navigation_allowlist_pass'.Split(' ')
     $countKeys = 'navigation_start_count navigation_complete_count dom_count webmessage_count document_ready_count click_diag_count diagnostic_parse_errors uia_polls'.Split(' ')
+    $countKeys += @('navigation_accepted_count','navigation_blocked_count')
     $integerKeys = 'nav_start_id nav_complete_id dom_nav_id nav_error uia_control_type sendinput_requested sendinput_return struct_size cursor_last_error sendinput_last_error'.Split(' ')
+    $integerKeys += 'approved_nav_id'
     $coordinateKeys = 'rect_x rect_y rect_width rect_height target_x target_y'.Split(' ')
     $timeKeys = 'initialized_ms navigate_ms navigation_start_ms navigation_complete_ms dom_ms document_ready_ms uia_start_ms uia_end_ms input_ms cursor_ms sendinput_ms message_ms click_ms verdict_ms'.Split(' ')
     $stringKeys = @('skip_reason','ready_state','exception_type','snapshot_reason')
     $allowed = @('schema','events') + $boolKeys + $countKeys + $integerKeys + $coordinateKeys + $timeKeys + $stringKeys
     $actual = @($d.PSObject.Properties.Name)
-    if (($d.schema -isnot [int] -and $d.schema -isnot [long]) -or $d.schema -ne 2 -or $actual.Count -ne $allowed.Count) { throw 'Diagnostic schema rejected' }
+    if (($d.schema -isnot [int] -and $d.schema -isnot [long]) -or $d.schema -ne 3 -or $actual.Count -ne $allowed.Count) { throw 'Diagnostic schema rejected' }
     foreach ($key in $actual) { if ($allowed -cnotcontains $key) { throw 'Unknown diagnostic field' } }
     foreach ($key in $boolKeys) { if ($null -ne $d.$key -and $d.$key -isnot [bool]) { throw 'Diagnostic boolean rejected' } }
     foreach ($key in ($countKeys + $integerKeys + $coordinateKeys + $timeKeys)) {
@@ -48,11 +51,11 @@ function Get-ObservedVerdict {
 }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
     $env:GITHUB_REPOSITORY -ne 'bongbong90/Sorigul' -or $env:GITHUB_EVENT_NAME -ne 'push' -or
-    $env:GITHUB_REF -ne 'refs/heads/qa/59-webview2-input-diagnostic-once' -or $env:GITHUB_RUN_ATTEMPT -ne '1') {
+    $env:GITHUB_REF -ne 'refs/heads/qa/59-webview2-navigation-once' -or $env:GITHUB_RUN_ATTEMPT -ne '1') {
     throw 'Authorized hosted push/first-attempt context required.'
 }
 $report = [ordered]@{
-    schema = 2
+    schema = 3
     run_id = $env:GITHUB_RUN_ID
     commit = $env:GITHUB_SHA
     os_image = $env:ImageOS
@@ -63,7 +66,10 @@ $report = [ordered]@{
     'CANDIDATE MSI USED' = 'NO'
     'HOST INSTALLATION PRESERVED' = 'PASS'
     cleanup_verified = $false
-    'NAVIGATION COMPLETED' = 'NOT VERIFIED'
+    'NAVIGATION COMPLETED' = 'FAIL'
+    'SYNTHETIC NAVIGATION ALLOWLIST' = 'FAIL'
+    'SENDINPUT' = 'NOT VERIFIED'
+    'TRUSTED CLICK' = 'NOT VERIFIED'
     'DOCUMENT READY' = 'NOT VERIFIED'
     'UIA BUTTON FOUND' = 'NOT VERIFIED'
     'SENDINPUT COUNT' = 'NOT VERIFIED'
@@ -167,16 +173,19 @@ try {
             $d = Read-WebDiagnostic -Path $diagnosticFile
             $report.webview_diagnostic = $d
             $report.diagnostic_collection = 'PASS'
-            $report['NAVIGATION COMPLETED'] = Get-ObservedVerdict $d.navigation_completed_success
+            $report['NAVIGATION COMPLETED'] = if ($d.navigation_completed_success -eq $true) { 'PASS' } else { 'FAIL' }
+            $report['SYNTHETIC NAVIGATION ALLOWLIST'] = if ($d.navigation_allowlist_pass -eq $true -and $d.navigation_accepted_count -eq 1 -and $d.navigation_permit_armed -eq $false -and $d.navigation_permit_closed -eq $true -and $null -ne $d.approved_nav_id -and $d.approved_nav_id -eq $d.nav_complete_id) { 'PASS' } else { 'FAIL' }
             $report['DOCUMENT READY'] = Get-ObservedVerdict $d.doc_ready
             if ($d.uia_started -eq $true -and $null -ne $d.uia_end_ms) {
                 $report['UIA BUTTON FOUND'] = if ($d.uia_found -eq $true -and $d.uia_usable -eq $true -and $d.uia_control_type -eq 50000 -and $d.uia_name_match -eq $true -and $d.uia_offscreen -eq $false -and $d.uia_rect_valid -eq $true) { 'PASS' } else { 'FAIL' }
             }
             if ($d.sendinput_attempted -eq $true -and $null -ne $d.sendinput_return) { $report['SENDINPUT COUNT'] = $d.sendinput_return }
+            if ($d.sendinput_attempted -eq $true) { $report['SENDINPUT'] = if ($d.cursor_success -eq $true -and $d.sendinput_return -eq 2) { 'PASS' } else { 'FAIL' } }
             if ($d.initialized -eq $true -and $d.snapshot_reason -eq 'verdict') { $report['WEB MESSAGE RECEIVED'] = if ($d.webmessage_count -gt 0) { 'PASS' } else { 'FAIL' } }
             if ($null -ne $d.event_trusted) {
                 $report['TRUSTED CLICK VERIFIED'] = if ($d.event_trusted -eq $true -and $d.click_source_match -eq $true -and $d.click_nonce_match -eq $true -and $d.legacy_predicate -eq $true -and $d.sendinput_return -eq 2) { 'PASS' } else { 'FAIL' }
             }
+            $report['TRUSTED CLICK'] = $report['TRUSTED CLICK VERIFIED']
             # No diagnosis is automatically promoted to CONFIRMED from a later run.
         } else { $report.diagnostic_collection = 'NOT VERIFIED' }
     } catch {
@@ -184,7 +193,7 @@ try {
         $report.diagnostic_error_type = $_.Exception.GetType().Name
         $report['SYNTHETIC WEBVIEW2 INTERACTION'] = 'FAIL'
     }
-    if ($report.diagnostic_collection -ne 'PASS' -or $report['NAVIGATION COMPLETED'] -ne 'PASS' -or
+    if ($report.diagnostic_collection -ne 'PASS' -or $report['SYNTHETIC NAVIGATION ALLOWLIST'] -ne 'PASS' -or $report['NAVIGATION COMPLETED'] -ne 'PASS' -or
         $report['DOCUMENT READY'] -ne 'PASS' -or $report['UIA BUTTON FOUND'] -ne 'PASS' -or
         $report['SENDINPUT COUNT'] -ne 2 -or $report['TRUSTED CLICK VERIFIED'] -ne 'PASS') {
         $report['SYNTHETIC WEBVIEW2 INTERACTION'] = 'FAIL'
@@ -211,6 +220,7 @@ try {
     $report['CLOUD INSTALLED QA FEASIBILITY'] = if ($report['GUI SESSION ACCESS'] -ne 'PASS') { 'BLOCKED' }
         elseif ($report['SYNTHETIC WEBVIEW2 INTERACTION'] -eq 'PASS' -and $report['SYNTHETIC TRAY INTERACTION'] -eq 'PASS' -and $report.cleanup_verified -and $report['WINDOWS RUNNER EXECUTION'] -eq 'PASS') { 'READY' }
         else { 'PARTIAL' }
+    $report['CLOUD QA FEASIBILITY'] = $report['CLOUD INSTALLED QA FEASIBILITY']
     $json = $report | ConvertTo-Json -Depth 6
     Write-Output 'QA59_RESULT_BEGIN'
     Write-Output $json

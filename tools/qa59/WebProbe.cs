@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
@@ -8,10 +9,49 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
+// One view, one host-owned document, one callback. No URI is trusted by scheme alone.
+public sealed class SyntheticNavigationPermit
+{
+    string expected;
+    bool everArmed, closed;
+    public bool Armed { get; private set; }
+    public bool Closed { get { return closed; } }
+    public bool ContentMatch { get; private set; }
+    public int Accepted { get; private set; }
+    public int Blocked { get; private set; }
+    public ulong? ApprovedId { get; private set; }
+    public void Arm(string html) {
+        if (everArmed || closed) throw new InvalidOperationException("Permit cannot be rearmed");
+        if (string.IsNullOrEmpty(html) || Encoding.UTF8.GetByteCount(html) > 2 * 1024 * 1024) throw new ArgumentException("Invalid synthetic size");
+        // Supported representation, not a claim about any unknown runtime's actual URI.
+        // Exact equality includes the entire host-owned HTML and this document's fresh nonce.
+        expected = "data:text/html;charset=utf-8;base64," + Convert.ToBase64String(Encoding.UTF8.GetBytes(html));
+        everArmed = true; Armed = true;
+    }
+    public bool TryConsume(string uri, bool redirected, ulong navigationId) {
+        bool eligible = Armed && !closed;
+        string candidate = expected;
+        Close(); // A mismatch, redirect or unexpected first callback also burns the permit.
+        ContentMatch = eligible && uri != null && candidate != null && uri.Length == candidate.Length &&
+            string.Equals(uri, candidate, StringComparison.Ordinal);
+        if (!eligible || redirected || !ContentMatch) { Blocked++; return false; }
+        Accepted++; ApprovedId = navigationId;
+        return true;
+    }
+    public void Close() { Armed = false; closed = true; expected = null; }
+    public void Observe(WebDiagnostics d) {
+        d.Put("navigation_permit_armed", Armed); d.Put("navigation_permit_closed", Closed);
+        d.Put("navigation_content_match", ContentMatch);
+        d.Put("navigation_accepted_count", Accepted); d.Put("navigation_blocked_count", Blocked);
+        d.Put("approved_nav_id", ApprovedId.HasValue ? (object)ApprovedId.Value : null);
+    }
+}
+
 public static class WebProbe
 {
     public static async Task<string> Run(Form form, string work) {
         var d = new WebDiagnostics();
+        var permit = new SyntheticNavigationPermit();
         string snapshotReason = "exception";
         try {
             using (var view = new WebView2 { Dock = DockStyle.Fill }) {
@@ -28,12 +68,14 @@ public static class WebProbe
                 view.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
                 view.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 view.CoreWebView2.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e) {
-                    if (!e.Uri.StartsWith("about:blank", StringComparison.Ordinal)) e.Cancel = true;
+                    if (!permit.TryConsume(e.Uri, e.IsRedirected, e.NavigationId)) e.Cancel = true;
+                    permit.Observe(d);
                     d.Count("navigation_start_count"); d.Put("nav_start_id", e.NavigationId);
                     d.Put("navigation_source_match", e.Uri == "about:blank"); d.Put("navigation_cancelled", e.Cancel);
                     d.Mark("navigation_start", "navigation_start_ms");
                 };
                 view.CoreWebView2.NavigationCompleted += delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) {
+                    permit.Close(); permit.Observe(d);
                     d.Count("navigation_complete_count"); d.Put("nav_complete_id", e.NavigationId);
                     d.Put("navigation_completed_success", e.IsSuccess); d.Put("nav_error", (int)e.WebErrorStatus);
                     d.Mark("navigation_complete", "navigation_complete_ms");
@@ -85,7 +127,9 @@ public static class WebProbe
                 string readyScript = "<script>document.addEventListener('DOMContentLoaded',()=>{window.chrome.webview.postMessage(JSON.stringify({schema:1,kind:'document-ready',nonce:'" + nonce + "',readyState:document.readyState,buttonExists:document.getElementById('qa59-input')!==null}));});</script>";
                 string html = "<!doctype html><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\"><title>QA59 synthetic</title><button id='qa59-input' style='margin:80px;width:240px;height:80px' onclick=\"if(event.isTrusted)window.chrome.webview.postMessage('QA59 trusted button input');" + clickDiagnostic + "\">QA59 WebView input</button>" + readyScript;
                 d.Put("navigation_requested", true); d.Mark("navigate", "navigate_ms");
-                view.CoreWebView2.NavigateToString(html);
+                permit.Arm(html); permit.Observe(d);
+                try { view.CoreWebView2.NavigateToString(html); }
+                catch { permit.Close(); permit.Observe(d); throw; }
                 form.Activate(); view.Focus();
                 d.Put("focus_view", view.ContainsFocus);
                 IntPtr root = form.Handle; // Capture on UI thread, before worker observation.
@@ -96,7 +140,10 @@ public static class WebProbe
                 });
                 await Task.Delay(750); // Original sampling boundary; no readiness wait added.
                 d.Put("clicked", clicked); d.Put("legacy_trusted", trustedClick); d.Put("legacy_predicate", clicked && trustedClick);
-                bool pass = clicked && trustedClick && d.IsTrue("navigation_completed_success") && d.IsTrue("dom_loaded") &&
+                bool allowlist = permit.Accepted == 1 && permit.Closed && !permit.Armed &&
+                    d.Equal("approved_nav_id", "nav_complete_id") && d.IsTrue("navigation_completed_success");
+                d.Put("navigation_allowlist_pass", allowlist);
+                bool pass = allowlist && clicked && trustedClick && d.IsTrue("navigation_completed_success") && d.IsTrue("dom_loaded") &&
                     d.Equal("nav_complete_id", "dom_nav_id") && d.IsTrue("doc_ready") && d.IsTrue("uia_usable") &&
                     d.IsCount("uia_control_type", ControlType.Button.Id) && d.IsTrue("uia_rect_valid") &&
                     d.IsCount("sendinput_return", 2) && d.IsTrue("click_diag_received") && d.IsTrue("click_source_match") &&
@@ -110,6 +157,7 @@ public static class WebProbe
             d.Put("exception_type", e.GetType().Name); d.Put("skip_reason", "exception");
             throw;
         } finally {
+            permit.Close(); permit.Observe(d);
             // Hard process termination cannot guarantee finally; absence stays NOT VERIFIED.
             d.FreezeAndWrite(Path.Combine(work, "webview-diagnostic.json"), snapshotReason);
         }
