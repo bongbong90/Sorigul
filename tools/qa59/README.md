@@ -1,6 +1,51 @@
 # #59 Windows runner capability probe
 
-## Authorized second diagnostic run (this branch)
+## One-shot synthetic navigation correction (this branch)
+
+Branch `qa/59-webview2-navigation-once` starts at diagnostic HEAD
+`78e755a9cec3ac82880aaa5ff75107c703429108`. Both previous workflows/branches/runs
+remain historical evidence. Only new `qa59-webview2-navigation.yml` matches this
+branch's creation push and its own path, with exact repo/ref, created/non-forced/
+before-zero/attempt-1 guards. Complete code review before the sole first push.
+
+The old about-string prefix check did not identify the host's synthetic request.
+The replacement permit is per view, armed once immediately before the only
+NavigateToString call with the exact host-generated HTML containing its fresh nonce.
+It recognizes one supported canonical inline representation by **length and Ordinal
+whole-string equality** with the representation generated from those exact UTF-8
+bytes. Its fixed representation is documented in the .NET MAUI Windows source:
+https://github.com/dotnet/maui/blob/main/src/Core/src/Platform/Windows/MauiWebView.cs
+(IsWebView2DataUriWithBaseUrl). We do not claim this is the unrecorded URI from the
+previous runs or that every Runtime must emit it. Unknown/different representations
+fail closed; they do not cause a broader scheme rule or a retry.
+
+The first NavigationStarting consumes the permit whether it matches or fails.
+Redirects are always denied, including an exact-content redirect. All later starts
+are denied, even with the approved navigation ID. Re-arming is forbidden. Completion,
+synchronous failure and finally revoke any remaining permit. Full content equality
+excludes HTTP/HTTPS, file/javascript/custom targets, other data documents, altered
+nonces, query/fragment/whitespace/header/encoding variants. No URI decoding or
+normalization expands the accepted set. Only the already-reviewed host document
+can match. This identifies authorized content; the approved ID is used solely to
+bind completion/DOM evidence, never as permission for subsequent navigation.
+
+Existing HTTP resource blocking, CSP/security settings, native input, Name selector,
+30x200ms polling, 750ms sampling, source=about:blank and nonce checks, event.isTrusted
+and legacy clicked&&trustedClick remain unchanged. No JavaScript/IPC/InvokePattern
+substitute. Pure `SyntheticNavigationPermitTests.cs` covers positive content binding,
+blocked schemes/payloads/nonce/redirect/repeat/rearm and closed/error states without
+creating a GUI or network request.
+
+Schema 3 adds only permit booleans/counts/approved navigation ID to the existing
+allowlist; URI/HTML/nonce remain private. SYNTHETIC NAVIGATION ALLOWLIST requires
+exactly one accepted request, a consumed/closed permit, approved-ID completion and
+navigation success. It does not confer trusted interaction PASS. Output separately
+reports navigation, document/UIA, SendInput, trusted click and cloud feasibility.
+No new paid runner/dependency, installation, uploads, credentials or settings changes.
+The existing public standard windows-2022 one-job/15-minute/contents:read bounds stay.
+MSI/installed-product acceptance remains separately BLOCKED, regardless of this run.
+
+## Authorized second diagnostic run (historical baseline)
 
 Branch `qa/59-webview2-input-diagnostic-once` starts from the immutable original
 QA HEAD `94d5ec5da722c7ee0d8f917b029eba167fe34c7b`. Original run `41813116291`,

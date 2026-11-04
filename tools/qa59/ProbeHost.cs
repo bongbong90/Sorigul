@@ -19,7 +19,9 @@ public sealed class WebDiagnostics
     readonly List<object> events = new List<object>();
     bool frozen;
     public WebDiagnostics() {
-        values["schema"] = 2;
+        values["schema"] = 3;
+        foreach (string key in "navigation_permit_armed navigation_permit_closed navigation_content_match navigation_allowlist_pass".Split(' ')) values[key] = null;
+        values["navigation_accepted_count"] = 0; values["navigation_blocked_count"] = 0; values["approved_nav_id"] = null;
         foreach (string key in ("initialized navigation_requested navigation_completed_success navigation_source_match navigation_cancelled dom_loaded doc_ready doc_button_exists doc_source_match doc_nonce_match legacy_message_match legacy_source_match click_diag_received click_source_match click_nonce_match event_trusted uia_started uia_found uia_usable uia_name_match uia_offscreen uia_rect_valid focus_view focus_foreground cursor_attempted cursor_success sendinput_attempted clicked legacy_trusted legacy_predicate diagnostic_pass").Split(' ')) values[key] = null;
         foreach (string key in ("navigation_start_count navigation_complete_count dom_count webmessage_count document_ready_count click_diag_count diagnostic_parse_errors uia_polls").Split(' ')) values[key] = 0;
         foreach (string key in ("nav_start_id nav_complete_id dom_nav_id nav_error uia_control_type sendinput_requested sendinput_return struct_size cursor_last_error sendinput_last_error rect_x rect_y rect_width rect_height target_x target_y initialized_ms navigate_ms navigation_start_ms navigation_complete_ms dom_ms document_ready_ms uia_start_ms uia_end_ms input_ms cursor_ms sendinput_ms message_ms click_ms verdict_ms").Split(' ')) values[key] = null;
