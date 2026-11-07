@@ -95,6 +95,9 @@ namespace Qa59Installed.Runtime
                 Check("PID_REUSE_TUPLE_REFUSED", !owner.MatchesCurrentIdentity(wrong));
                 wrong = new ProcessIdentity(owner.Identity.Pid, owner.Identity.ParentPid, owner.Identity.Created, owner.Identity.Image, new string('0', 64));
                 Check("IMAGE_HASH_MISMATCH_REFUSED", !owner.MatchesCurrentIdentity(wrong));
+                fixture.Ready(); int live;
+                Check("NORMAL_TREE_ACCOUNTED_BEFORE_EXIT", owner.ObserveTree(out live) == Verdict.PASS && owner.ObservedWorkerCount == 1);
+                fixture.Stop();
                 bool exited = owner.Wait(5000) == 0;
                 var normalClock = Stopwatch.StartNew();
                 while (!owner.NormalExit() && normalClock.ElapsedMilliseconds < 3000) Thread.Sleep(10);
@@ -121,7 +124,7 @@ namespace Qa59Installed.Runtime
                     Check("MISSED_CHILD_CLEANUP_RELEASED", owner.CleanupVerified && owner.ForcedCleanup);
                     return;
                 }
-                Check(mode == SyntheticMode.Child ? "ACTUAL_CHILD_ACCOUNTED" : "LIVE_WORKER_ACCOUNTED", tree == Verdict.PASS && active == (mode == SyntheticMode.Child ? 2 : 1));
+                Check(mode == SyntheticMode.Child ? "ACTUAL_CHILD_ACCOUNTED" : "LIVE_WORKER_ACCOUNTED", tree == Verdict.PASS && owner.ObservedWorkerCount == (mode == SyntheticMode.Child ? 2 : 1) && active >= owner.ObservedWorkerCount);
                 var counts = EndpointObserver.Observe(owner);
                 Check("OWNED_TCP_UDP_OBSERVED", counts.Verdict == Verdict.PASS && counts.Tcp >= 1 && counts.Udp >= 1);
                 EndpointObserver.InvalidFamilyForTest = true;
@@ -164,6 +167,9 @@ namespace Qa59Installed.Runtime
             using (var fixture = new NativeFixture())
             using (var owner = SyntheticProcessOwner.Start(fixture.Boundary, fixture.Hash, mode))
             {
+                fixture.Ready(); int live;
+                Check("SUPERVISOR_TREE_ACCOUNTED", owner.ObserveTree(out live) == Verdict.PASS);
+                if (mode != SyntheticMode.Hang) fixture.Stop();
                 StepSpec step = ResultContract.Steps[7];
                 var latch = new VerdictLatch(new[] { step.Id });
                 var bounded = new BoundedSupervisor(latch, mode == SyntheticMode.Hang ? 250 : 3000);

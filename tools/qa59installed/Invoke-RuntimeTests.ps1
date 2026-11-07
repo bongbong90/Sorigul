@@ -17,7 +17,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'CONTRACT_COMPILE_FAILED' }
     & $csc $common /target:library ('/out:' + (Join-Path $work 'Qa59Runtime.dll')) ('/reference:' + $dll) $runtime
     if ($LASTEXITCODE -ne 0) { throw 'RUNTIME_COMPILE_FAILED' }
-    & $csc $common /target:exe ('/out:' + (Join-Path $work 'Qa59SyntheticWorker.exe')) (Join-Path $here 'runtime\worker\SyntheticWorker.cs')
+    & $csc $common /target:winexe ('/out:' + (Join-Path $work 'Qa59SyntheticWorker.exe')) (Join-Path $here 'runtime\worker\SyntheticWorker.cs')
     if ($LASTEXITCODE -ne 0) { throw 'SYNTHETIC_WORKER_COMPILE_FAILED' }
     $exe = Join-Path $work 'RuntimeTests.exe'
     & $csc $common /target:exe ('/out:' + $exe) ('/reference:' + $dll) $runtime (Join-Path $here 'runtime\RuntimeTests.cs')

@@ -110,6 +110,7 @@ namespace Qa59Installed.Runtime
         private readonly Dictionary<uint, NativeHandle> observed = new Dictionary<uint, NativeHandle>();
         private readonly HashSet<uint> currentPids = new HashSet<uint>();
         private SafeFileHandle imagePin;
+        private string expectedWorkerHash;
         private NativeHandle job, process;
         private string launchPhase = "ROOT";
         internal string NativeLaunchPhase { get { return launchPhase; } }
@@ -127,6 +128,10 @@ namespace Qa59Installed.Runtime
         internal bool ForcedCleanup { get; private set; }
         internal bool CleanupVerified { get; private set; }
         internal bool OwnershipVerified { get; private set; }
+        internal int ObservedWorkerCount
+        {
+            get { int count = 0; foreach (var item in identities.Values) if (string.Equals(item.Image, root.Root + "\\Qa59SyntheticWorker.exe", StringComparison.OrdinalIgnoreCase)) count++; return count; }
+        }
 
         private SyntheticProcessOwner(DisposableRoot root) { this.root = root; }
 
@@ -167,6 +172,7 @@ namespace Qa59Installed.Runtime
             launchPhase = "HASH";
             string hash = Hash(imagePin);
             if (expectedHash == null || expectedHash.Length != 64 || hash != expectedHash) throw new BoundaryException();
+            expectedWorkerHash = hash;
             launchPhase = "JOB";
             job = WinProcess.CreateJobObject(IntPtr.Zero, null);
             if (job.IsInvalid) throw new BoundaryException();
@@ -258,14 +264,15 @@ namespace Qa59Installed.Runtime
                 || WinProcess.NtQueryInformationProcess(handle, 0, out basic, Marshal.SizeOf(typeof(WinProcess.BasicInfo)), out returned) != 0)
                 return null;
             string image = text.ToString();
-            // Descendants must use the same pinned synthetic binary. A new or
-            // inaccessible executable is NOT VERIFIED; it is never read.
-            if (!string.Equals(image, root.Root + "\\Qa59SyntheticWorker.exe", StringComparison.OrdinalIgnoreCase)) return null;
+            if (!string.Equals(image, root.Root + "\\Qa59SyntheticWorker.exe", StringComparison.OrdinalIgnoreCase))
+            { ObservationCode = "IMAGE_NOT_ALLOWLISTED"; return null; }
             // Reopen the pinned image to avoid sharing FileStream offsets.
             using (var pin = WinFiles.CreateFile(image, 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero))
             {
                 WinFiles.Check(pin, image, false);
-                return new ProcessIdentity(WinProcess.GetProcessId(handle), unchecked((uint)basic.ParentPid.ToInt64()), created, image, Hash(pin));
+                string actualHash = Hash(pin);
+                if (actualHash != expectedWorkerHash) return null;
+                return new ProcessIdentity(WinProcess.GetProcessId(handle), unchecked((uint)basic.ParentPid.ToInt64()), created, image, actualHash);
             }
         }
 

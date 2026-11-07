@@ -12,9 +12,9 @@ internal static class SyntheticWorker
     public static int Main(string[] args)
     {
         if (args.Length != 1) return 64;
-        if (args[0] == "--exit") { Thread.Sleep(300); return 0; }
+        if (args[0] == "--exit") { File.WriteAllText("worker-ready", "1"); Hold(); return 0; }
         if (args[0] == "--exit-fast") return 0;
-        if (args[0] == "--crash") return 23;
+        if (args[0] == "--crash") { File.WriteAllText("worker-ready", "1"); Hold(); return 23; }
         if (args[0] == "--child" || args[0] == "--short-child")
         {
             using (Process current = Process.GetCurrentProcess())
@@ -44,6 +44,7 @@ internal static class SyntheticWorker
             return 0;
         }
         if (args[0] != "--hang") return 64;
+        File.WriteAllText("worker-ready", "1");
         Thread.Sleep(Timeout.Infinite); // models a UIA/native provider hang
         return 25;
     }

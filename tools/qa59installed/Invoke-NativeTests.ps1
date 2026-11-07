@@ -25,7 +25,7 @@ try {
     $dll = Join-Path $work 'Qa59Contracts.dll'
     Compile ($common + @('/target:library',('/out:' + $dll)) + $contracts)
     Compile ($common + @('/target:library',('/out:' + (Join-Path $work 'Qa59Runtime.dll')),('/reference:' + $dll)) + $runtime)
-    Compile ($common + @('/target:exe',('/out:' + (Join-Path $work 'Qa59SyntheticWorker.exe')),(Join-Path $here 'runtime\worker\SyntheticWorker.cs')))
+    Compile ($common + @('/target:winexe',('/out:' + (Join-Path $work 'Qa59SyntheticWorker.exe')),(Join-Path $here 'runtime\worker\SyntheticWorker.cs')))
     $policy = Join-Path $work 'LocalNativePolicy.cs'
     # Compile-only local checks use a non-SID placeholder and cannot execute.
     $qaSid = 'COMPILE_ONLY_DENY'
@@ -35,6 +35,7 @@ try {
             $env:QA59_PUBLIC_REPOSITORY -ne 'true' -or $env:GITHUB_EVENT_NAME -ne 'push') { throw 'HOSTED_NATIVE_CONTEXT_DENIED' }
         $qaSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         if ($qaSid -notmatch '^S-1-[0-9-]+$') { throw 'TOKEN_FORMAT_DENIED' }
+
     }
     $template = @'
 using System;
