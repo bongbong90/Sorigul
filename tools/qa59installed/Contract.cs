@@ -3,8 +3,11 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
-// Contracts build as their own library; only the test assembly sees internals.
+// This friendship exists only in an explicitly test-only build. Assembly names
+// are not identities: never ship the QA59_CONTRACT_TESTS build as authority.
+#if QA59_CONTRACT_TESTS
 [assembly: InternalsVisibleTo("ContractTests")]
+#endif
 
 namespace Qa59Installed
 {
@@ -32,12 +35,21 @@ namespace Qa59Installed
     public sealed class Outcome
     {
         private readonly List<string> reasons = new List<string>();
+        private bool frozen;
+        public Outcome Snapshot()
+        {
+            var copy = new Outcome();
+            copy.reasons.AddRange(reasons);
+            copy.frozen = true;
+            return copy;
+        }
         public bool Ok { get { return reasons.Count == 0; } }
         public IList<string> Reasons { get { return reasons.AsReadOnly(); } }
         public bool Has(string reason) { return reasons.Contains(reason); }
 
         public void Add(string reason)
         {
+            if (frozen) throw new InvalidOperationException("OUTCOME_FROZEN");
             if (!reasons.Contains(reason)) reasons.Add(reason);
         }
     }

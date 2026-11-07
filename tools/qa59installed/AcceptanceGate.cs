@@ -25,11 +25,15 @@ namespace Qa59Installed
 
     public sealed class AcceptanceDecision
     {
-        public Verdict Product = Verdict.NOT_VERIFIED;
-        public Verdict Cleanup = Verdict.NOT_VERIFIED;
-        public Verdict Run = Verdict.NOT_VERIFIED;
-        public Verdict Msi = Verdict.NOT_VERIFIED;
-        public readonly Outcome Outcome = new Outcome();
+        public readonly Verdict Product;
+        public readonly Verdict Cleanup;
+        public readonly Verdict Run;
+        public readonly Verdict Msi;
+        public readonly Outcome Outcome;
+        internal AcceptanceDecision(Verdict product, Verdict cleanup, Verdict run, Verdict msi, Outcome outcome)
+        {
+            Product = product; Cleanup = cleanup; Run = run; Msi = msi; Outcome = outcome.Snapshot();
+        }
 
         public Verdict Acceptance
         {
@@ -54,35 +58,36 @@ namespace Qa59Installed
 
         internal static AcceptanceDecision Evaluate(string resultText, string manifestText, GateDecision gate, ExecutionEvidence evidence)
         {
-            var decision = new AcceptanceDecision();
-            Outcome reasons = decision.Outcome;
+            Verdict product = Verdict.NOT_VERIFIED, cleanup = Verdict.NOT_VERIFIED, run, msi;
+            var reasons = new Outcome();
 
             ResultValidation result = ResultContract.Validate(resultText);
             if (!result.Outcome.Ok || !result.Overall.HasValue) reasons.Add("RESULT_INVALID");
             else
             {
-                decision.Product = result.Overall.Value;
-                if (result.Cleanup.HasValue) decision.Cleanup = result.Cleanup.Value;
+                product = result.Overall.Value;
+                if (result.Cleanup.HasValue) cleanup = result.Cleanup.Value;
             }
-            if (decision.Product != Verdict.PASS) reasons.Add("PRODUCT_" + ResultContract.Name(decision.Product));
-            if (decision.Cleanup != Verdict.PASS) reasons.Add("CLEANUP_" + ResultContract.Name(decision.Cleanup));
+            if (product != Verdict.PASS) reasons.Add("PRODUCT_" + ResultContract.Name(product));
+            if (cleanup != Verdict.PASS) reasons.Add("CLEANUP_" + ResultContract.Name(cleanup));
 
-            decision.Run = RunVerdict(gate, evidence, result, reasons);
+            run = RunVerdict(gate, evidence, result, reasons);
 
             CandidateManifest manifest = CandidateManifest.Validate(manifestText, new Outcome());
-            if (manifest == null) { reasons.Add("MANIFEST_INVALID"); decision.Msi = Verdict.FAIL; }
-            else if (evidence == null) { reasons.Add("MSI_NOT_MEASURED"); decision.Msi = Verdict.NOT_VERIFIED; }
+            if (manifest == null) { reasons.Add("MANIFEST_INVALID"); msi = Verdict.FAIL; }
+            else if (evidence == null) { reasons.Add("MSI_NOT_MEASURED"); msi = Verdict.NOT_VERIFIED; }
             else
             {
-                decision.Msi = Observation.Msi(manifest, evidence.MsiSha256, evidence.MsiSizeBytes);
-                if (decision.Msi == Verdict.FAIL) reasons.Add("MSI_NOT_CANDIDATE");
-                else if (decision.Msi == Verdict.NOT_VERIFIED) reasons.Add("MSI_NOT_MEASURED");
+                msi = Observation.Msi(manifest, evidence.MsiSha256, evidence.MsiSizeBytes);
+                if (msi == Verdict.FAIL) reasons.Add("MSI_NOT_CANDIDATE");
+                else if (msi == Verdict.NOT_VERIFIED) reasons.Add("MSI_NOT_MEASURED");
             }
-            return decision;
+            return new AcceptanceDecision(product, cleanup, run, msi, reasons);
         }
 
         private static Verdict RunVerdict(GateDecision gate, ExecutionEvidence evidence, ResultValidation result, Outcome reasons)
         {
+            if (result.QaCommit == null) reasons.Add("RESULT_QA_COMMIT_MISSING");
             // An unauthorized run is a FAIL, not a gap: it should not have happened.
             if (gate == null || !gate.MsiInstallAllowed || gate.QaCommit == null || !gate.RunId.HasValue)
             {

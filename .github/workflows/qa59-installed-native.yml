@@ -1,0 +1,63 @@
+name: QA59 installed runtime native validation
+on:
+  push:
+    branches: [qa/59-stage2a-local-runtime]
+    paths:
+      - tools/qa59installed/**
+      # Accepted hosted evidence is frozen at d7b47ab / run 42348060046.
+      # Local Win11 harness work must not repeat the completed hosted suites.
+      - '!tools/qa59installed/server/**'
+      - '!tools/qa59installed/Invoke-Windows11Qa.ps1'
+permissions:
+  contents: read
+concurrency:
+  group: qa59-installed-native
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.repository == 'bongbong90/Sorigul' && github.event.repository.private == false && github.ref == 'refs/heads/qa/59-stage2a-local-runtime'
+    runs-on: windows-2022
+    timeout-minutes: 12
+    env:
+      QA59_PUBLIC_REPOSITORY: 'true'
+    steps:
+      - name: Checkout reviewed QA branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/qa59installed
+      - name: Pure contracts
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-ContractTests.ps1
+      - name: Model and containment regression
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-RuntimeTests.ps1 -Containment
+      - name: Fault mutations
+        shell: powershell
+        run: python -u ./tools/qa59installed/Check-Mutations.py
+      - name: Real native synthetic runtime
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-NativeTests.ps1 -Run
+  installed-server:
+    needs: native
+    if: github.repository == 'bongbong90/Sorigul' && github.event.repository.private == false && github.ref == 'refs/heads/qa/59-stage2a-local-runtime'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      QA59_PUBLIC_REPOSITORY: 'true'
+    steps:
+      - name: Checkout reviewed QA harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: qa
+          sparse-checkout: tools/qa59installed
+      - name: Checkout exact product source, separate candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: product
+          ref: 890364e21a4e80d2ff5185332834b4dbb67aeb01
+      - name: Fresh source MSI and installed Backend and Tray QA
+        shell: powershell
+        run: ./qa/tools/qa59installed/Invoke-ServerQa.ps1 -ProductRoot (Join-Path $env:GITHUB_WORKSPACE 'product')

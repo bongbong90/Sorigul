@@ -12,7 +12,8 @@ namespace Qa59Installed
 
         // A QA commit is deliberately absent: the QA SHA is bound by the
         // execution context/approval, never by a file inside that commit.
-        public static readonly string[] Keys =
+        public static string[] Keys { get { return (string[])keys.Clone(); } }
+        private static readonly string[] keys =
         {
             "schema", "kind", "not_execution_authorization",
             "product_repository", "product_pr", "product_head",
