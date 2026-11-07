@@ -10,8 +10,13 @@ using System.Threading;
 using Qa59Installed;
 using Qa59Installed.Runtime;
 using Microsoft.Win32.SafeHandles;
+#if QA59_WIN11_LOCAL_TESTS
+using InstalledCandidate = Qa59Installed.CandidateManifest;
+#else
+using InstalledCandidate = Qa59Installed.RunnerCandidate;
+#endif
 
-internal static class InstalledServerHarness
+internal static partial class InstalledServerHarness
 {
     private static int checks;
     private static string uiExe, desktopHash;
@@ -110,7 +115,7 @@ internal static class InstalledServerHarness
             using(var file=new FileStream(Path.Combine(folder,stem+".mp3"),FileMode.CreateNew,FileAccess.Write)) file.Write(new byte[]{73,68,51},0,3);
         }
     }
-    private static void Test(string exe,string core,string root,string profile,RunnerCandidate candidate)
+    private static void Test(string exe,string core,string root,string profile,InstalledCandidate candidate)
     {
         string data=Path.Combine(profile,"Sorigul"); MakeMedia(root,'A'); MakeMedia(root,'B'); Fixtures(root,data,'A');
         using(var owner=new ProductOwnedJob(exe,core,profile,root,candidate))
@@ -169,6 +174,9 @@ internal static class InstalledServerHarness
     {
         try
         {
+#if QA59_WIN11_LOCAL_TESTS
+            return Windows11Main(args);
+#else
             if(args.Length!=3 || Environment.GetEnvironmentVariable("GITHUB_REPOSITORY")!="bongbong90/Sorigul" || Environment.GetEnvironmentVariable("GITHUB_REF")!="refs/heads/qa/59-stage2a-local-runtime") return 64;
             string work=Path.GetFullPath(args[0]), msi=Path.GetFullPath(args[1]), installed=Path.GetFullPath(args[2]);
             if(!Path.GetFileName(work).StartsWith("qa59-server-",StringComparison.Ordinal) || !installed.StartsWith(work+"\\",StringComparison.OrdinalIgnoreCase) || !msi.StartsWith(work+"\\",StringComparison.OrdinalIgnoreCase)) return 65;
@@ -199,6 +207,7 @@ internal static class InstalledServerHarness
             }
             Console.WriteLine("SERVER_INSTALLED_QA PASS checks="+checks);
             return 0;
+#endif
         }
         catch(Exception error)
         {

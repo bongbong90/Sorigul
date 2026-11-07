@@ -14,6 +14,33 @@ using System.Windows.Automation;
 
 internal static class InstalledUiWorker
 {
+#if QA59_WIN11_LOCAL_TESTS
+    [StructLayout(LayoutKind.Sequential)] private struct ParentInfo { internal IntPtr Reserved, Peb, Reserved2, Reserved3, Pid, Parent; }
+    [DllImport("ntdll.dll")] private static extern int NtQueryInformationProcess(IntPtr process,int kind,out ParentInfo info,int length,out int returned);
+    [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle,uint wait);
+    [DllImport("kernel32.dll")] private static extern bool TerminateProcess(IntPtr handle,uint code);
+    private static Process supervisor;
+    private static bool SupervisorAlive() { return supervisor!=null && WaitForSingleObject(supervisor.Handle,0)==258; }
+    private static void WatchSupervisor()
+    {
+        ParentInfo info; int returned;
+        using(var current=Process.GetCurrentProcess())
+            if(NtQueryInformationProcess(current.Handle,0,out info,Marshal.SizeOf(typeof(ParentInfo)),out returned)!=0) throw new InvalidOperationException();
+        supervisor=Process.GetProcessById(checked((int)info.Parent.ToInt64()));
+        string path=Path.Combine(Path.GetDirectoryName(typeof(InstalledUiWorker).Assembly.Location),"InstalledWindows11Harness.exe");
+        if(!string.Equals(supervisor.MainModule.FileName,path,StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException();
+        using(var image=File.OpenRead(path)) using(var sha=SHA256.Create())
+            if(BitConverter.ToString(sha.ComputeHash(image)).Replace("-","").ToLowerInvariant()!=LocalUiParentPin.HostHash) throw new InvalidOperationException();
+        // Retain the exact parent handle. No PID lookup in the death watcher.
+        IntPtr parentHandle=supervisor.Handle;
+        if(WaitForSingleObject(parentHandle,0)!=258) throw new InvalidOperationException();
+        var watcher=new Thread(delegate() {
+            WaitForSingleObject(parentHandle,uint.MaxValue);
+            using(var current=Process.GetCurrentProcess()) TerminateProcess(current.Handle,72);
+        });
+        watcher.IsBackground=true; watcher.Start();
+    }
+#endif
     [StructLayout(LayoutKind.Sequential)] private struct Input { internal uint Type; internal Mouse Mouse; }
     [StructLayout(LayoutKind.Sequential)] private struct Mouse { internal int X, Y; internal uint Data, Flags, Time; internal UIntPtr Extra; }
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
@@ -63,6 +90,9 @@ internal static class InstalledUiWorker
         for (int i = 0; under != null && i < 12; i++, under = TreeWalker.ControlViewWalker.GetParent(under))
             if (Automation.Compare(under, element)) { hit = true; break; }
         if (!hit) { inputFailure="HIT_MISMATCH"; return false; }
+#if QA59_WIN11_LOCAL_TESTS
+        if(!SupervisorAlive()) { inputFailure="PROVIDER_FAILED"; return false; }
+#endif
         var input = new Input[2]; input[0].Mouse.Flags = right ? 8U : 2U; input[1].Mouse.Flags = right ? 16U : 4U;
         uint sent = SendInput(2, input, Marshal.SizeOf(typeof(Input)));
         inserted += (int)sent; clicks++;
@@ -82,7 +112,13 @@ internal static class InstalledUiWorker
     {
         try
         {
+#if QA59_WIN11_LOCAL_TESTS
+            if(!LocalWin11Policy.Verified() || args.Length!=6) return 64;
+            WatchSupervisor();
+            if(args[0]=="watch-parent") { Console.WriteLine("UI_PARENT_WATCH_READY"); Thread.Sleep(Timeout.Infinite); return 1; }
+#else
             if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" || Environment.GetEnvironmentVariable("ImageOS") != "win22" || args.Length != 6) return 64;
+#endif
             // UIA rectangles and SendInput must use the same physical screen
             // coordinates as the per-monitor-aware Tauri window.
             SetThreadDpiAwarenessContext(new IntPtr(-4));

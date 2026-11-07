@@ -3,8 +3,11 @@ on:
   push:
     branches: [qa/59-stage2a-local-runtime]
     paths:
-      - .github/workflows/qa59-installed-native.yml
       - tools/qa59installed/**
+      # Accepted hosted evidence is frozen at d7b47ab / run 42348060046.
+      # Local Win11 harness work must not repeat the completed hosted suites.
+      - '!tools/qa59installed/server/**'
+      - '!tools/qa59installed/Invoke-Windows11Qa.ps1'
 permissions:
   contents: read
 concurrency:

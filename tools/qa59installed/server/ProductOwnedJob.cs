@@ -8,6 +8,11 @@ using System.Security.Cryptography;
 using System.Text;
 using Qa59Installed;
 using Qa59Installed.Runtime;
+#if QA59_WIN11_LOCAL_TESTS
+using InstalledCandidate = Qa59Installed.CandidateManifest;
+#else
+using InstalledCandidate = Qa59Installed.RunnerCandidate;
+#endif
 
 internal sealed class ProductOwnedJob : IDisposable
 {
@@ -21,8 +26,48 @@ internal sealed class ProductOwnedJob : IDisposable
     private NativeHandle job, process;
     private SafeFilePin desktop;
     private readonly Dictionary<uint, Item> known = new Dictionary<uint, Item>();
-    private readonly RunnerCandidate candidate;
+    private readonly string expectedCoreHash;
     private readonly string corePath;
+#if QA59_WIN11_LOCAL_TESTS
+    private readonly string webviewPath;
+    [DllImport("ntdll.dll",EntryPoint="NtQueryInformationProcess")]
+    private static extern int QueryCommandLine(NativeHandle process,int kind,IntPtr data,int length,out int needed);
+    [DllImport("shell32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr CommandLineToArgvW(string command,out int count);
+    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+    private void VerifyWebview(Item item)
+    {
+        if(!string.Equals(Path.GetFileName(item.Image),"msedgewebview2.exe",StringComparison.OrdinalIgnoreCase)) return;
+        int needed; QueryCommandLine(item.Handle,60,IntPtr.Zero,0,out needed);
+        if(needed<16 || needed>65536) throw new BoundaryException();
+        IntPtr data=Marshal.AllocHGlobal(needed);
+        try
+        {
+            int returned;
+            if(QueryCommandLine(item.Handle,60,data,needed,out returned)!=0) throw new BoundaryException();
+            int length=unchecked((ushort)Marshal.ReadInt16(data)); IntPtr value=Marshal.ReadIntPtr(data,IntPtr.Size==8?8:4);
+            if(length<=0 || length%2!=0 || value.ToInt64()<data.ToInt64() || value.ToInt64()+length>data.ToInt64()+needed) throw new BoundaryException();
+            string command=Marshal.PtrToStringUni(value,length/2); int count; IntPtr args=CommandLineToArgvW(command,out count);
+            if(args==IntPtr.Zero) throw new BoundaryException();
+            try
+            {
+                bool matched=false;
+                for(int i=0;i<count;i++)
+                {
+                    string arg=Marshal.PtrToStringUni(Marshal.ReadIntPtr(args,i*IntPtr.Size));
+                    const string prefix="--user-data-dir=";
+                    if(arg.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))
+                    {
+                        if(!string.Equals(Path.GetFullPath(arg.Substring(prefix.Length)),webviewPath,StringComparison.OrdinalIgnoreCase)) throw new BoundaryException();
+                        matched=true;
+                    }
+                }
+                if(!matched) throw new BoundaryException();
+            }
+            finally { LocalFree(args); }
+        }
+        finally { Marshal.FreeHGlobal(data); }
+    }
+#endif
     internal uint RootPid { get; private set; }
     internal long RootCreated { get; private set; }
     internal bool ForcedCleanup { get; private set; }
@@ -34,13 +79,20 @@ internal sealed class ProductOwnedJob : IDisposable
         internal SafeFilePin(string path) { Handle = WinFiles.CreateFile(path,0x80000000,1,IntPtr.Zero,3,0x00200000,IntPtr.Zero); WinFiles.Check(Handle,path,false); }
         public void Dispose() { Handle.Dispose(); }
     }
-    internal ProductOwnedJob(string exe, string core, string profile, string work, RunnerCandidate candidate)
+    internal ProductOwnedJob(string exe, string core, string profile, string work, InstalledCandidate candidate)
     {
+#if QA59_WIN11_LOCAL_TESTS
+        if(candidate==null || !LocalWin11Policy.Verified()) throw new BoundaryException();
+        string expectedDesktopHash=candidate.DesktopSha256; expectedCoreHash=candidate.CoreSha256;
+        webviewPath=Path.Combine(work,"webview");
+#else
         if (candidate == null || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true"
             || Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted"
             || Environment.GetEnvironmentVariable("QA59_PUBLIC_REPOSITORY") != "true" || Environment.GetEnvironmentVariable("ImageOS") != "win22") throw new BoundaryException();
-        this.candidate = candidate; corePath = core;
-        if (Digest(exe) != candidate.DesktopHash || Digest(core) != candidate.CoreHash) throw new BoundaryException();
+        string expectedDesktopHash=candidate.DesktopHash; expectedCoreHash=candidate.CoreHash;
+#endif
+        corePath = core;
+        if (Digest(exe) != expectedDesktopHash || Digest(core) != expectedCoreHash) throw new BoundaryException();
         desktop = new SafeFilePin(exe);
         job = WinProcess.CreateJobObject(IntPtr.Zero,null);
         IntPtr limits = Marshal.AllocHGlobal(144);
@@ -66,6 +118,16 @@ internal sealed class ProductOwnedJob : IDisposable
             }
             entries["LOCALAPPDATA"] = profile; entries["APPDATA"] = Path.Combine(work,"roaming");
             entries["TEMP"] = Path.Combine(work,"temp"); entries["TMP"] = entries["TEMP"];
+#if QA59_WIN11_LOCAL_TESTS
+            // Child-process overrides only. No registry or user environment change.
+            foreach(string key in new List<string>(entries.Keys))
+                if(key.StartsWith("WEBVIEW2_",StringComparison.OrdinalIgnoreCase)) entries.Remove(key);
+            entries["WEBVIEW2_USER_DATA_FOLDER"]=Path.Combine(work,"webview");
+            Directory.CreateDirectory(entries["WEBVIEW2_USER_DATA_FOLDER"]);
+            entries["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"]="--proxy-server=http://127.0.0.1:9 --proxy-bypass-list=127.0.0.1;localhost --disable-background-networking";
+            entries["HTTP_PROXY"]="http://127.0.0.1:9"; entries["HTTPS_PROXY"]=entries["HTTP_PROXY"];
+            entries["NO_PROXY"]="127.0.0.1,localhost"; entries["HF_HUB_OFFLINE"]="1";
+#endif
             Directory.CreateDirectory(entries["APPDATA"]); Directory.CreateDirectory(entries["TEMP"]);
             var block = new StringBuilder(); foreach (var pair in entries) block.Append(pair.Key).Append('=').Append(pair.Value).Append('\0'); block.Append('\0');
             environment = Marshal.StringToHGlobalUni(block.ToString());
@@ -118,6 +180,9 @@ internal sealed class ProductOwnedJob : IDisposable
                     item = new Item { Pid=pid, Parent=unchecked((uint)basic.ParentPid.ToInt64()), Created=birth, Image=text.ToString(), Handle=handle };
                     known.Add(pid,item);
                 }
+#if QA59_WIN11_LOCAL_TESTS
+                if(WinProcess.WaitForSingleObject(item.Handle,0)==258) VerifyWebview(item);
+#endif
                 if (WinProcess.WaitForSingleObject(item.Handle,0) == 258) result.Add(item);
             }
             return result;
@@ -134,7 +199,7 @@ internal sealed class ProductOwnedJob : IDisposable
     internal void StopBackend()
     {
         var targets = Snapshot().FindAll(item=>SamePath(item.Image,corePath));
-        if (targets.Count==0 || BackendRoots()!=1 || Digest(corePath)!=candidate.CoreHash) throw new BoundaryException();
+        if (targets.Count==0 || BackendRoots()!=1 || Digest(corePath)!=expectedCoreHash) throw new BoundaryException();
         targets.Sort((first,second)=>first.Parent==RootPid ? 1 : second.Parent==RootPid ? -1 : 0);
         foreach(var item in targets)
         {
