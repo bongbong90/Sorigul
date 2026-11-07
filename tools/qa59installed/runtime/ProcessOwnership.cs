@@ -11,7 +11,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Qa59Installed.Runtime
 {
-    internal enum SyntheticMode { Exit, Hang, Crash, Child }
+    internal enum SyntheticMode { Exit, Hang, Crash, Child, Endpoints, MissedChild }
     internal sealed class NativeHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         internal NativeHandle() : base(true) { }
@@ -27,6 +27,12 @@ namespace Qa59Installed.Runtime
         private static readonly string[] ProvisionedQaSids = new string[0];
         internal static bool Verified()
         {
+#if QA59_NATIVE_LOCAL_TESTS
+            // The generated policy is linked only into the separate test EXE.
+            // Loading that build as a library does not grant an execution gate.
+            if (System.Reflection.Assembly.GetEntryAssembly() == System.Reflection.Assembly.GetExecutingAssembly()
+                && LocalNativePolicy.Verified()) return true;
+#endif
             using (WindowsIdentity current = WindowsIdentity.GetCurrent())
             {
                 foreach (string sid in ProvisionedQaSids)
@@ -105,6 +111,8 @@ namespace Qa59Installed.Runtime
         private readonly HashSet<uint> currentPids = new HashSet<uint>();
         private SafeFileHandle imagePin;
         private NativeHandle job, process;
+        private string launchPhase = "ROOT";
+        internal string NativeLaunchPhase { get { return launchPhase; } }
         internal ProcessIdentity Identity { get; private set; }
         internal bool ForcedCleanup { get; private set; }
         internal bool CleanupVerified { get; private set; }
@@ -117,7 +125,13 @@ namespace Qa59Installed.Runtime
             if (!QaAccountBoundary.Verified()) throw new BoundaryException();
             var owner = new SyntheticProcessOwner(root);
             try { owner.Launch(expectedSha256, mode); return owner; }
-            catch { owner.Dispose(); throw new BoundaryException(); }
+            catch
+            {
+#if QA59_NATIVE_LOCAL_TESTS
+                Console.WriteLine("NATIVE_LAUNCH_FAILURE " + owner.launchPhase + " WIN32=" + Marshal.GetLastWin32Error());
+#endif
+                owner.Dispose(); throw new BoundaryException();
+            }
         }
 
         private void Launch(string expectedHash, SyntheticMode mode)
@@ -133,16 +147,22 @@ namespace Qa59Installed.Runtime
                 case SyntheticMode.Hang: argument = "--hang"; break;
                 case SyntheticMode.Crash: argument = "--crash"; break;
                 case SyntheticMode.Child: argument = "--child"; break;
+                case SyntheticMode.Endpoints: argument = "--endpoints"; break;
+                case SyntheticMode.MissedChild: argument = "--short-child"; break;
                 default: throw new BoundaryException();
             }
+            launchPhase = "IMAGE_PIN";
             imagePin = WinFiles.CreateFile(image, 0x80000000, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
             WinFiles.Check(imagePin, image, false);
+            launchPhase = "HASH";
             string hash = Hash(imagePin);
             if (expectedHash == null || expectedHash.Length != 64 || hash != expectedHash) throw new BoundaryException();
+            launchPhase = "JOB";
             job = WinProcess.CreateJobObject(IntPtr.Zero, null);
             if (job.IsInvalid) throw new BoundaryException();
             // JOBOBJECT_EXTENDED_LIMIT_INFORMATION, KILL_ON_JOB_CLOSE. Native
             // layouts are 144 bytes on x64, 112 on x86; LimitFlags offset 16.
+            launchPhase = "JOB_LIMIT";
             int size = IntPtr.Size == 8 ? 144 : 112;
             IntPtr limits = Marshal.AllocHGlobal(size);
             try
@@ -152,8 +172,13 @@ namespace Qa59Installed.Runtime
                 if (!WinProcess.SetInformationJobObject(job, 9, limits, (uint)size)) throw new BoundaryException();
             }
             finally { Marshal.FreeHGlobal(limits); }
+            launchPhase = "HOST_JOB";
             bool nested;
-            if (!WinProcess.IsCurrentProcessInJob(new IntPtr(-1), IntPtr.Zero, out nested) || nested) throw new BoundaryException();
+            if (!WinProcess.IsCurrentProcessInJob(new IntPtr(-1), IntPtr.Zero, out nested)) throw new BoundaryException();
+            // Hosted runners already own an outer Job. Windows 2022 supports
+            // nested Jobs; JOB_LIST atomically adds our own non-breakaway Job.
+            // Exact membership is verified below, with no uncontained fallback.
+            launchPhase = "JOB_ATTRIBUTE";
             var startup = new WinProcess.StartupEx(); startup.Startup.Size = Marshal.SizeOf(startup);
             WinProcess.Created child;
             IntPtr bytes = IntPtr.Zero;
@@ -170,8 +195,9 @@ namespace Qa59Installed.Runtime
                 // process creation. Supervisor death cannot leave an unowned
                 // suspended child in the create/AssignProcessToJobObject gap.
                 if (!initialized || !WinProcess.UpdateProcThreadAttribute(startup.Attributes, 0, new IntPtr(0x2000D),
-                    jobValue, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)
-                    || !WinProcess.CreateProcess(image, new StringBuilder("\"" + image + "\" " + argument), IntPtr.Zero, IntPtr.Zero, false,
+                    jobValue, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero)) throw new BoundaryException();
+                launchPhase = "CREATE_PROCESS";
+                if (!WinProcess.CreateProcess(image, new StringBuilder("\"" + image + "\" " + argument), IntPtr.Zero, IntPtr.Zero, false,
                         0x08080004, IntPtr.Zero, root.Root, ref startup, out child)) throw new BoundaryException();
             }
             finally
@@ -182,6 +208,7 @@ namespace Qa59Installed.Runtime
             process = new NativeHandle(child.Process);
             using (var thread = new NativeHandle(child.Thread))
             {
+                launchPhase = "OWN_JOB_MEMBERSHIP";
                 bool member;
                 if (!WinProcess.IsProcessInJob(process, job.DangerousGetHandle(), out member) || !member)
                 {
@@ -189,12 +216,14 @@ namespace Qa59Installed.Runtime
                     CleanupVerified = WinProcess.TerminateProcess(process, 125) && WinProcess.WaitForSingleObject(process, 1000) == 0;
                     throw new BoundaryException();
                 }
+                launchPhase = "IDENTITY";
                 Identity = Observe(process);
                 if (Identity == null || Identity.Pid != child.Pid || Identity.ParentPid != WinProcess.GetCurrentProcessId()
                     || !string.Equals(Identity.Image, image, StringComparison.OrdinalIgnoreCase) || Identity.Sha256 != hash)
                     throw new BoundaryException();
                 identities.Add(Identity.Pid, Identity);
                 OwnershipVerified = true;
+                launchPhase = "RESUME";
                 if (WinProcess.ResumeThread(thread) == uint.MaxValue) throw new BoundaryException();
             }
         }
@@ -288,6 +317,10 @@ namespace Qa59Installed.Runtime
         }
 
         internal uint Wait(uint milliseconds) { return process == null ? uint.MaxValue : WinProcess.WaitForSingleObject(process, milliseconds); }
+        internal bool MatchesCurrentIdentity(ProcessIdentity expected)
+        {
+            return expected != null && expected.Same(Observe(process));
+        }
         internal bool NormalExit()
         {
             uint code;
@@ -317,7 +350,7 @@ namespace Qa59Installed.Runtime
                 if (wait == 258) continue;
                 uint code;
                 if (wait != 0 || !WinProcess.GetExitCodeProcess(pair.Value, out code)) return Verdict.NOT_VERIFIED;
-                if (code != 0) return Verdict.FAIL;
+                if (code != 0 && !ForcedCleanup) return Verdict.FAIL;
             }
             return Verdict.PASS;
         }
@@ -343,15 +376,32 @@ namespace Qa59Installed.Runtime
             pids = null;
             int count;
             if (ObserveTree(out count) != Verdict.PASS) return false;
-            pids = new HashSet<uint>(currentPids);
-            return pids.Count == count;
+            // Include exited identities while their original process handles
+            // remain pinned. Cleanup must query their endpoints, not an empty
+            // PID set, and a recycled PID must never become owned evidence.
+            pids = new HashSet<uint>();
+            foreach (var identity in identities)
+            {
+                NativeHandle held;
+                if (Identity != null && identity.Key == Identity.Pid) held = process;
+                else if (!observed.TryGetValue(identity.Key, out held)) return false;
+                long created, exited, kernel, user;
+                if (held == null || held.IsClosed || held.IsInvalid || WinProcess.GetProcessId(held) != identity.Key
+                    || !WinProcess.GetProcessTimes(held, out created, out exited, out kernel, out user)
+                    || created != identity.Value.Created) return false;
+                pids.Add(identity.Key);
+            }
+            return pids.Count == identities.Count && count <= pids.Count;
         }
 
         internal void ForceCleanup()
         {
             ForcedCleanup = true;
             if (job == null || job.IsInvalid || job.IsClosed || !WinProcess.TerminateJobObject(job, 124)) return;
-            CleanupVerified = Wait(1000) == 0 && JobEmpty();
+            int total, active;
+            // Cleanup proves release, independently of forced child exit codes
+            // and any previously detected accounting gap. It never means normal.
+            CleanupVerified = Wait(1000) == 0 && Accounting(out total, out active) && active == 0;
         }
 
         public void Dispose()

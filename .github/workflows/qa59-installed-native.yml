@@ -1,0 +1,37 @@
+name: QA59 installed runtime native validation
+on:
+  push:
+    branches: [qa/59-stage2a-local-runtime]
+    paths:
+      - .github/workflows/qa59-installed-native.yml
+      - tools/qa59installed/**
+permissions:
+  contents: read
+concurrency:
+  group: qa59-installed-native
+  cancel-in-progress: false
+jobs:
+  native:
+    if: github.repository == 'bongbong90/Sorigul' && github.event.repository.private == false && github.ref == 'refs/heads/qa/59-stage2a-local-runtime'
+    runs-on: windows-2022
+    timeout-minutes: 12
+    env:
+      QA59_PUBLIC_REPOSITORY: 'true'
+    steps:
+      - name: Checkout reviewed QA branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/qa59installed
+      - name: Pure contracts
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-ContractTests.ps1
+      - name: Model and containment regression
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-RuntimeTests.ps1 -Containment
+      - name: Fault mutations
+        shell: powershell
+        run: python -u ./tools/qa59installed/Check-Mutations.py
+      - name: Real native synthetic runtime
+        shell: powershell
+        run: ./tools/qa59installed/Invoke-NativeTests.ps1 -Run

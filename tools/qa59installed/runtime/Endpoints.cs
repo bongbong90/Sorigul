@@ -13,6 +13,25 @@ namespace Qa59Installed.Runtime
 
     internal static class EndpointObserver
     {
+#if QA59_NATIVE_LOCAL_TESTS
+        internal static bool InvalidFamilyForTest;
+        internal static EndpointCounts ExitedWitness(NativeHandle handle, ProcessIdentity expected)
+        {
+            long created, exited, kernel, user;
+            if (expected == null || WinProcess.GetProcessId(handle) != expected.Pid
+                || !WinProcess.GetProcessTimes(handle, out created, out exited, out kernel, out user)
+                || created != expected.Created || WinProcess.WaitForSingleObject(handle, 0) != 0)
+                return new EndpointCounts(Verdict.NOT_VERIFIED, null, null);
+            try
+            {
+                var pids = new HashSet<uint>(new[] { expected.Pid });
+                return new EndpointCounts(Verdict.PASS,
+                    Count(true, 2, 24, 20, pids) + Count(true, 23, 56, 52, pids),
+                    Count(false, 2, 12, 8, pids) + Count(false, 23, 28, 24, pids));
+            }
+            catch { return new EndpointCounts(Verdict.NOT_VERIFIED, null, null); }
+        }
+#endif
         [DllImport("iphlpapi.dll", SetLastError = true)]
         private static extern uint GetExtendedTcpTable(IntPtr table, ref uint size, bool order, uint family, int kind, uint reserved);
         [DllImport("iphlpapi.dll", SetLastError = true)]
@@ -39,6 +58,9 @@ namespace Qa59Installed.Runtime
 
         private static uint Query(bool tcp, IntPtr buffer, ref uint size, uint family)
         {
+#if QA59_NATIVE_LOCAL_TESTS
+            if (InvalidFamilyForTest) family = uint.MaxValue;
+#endif
             return tcp ? GetExtendedTcpTable(buffer, ref size, false, family, 5, 0)
                 : GetExtendedUdpTable(buffer, ref size, false, family, 1, 0);
         }
