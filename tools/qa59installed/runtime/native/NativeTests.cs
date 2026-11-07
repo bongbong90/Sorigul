@@ -215,9 +215,20 @@ namespace Qa59Installed.Runtime
             // parent acknowledges only after pinning the actual worker handle.
             string acknowledgement = Path.Combine(fixture.Boundary.Root,"supervisor-ack");
             var clock = Stopwatch.StartNew();
-            while (!File.Exists(acknowledgement) && clock.ElapsedMilliseconds < 5000) Thread.Sleep(10);
-            if (!File.Exists(acknowledgement)) return 75;
-            byte[] command = File.ReadAllBytes(acknowledgement);
+            byte[] command = null;
+            while (clock.ElapsedMilliseconds < 5000)
+            {
+                if (!File.Exists(acknowledgement)) { Thread.Sleep(10); continue; }
+                try { command = File.ReadAllBytes(acknowledgement); break; }
+                catch (IOException error)
+                {
+                    // Only the parent's still-open exclusive writer may race.
+                    // Permissions, missing data and all other errors still fail.
+                    if ((error.HResult & 65535) != 32) throw;
+                    Thread.Sleep(10);
+                }
+            }
+            if (command == null) return 75;
             if (command.Length != 1 || command[0] != 71) return 75;
             Environment.Exit(37);
             return 76;
@@ -247,9 +258,10 @@ namespace Qa59Installed.Runtime
                             || WinProcess.NtQueryInformationProcess(witness, 0, out info, System.Runtime.InteropServices.Marshal.SizeOf(typeof(WinProcess.BasicInfo)), out returned) != 0
                             || info.ParentPid.ToInt64() != helper.Id) throw new BoundaryException();
                         var identity = new ProcessIdentity(pid, (uint)helper.Id, birth, root + "\\Qa59SyntheticWorker.exe", "");
-                        using (var acknowledgement = new FileStream(Path.Combine(root,"supervisor-ack-pending"),FileMode.CreateNew,FileAccess.Write))
+                        Console.WriteLine("NATIVE_HELPER_ACK_WRITE");
+                        using (var acknowledgement = new FileStream(Path.Combine(root,"supervisor-ack"),FileMode.CreateNew,FileAccess.Write))
                         { acknowledgement.WriteByte(71); acknowledgement.Flush(true); }
-                        File.Move(Path.Combine(root,"supervisor-ack-pending"),Path.Combine(root,"supervisor-ack"));
+                        Console.WriteLine("NATIVE_HELPER_ACK_CLOSED");
                         bool helperExited = helper.WaitForExit(5000);
                         Console.WriteLine("NATIVE_HELPER_EXIT observed=" + helperExited + " code=" + (helperExited ? helper.ExitCode : -1));
                         Check("SUPERVISOR_ABRUPT_EXIT", helperExited && helper.ExitCode == 37);
