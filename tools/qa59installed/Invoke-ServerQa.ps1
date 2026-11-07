@@ -70,18 +70,56 @@ if($LASTEXITCODE -ne 0){throw 'CANONICAL_INSTALLER_BUILD_FAILED'}
 [IO.File]::WriteAllText($buildScript,$buildText,[Text.UTF8Encoding]::new($false))
 $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 $build=Start-Process -FilePath $powershell -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"'+$buildScript+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $work 'build.out') -RedirectStandardError (Join-Path $work 'build.err')
+# Keep the actual process handle before it exits. A Start-Process object whose
+# handle was never cached can lose ExitCode after a redirected child exits.
+$buildHandle=$build.Handle
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class Qa59BuildExit {
+ [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetExitCodeProcess(IntPtr process,out uint code);
+ public static uint Read(IntPtr process) { uint code; if(!GetExitCodeProcess(process,out code)) throw new InvalidOperationException("BUILD_EXIT_QUERY_FAILED"); return code; }
+}
+'@
+$phase='DEPENDENCIES'
 $clock=[Diagnostics.Stopwatch]::StartNew()
 while(-not $build.WaitForExit(30000)) {
-    Write-Output ('SERVER_BUILD_RUNNING seconds='+[int]$clock.Elapsed.TotalSeconds)
+    $tail=(Get-Content -LiteralPath (Join-Path $work 'build.out') -Tail 200 -ErrorAction SilentlyContinue) -join "`n"
+    $phase=if($tail -match 'Building Windows MSI'){'RELEASE_MSI'}elseif($tail -match 'Validating Rust/Tauri'){'RUST_REGRESSION'}elseif($tail -match 'Building frontend production'){'FRONTEND'}elseif($tail -match 'Running PyInstaller'){'CORE_PACKAGE'}else{'DEPENDENCIES'}
+    Write-Output ('SERVER_BUILD_RUNNING seconds='+[int]$clock.Elapsed.TotalSeconds+' phase='+$phase)
     if($clock.Elapsed.TotalMinutes -ge 45) { $build.Kill(); throw 'SERVER_BUILD_DEADLINE' }
 }
-if($build.ExitCode -ne 0) {
-    # Keep raw logs inside this ephemeral runner. Report only known compiler/
-    # package error codes, never paths, command lines or environment values.
+$build.WaitForExit()
+$buildExit=[Qa59BuildExit]::Read($buildHandle)
+$build.Dispose()
+Write-Output ('SERVER_BUILD_EXIT '+$buildExit)
+if($buildExit -ne 0) {
+    # Raw text never leaves the runner. Derive only fixed codes and public
+    # compiler code numbers from bounded tails, not arbitrary redacted lines.
+    Write-Output ('SERVER_BUILD_FAILURE_PHASE '+$phase)
+    $knownIssues=[ordered]@{
+        'cargo fmt --check failed'='RUSTFMT'
+        'cargo check failed'='RUST_CHECK'
+        'cargo clippy failed'='RUST_CLIPPY'
+        'cargo test failed'='RUST_TEST'
+        'tauri build failed'='MSI_BUNDLE'
+        'npm run build failed'='FRONTEND_BUILD'
+        'PyInstaller build failed'='CORE_PACKAGE'
+        'No matching distribution found'='DEPENDENCY_DISTRIBUTION'
+        'PACKAGED_SELFTEST_FAILED'='CORE_SELFTEST'
+        'PYTHON_RELEASE_VERSION_MISMATCH'='PYTHON_VERSION'
+        'TRACKED_TREE_DIRTY'='SOURCE_DIRTY'
+    }
     foreach($log in @('build.err','build.out')) {
-        $lines=@(Get-Content -LiteralPath (Join-Path $work $log) -Tail 60)
+        $lines=@(Get-Content -LiteralPath (Join-Path $work $log) -Tail 300)
         foreach($line in $lines) {
-            if($line -match '(error\[E[0-9]+\]|error (CS[0-9]+|C[0-9]+|LNK[0-9]+)|[A-Z][A-Z0-9_]{8,}_FAILED|No matching distribution found for [A-Za-z0-9._=<>+-]+|PYTHON_RELEASE_VERSION_MISMATCH)') { Write-Output ('SERVER_BUILD_DIAG '+$matches[0]) }
+            foreach($pattern in $knownIssues.Keys) {
+                if(([string]$line).Contains($pattern)){Write-Output ('SERVER_BUILD_DIAG '+$knownIssues[$pattern])}
+            }
+            if([string]$line -match 'error(?:\[(E[0-9]{4})\]| (CS[0-9]+|C[0-9]+|LNK[0-9]+))') {
+                $compilerCode=if($matches[1]){$matches[1]}else{$matches[2]}
+                Write-Output ('SERVER_BUILD_COMPILER_CODE '+$compilerCode)
+            }
         }
     }
     throw 'SERVER_CANONICAL_BUILD_FAILED'
@@ -108,8 +146,12 @@ if($candidate.core_sha256 -ne $manifest.sidecar_sha256 -or $candidate.ffmpeg_sha
 [IO.File]::WriteAllText((Join-Path $work 'candidate.json'),($candidate|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
 Write-Output ('SERVER_MSI_PROVENANCE source='+$sourceHead+' qa='+$env:GITHUB_SHA+' run='+$env:GITHUB_RUN_ID+' sha256='+$candidate.msi_sha256+' bytes='+$candidate.msi_size_bytes)
 $installed=Join-Path $work 'installed'
-$install=Start-Process -FilePath (Join-Path ([Environment]::SystemDirectory) 'msiexec.exe') -ArgumentList @('/i',('"'+$msi+'"'),'/qn','/norestart',('INSTALLDIR="'+$installed+'"'),'/l*v',('"'+(Join-Path $work 'msi-install.log')+'"')) -WindowStyle Hidden -Wait -PassThru
-if($install.ExitCode -ne 0) { Write-Output ('SERVER_INSTALL_EXIT '+$install.ExitCode); throw 'SERVER_INSTALL_FAILED' }
+$install=Start-Process -FilePath (Join-Path ([Environment]::SystemDirectory) 'msiexec.exe') -ArgumentList @('/i',('"'+$msi+'"'),'/qn','/norestart',('INSTALLDIR="'+$installed+'"'),'/l*v',('"'+(Join-Path $work 'msi-install.log')+'"')) -WindowStyle Hidden -PassThru
+$installHandle=$install.Handle
+if(-not $install.WaitForExit(180000)) { $install.Kill(); throw 'SERVER_INSTALL_DEADLINE' }
+$installExit=[Qa59BuildExit]::Read($installHandle)
+$install.Dispose()
+if($installExit -ne 0) { Write-Output ('SERVER_INSTALL_EXIT '+$installExit); throw 'SERVER_INSTALL_FAILED' }
 Write-Output 'SERVER_MSI_INSTALL PASS'
 & $hostExe $work $msi $installed
 if($LASTEXITCODE -ne 0) { throw 'SERVER_INSTALLED_QA_FAILED' }

@@ -1,17 +1,22 @@
-# #59 installed-QA harness — Stage 2A: local Runtime boundaries
+# #59 installed-QA harness — hosted Native and installed UI QA
 
 QA-only code, separate from the product. Stage 1.1 contracts are hardened and
 the Windows local Runtime boundary modules are implemented in `runtime/`.
-There is no workflow or installed-product executor. No external control or
-isolated QA account SID is enabled, so execution remains denied.
+Production Runtime and public ContextGate still deny execution. The user has
+separately authorized the QA branch's public standard `windows-2022` workflow.
+Its disposable Native test EXE has a local generated policy; the normal DLL
+and an EXE loaded as a library remain DENY. No real SID is committed or logged.
 
 See [STAGE2A_DESIGN.md](STAGE2A_DESIGN.md) for containment, process ownership,
 deadlines, evidence provenance and the single-dispatch external-control design.
 
-Private repository creation, MSI transfer, Actions runs, MSI install and the
-installed QA run remain BLOCKED behind separate approval. The 0 KRW cost
-condition is still NOT VERIFIED. No trusted external pre-dispatch control
-exists yet, so the public `ContextGate.Evaluate` denies every context.
+Private repository creation and transfer of the original MSI remain blocked.
+Private cost/free allowance remains NOT VERIFIED. The approved public workflow
+uses no artifact upload, cache, Release or larger runner. Its installed job
+requires Native PASS, checks out product `890364e` separately, and builds a new
+test MSI entirely inside the disposable runner. `RunnerCandidate` binds that
+new source build to QA SHA/run ID/measured bytes; it never changes the original
+`CandidateManifest`/MSI pins or authorizes through public ContextGate.
 
 ## Run
 
@@ -19,6 +24,8 @@ exists yet, so the public `ContextGate.Evaluate` denies every context.
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa59installed\Invoke-ContractTests.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\qa59installed\Invoke-RuntimeTests.ps1 -Containment
 python tools\qa59installed\Check-Mutations.py
+powershell -NoProfile -File tools\qa59installed\Invoke-NativeTests.ps1
+powershell -NoProfile -File tools\qa59installed\Invoke-ServerQa.ps1 -CompileOnly
 ```
 
 1. AST-parses the PowerShell.
@@ -41,9 +48,23 @@ the synthetic worker without launching it. It runs model tests and, with
 `-Containment`, fixed fixture/junction tests in a newly created QA-only directory
 directly under the public profile. Desktop/AppData/Documents roots are refused.
 Cleanup uses the exact held file/directory handles. No installed files are read.
-Process/Job/endpoint integration tests remain NOT_VERIFIED until an isolated QA
-account is provisioned and independently checked. The mutation script uses only
-source copies and the same permitted local tests.
+Local process/Job/endpoint execution remains blocked. The authorized hosted
+Native run [42343745645](https://github.com/bongbong90/Sorigul/actions/runs/42343745645)
+passed 59 Native checks, separately from 415 contract and 131 model/containment
+checks. The fixture worker uses the Windows GUI subsystem without creating a
+window or console helper; every owned executable still needs the pinned worker
+path/hash. Nested hosted Jobs retain atomic own-Job membership verification.
+The mutation script tests copies only, including the new candidate's separate
+source/run/bytes/original-identity boundaries.
+
+The installed harness uses actual UIAutomation and SendInput, with the #219
+input structure reused. UI calls run in a bounded separate process. Backend
+fault injection is restricted to the new installed Core's verified image/hash,
+birth identity and own Job. Restart is a real button click; exit is the actual
+owned Tray menu. Settings/Jobs and inert generated file fixtures use a new QA
+profile. Raw UI text/build logs/MSI/credentials never become uploaded artifacts.
+Windows Server results do not establish Windows 11 upgrade/rollback, the user's
+installation, Local Runtime/CUDA/transcription or #114 acceptance.
 
 ## Contracts
 
