@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "kind": "QA59_EXECUTION_CONTEXT",
+  "repository": {
+    "full_name": null,
+    "id": null,
+    "owner": null,
+    "visibility": null
+  },
+  "run": {
+    "ref": null,
+    "sha": null,
+    "event_name": null,
+    "run_attempt": null,
+    "dispatched_at": null
+  },
+  "approval": {
+    "approval_id": null,
+    "repository_id": null,
+    "repository_full_name": null,
+    "qa_commit": null,
+    "ref": null,
+    "event_name": null,
+    "execution_approved": false,
+    "msi_download_approved": false,
+    "msi_install_approved": false
+  },
+  "cost": {
+    "maximum_allowed_cost_krw": 0,
+    "paid_usage_approved": false,
+    "free_allowance_verified": false,
+    "paid_overage_block_verified": false,
+    "verified_at": null
+  }
+}
