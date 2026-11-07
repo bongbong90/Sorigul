@@ -35,3 +35,26 @@ jobs:
       - name: Real native synthetic runtime
         shell: powershell
         run: ./tools/qa59installed/Invoke-NativeTests.ps1 -Run
+  installed-server:
+    needs: native
+    if: github.repository == 'bongbong90/Sorigul' && github.event.repository.private == false && github.ref == 'refs/heads/qa/59-stage2a-local-runtime'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      QA59_PUBLIC_REPOSITORY: 'true'
+    steps:
+      - name: Checkout reviewed QA harness
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: qa
+          sparse-checkout: tools/qa59installed
+      - name: Checkout exact product source, separate candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          path: product
+          ref: 890364e21a4e80d2ff5185332834b4dbb67aeb01
+      - name: Fresh source MSI and installed Backend and Tray QA
+        shell: powershell
+        run: ./qa/tools/qa59installed/Invoke-ServerQa.ps1 -ProductRoot (Join-Path $env:GITHUB_WORKSPACE 'product')

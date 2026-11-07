@@ -19,6 +19,10 @@ MUTANTS = [
     ("blocking-cleanup", "runtime/BoundedSupervisor.cs", "ThreadPool.QueueUserWorkItem(delegate { try { worker.ForceCleanup(); } catch { } });", "worker.ForceCleanup();"),
     ("endpoint-failure-zero", "runtime/Endpoints.cs", "new EndpointCounts(Verdict.NOT_VERIFIED, null, null)", "new EndpointCounts(Verdict.PASS, 0, 0)"),
     ("missed-child", "runtime/ProcessOwnership.cs", "total == known", "total >= known"),
+    ("runner-source-binding", "RunnerCandidate.cs", '!CandidatePins.ProductHead.Equals(obj.Get("source_head"))', "false"),
+    ("runner-run-binding", "RunnerCandidate.cs", '!expectedRun.Equals(obj.Get("run_id"))', "false"),
+    ("runner-msi-bytes", "RunnerCandidate.cs", '!string.Equals(measuredMsi, obj.Get("msi_sha256") as string, StringComparison.Ordinal)', "false"),
+    ("runner-original-separation", "RunnerCandidate.cs", '!false.Equals(obj.Get("original_candidate"))', "false"),
 ]
 MUTANTS[0] = ("production-deny", "ContextGate.cs", 'outcome.Add("EXTERNAL_CONTROL_NOT_IMPLEMENTED");', "// mutation removes production denial")
 
@@ -35,10 +39,14 @@ def main():
             if before not in source:
                 raise RuntimeError("MUTATION_TARGET_MISSING")
             target.write_text(source.replace(before, after), encoding="utf-8")
+            server = relative == "RunnerCandidate.cs"
+            entrypoint = "Invoke-ServerQa.ps1" if server else "Invoke-RuntimeTests.ps1"
+            mode = "-CompileOnly" if server else "-Containment"
             result = subprocess.run([str(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                                     str(work / "Invoke-RuntimeTests.ps1"), "-Containment"],
+                                     str(work / entrypoint), mode],
                                     cwd=work, capture_output=True, timeout=45)
-            caught = result.returncode != 0 and b"RUNTIME checks=" in result.stdout
+            marker = b"RUNNER_CANDIDATE_TESTS checks=" if server else b"RUNTIME checks="
+            caught = result.returncode != 0 and marker in result.stdout
             # A compile error is not counted as a killed behavioral mutation.
             print("MUTATION", name, "CAUGHT" if caught else "FAIL")
             if not caught:
