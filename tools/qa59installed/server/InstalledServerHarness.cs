@@ -57,7 +57,7 @@ internal static class InstalledServerHarness
     {
         try
         {
-            var request=(HttpWebRequest)WebRequest.Create("http://127.0.0.1:8000/health"); request.Timeout=800; request.ReadWriteTimeout=800; request.Proxy=null;
+            var request=(HttpWebRequest)WebRequest.Create("http://127.0.0.1:8000/api/health"); request.Timeout=800; request.ReadWriteTimeout=800; request.Proxy=null;
             using(var response=(HttpWebResponse)request.GetResponse()) return response.StatusCode==HttpStatusCode.OK;
         }
         catch(WebException) { return false; }
@@ -73,6 +73,7 @@ internal static class InstalledServerHarness
             if(observed) return;
             Thread.Sleep(300);
         }
+        Console.WriteLine("SERVER_HEALTH_DIAG expected_online="+online+" health="+Health()+" backend_roots="+owner.BackendRoots()+" backend_processes="+owner.BackendProcesses()+" listener_owned="+owner.BackendListenerOwned(8000)+" owned_active="+owner.Active);
         throw new InvalidOperationException("BACKEND_OBSERVATION_DEADLINE");
     }
     private static void Write(string path,string text)
