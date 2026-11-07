@@ -226,6 +226,15 @@ namespace Qa59Installed
             Deny("unknown attempt", GateWith("run", "run_attempt", JsonNull.Value), "RUN_ATTEMPT_UNKNOWN");
             Deny("execution not approved", GateWith("approval", "execution_approved", false), "APPROVAL_MISSING");
             Deny("empty approval id", GateWith("approval", "approval_id", ""), "APPROVAL_MISSING");
+            Deny("whitespace approval id", GateWith("approval", "approval_id", " "), "APPROVAL_MISSING");
+            Deny("padded approval id", GateWith("approval", "approval_id", " APPROVAL-TEST-1"), "APPROVAL_MISSING");
+            Deny("ancient cost evidence", GateWith("cost", "verified_at", "0001-01-01T00:00:00Z"), "COST_EVIDENCE_STALE");
+            Deny("cost evidence older than window", GateWith("cost", "verified_at", "2026-11-06T23:59:59Z"), "COST_EVIDENCE_STALE");
+            JsonObject crossMonth = AllowedContext();
+            ((JsonObject)crossMonth.Get("cost")).Replace("verified_at", "2026-10-31T23:30:00Z");
+            ((JsonObject)crossMonth.Get("run")).Replace("dispatched_at", "2026-11-01T00:10:00Z");
+            Deny("cost evidence from previous billing month", ContextGate.Evaluate(JsonText.Write(crossMonth)), "COST_EVIDENCE_STALE");
+            Deny("renamed product repository by ID", GateWith("repository", "id", CandidatePins.ProductRepositoryId), "REPOSITORY_IS_PRODUCT");
             Deny("free allowance unverified", GateWith("cost", "free_allowance_verified", false), "COST_NOT_VERIFIED");
             Deny("overage block unverified", GateWith("cost", "paid_overage_block_verified", JsonNull.Value), "COST_NOT_VERIFIED");
             Deny("cost verification time missing", GateWith("cost", "verified_at", JsonNull.Value), "COST_NOT_VERIFIED");
@@ -418,6 +427,29 @@ namespace Qa59Installed
             ((JsonObject)cleanupFail.Get("cleanup")).Replace("verdict", "FAIL");
             Check("cleanup FAIL reported separately", Run(cleanupFail).Outcome.Ok && Run(cleanupFail).Cleanup == Verdict.FAIL && Run(cleanupFail).Overall == Verdict.PASS);
 
+            foreach (object bad in new object[] { JsonNull.Value, "PASS", 1L, new List<object>() })
+            {
+                JsonObject noCleanup = PassingResult();
+                noCleanup.Replace("cleanup", bad);
+                ResultValidation c = Run(noCleanup);
+                Check("non-object cleanup invalid: " + bad, c.Outcome.Has("RESULT_CLEANUP_NOT_OBJECT") && c.EffectiveOverall == Verdict.NOT_VERIFIED);
+                JsonObject noSupervisor = PassingResult();
+                noSupervisor.Replace("supervisor", bad);
+                noSupervisor.Replace("overall", "NOT_VERIFIED");
+                Check("non-object supervisor invalid: " + bad, Run(noSupervisor).Outcome.Has("RESULT_SUPERVISOR_NOT_OBJECT"));
+                JsonObject badRecord = PassingResult();
+                ((List<object>)badRecord.Get("steps"))[0] = bad;
+                badRecord.Replace("overall", "FAIL");
+                Check("non-object record invalid: " + bad, Run(badRecord).Outcome.Has("RESULT_RECORD_NOT_OBJECT"));
+                JsonObject badEvidence = PassingResult();
+                StepOf(badEvidence, "steps", 0).Replace("evidence", bad);
+                badEvidence.Replace("overall", "FAIL");
+                Check("non-object evidence invalid: " + bad, Run(badEvidence).Outcome.Has("RESULT_EVIDENCE_NOT_OBJECT"));
+            }
+            JsonObject noSteps = PassingResult();
+            noSteps.Replace("steps", JsonNull.Value);
+            Check("missing step list invalid", Run(noSteps).Outcome.Has("RESULT_RECORD_COUNT") && Run(noSteps).EffectiveOverall == Verdict.NOT_VERIFIED);
+
             JsonObject productQa = PassingResult();
             productQa.Replace("qa_commit", CandidatePins.ProductHead);
             Check("QA commit equal to product head rejected", Run(productQa).Outcome.Has("RESULT_QA_COMMIT_IS_PRODUCT_HEAD"));
@@ -515,6 +547,22 @@ namespace Qa59Installed
             Check("UNC root rejected", SyntheticFixtures.ValidateRoot("\\\\server\\share\\qa59-fixture-0123456789abcdef0123456789abcdef", Protected).Has("FIXTURE_ROOT_FORMAT"));
             Check("ADS root rejected", SyntheticFixtures.ValidateRoot("D:\\a\\qa59-fixture-0123456789abcdef0123456789abcdef:x", Protected).Has("FIXTURE_ROOT_FORMAT"));
             Check("unknown protected roots rejected", SyntheticFixtures.ValidateRoot(Root, null).Has("FIXTURE_PROTECTED_ROOTS_UNKNOWN"));
+            Check("empty protected roots rejected", SyntheticFixtures.ValidateRoot(Root, new string[0]).Has("FIXTURE_PROTECTED_ROOTS_UNKNOWN"));
+            const string Hex = "qa59-fixture-0123456789abcdef0123456789abcdef";
+            Check("8.3 alias of protected Desktop rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\RUNNER~1\\DESKTO~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
+            Check("8.3 alias of protected leaf rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\runneradmin\\DESKTO~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
+            Check("8.3 alias of banned segment rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\u\\AppData\\Local\\SORIGU~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
+            foreach (string device in new[] { "CON", "nul", "COM1", "LPT9", "aux.txt", "CONIN$" })
+            {
+                Check("device segment rejected: " + device, SyntheticFixtures.ValidateRoot("D:\\a\\" + device + "\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
+            }
+            Check("trailing-space segment rejected", SyntheticFixtures.ValidateRoot("D:\\a \\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
+            foreach (string badProtected in new[] { "C:/Users/runneradmin/Pictures", "\\\\?\\C:\\Users\\runneradmin\\Pictures", "C:\\Users\\RUNNER~1\\Pictures", "C:\\Users\\x\\", "", null, "Pictures" })
+            {
+                Check("non-canonical protected root rejected: " + (badProtected ?? "null"),
+                    SyntheticFixtures.ValidateRoot(Root, new[] { "C:\\Users\\runneradmin\\Desktop", badProtected }).Has("FIXTURE_PROTECTED_ROOTS_INVALID"));
+            }
+            Check("protected root compared case-insensitively", SyntheticFixtures.ValidateRoot("D:\\A\\_TEMP\\" + Hex, new[] { "d:\\a\\_temp" }).Has("FIXTURE_ROOT_PROTECTED"));
             Check("runner root accepted", SyntheticFixtures.ValidateRoot(Root, Protected).Ok);
             Check("invalid root blocks valid settings", !SyntheticFixtures.ValidateSettings(SyntheticFixtures.SettingsJson("D:\\a\\_temp\\fixtures", 'A'), "D:\\a\\_temp\\fixtures", 'A', Protected).Ok);
 
@@ -549,7 +597,16 @@ namespace Qa59Installed
             {
                 Check("rust: malformed holds " + bad, SyntheticFixtures.ExpectedProductCode(SyntheticFixtures.Classify(bad)) == "JOB_STATE_UNKNOWN");
             }
-            Check("rust: missing file holds", SyntheticFixtures.ExpectedProductCode(SyntheticFixtures.Classify(null)) == "JOB_STATE_UNKNOWN");
+            Check("rust: missing file holds", SyntheticFixtures.ExpectedProductCode(SyntheticFixtures.Classify((string)null)) == "JOB_STATE_UNKNOWN"
+                && SyntheticFixtures.Classify((byte[])null) == FixtureClass.MISSING);
+            byte[] utf8 = Encoding.UTF8.GetBytes(jobsA);
+            Check("bytes: valid UTF-8 terminal", SyntheticFixtures.Classify(utf8) == FixtureClass.TERMINAL_IDLE);
+            var withBom = new byte[utf8.Length + 3];
+            withBom[0] = 0xEF; withBom[1] = 0xBB; withBom[2] = 0xBF;
+            Array.Copy(utf8, 0, withBom, 3, utf8.Length);
+            Check("bytes: BOM malformed (serde rejects)", SyntheticFixtures.Classify(withBom) == FixtureClass.MALFORMED);
+            Check("bytes: invalid UTF-8 malformed", SyntheticFixtures.Classify(new byte[] { 0x7B, 0x22, 0xC3, 0x28, 0x22, 0x3A, 0x7B, 0x7D, 0x7D }) == FixtureClass.MALFORMED);
+            Check("oversize history ambiguous, not JOB_STATE_UNKNOWN", SyntheticFixtures.Classify("{}" + new string(' ', StrictJson.MaxLength)) == FixtureClass.AMBIGUOUS);
             Check("rust: malformed later job beats earlier active", SyntheticFixtures.Classify("{\"a\":{\"status\":\"WAITING\",\"files\":{}},\"b\":{}}") == FixtureClass.MALFORMED);
             Check("rust: job state before drive", SyntheticFixtures.Classify("{\"a\":{\"status\":\"WAITING\",\"files\":{},\"drive\":{\"f\":{\"status\":\"UPLOADING\"}}}}") == FixtureClass.ACTIVE_JOB);
             Check("duplicate keys ambiguous, no expectation", SyntheticFixtures.Classify("{\"a\":{\"status\":\"DONE\",\"files\":{}},\"a\":{\"status\":\"DONE\",\"files\":{}}}") == FixtureClass.AMBIGUOUS

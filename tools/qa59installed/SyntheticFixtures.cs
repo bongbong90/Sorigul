@@ -194,23 +194,48 @@ namespace Qa59Installed
 
         // ---- validators -----------------------------------------------------
 
+        // Canonical long-form local path: X:\seg\seg, backslashes only, no
+        // UNC/\\?\ prefixes, ADS, wildcards, '.'/'..', trailing dot/space,
+        // 8.3 aliases (any '~') or reserved device names. String comparison of
+        // protected roots is only sound when both sides have this one shape.
+        private static string[] CanonicalSegments(string path)
+        {
+            if (path == null || path.Length < 4 || path.Length > 200) return null;
+            char drive = path[0];
+            if (!((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) || path[1] != ':' || path[2] != '\\'
+                || path.IndexOf('/') >= 0 || path.IndexOf('~') >= 0 || path.IndexOfAny(new[] { '*', '?', '"', '<', '>', '|' }) >= 0
+                || path.IndexOf(':', 2) >= 0 || path.EndsWith("\\", StringComparison.Ordinal))
+                return null;
+            string[] segments = path.Substring(3).Split('\\');
+            foreach (string segment in segments)
+            {
+                if (segment.Length == 0 || segment.Trim() != segment || segment.EndsWith(".", StringComparison.Ordinal)) return null;
+                foreach (char c in segment)
+                {
+                    if (c < 0x20) return null;
+                }
+                string stem = segment.Split('.')[0].ToUpperInvariant();
+                if (Array.IndexOf(DeviceNames, stem) >= 0) return null;
+            }
+            return segments;
+        }
+
+        private static readonly string[] DeviceNames =
+        {
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        };
+
+        // protectedRoots must be the caller's canonical long-path roots
+        // (e.g. GetLongPathName of LOCALAPPDATA\Sorigul, Desktop, Program Files\Sorigul).
         public static Outcome ValidateRoot(string root, IList<string> protectedRoots)
         {
             var outcome = new Outcome();
-            if (root == null || root.Length < 4 || root.Length > 200) { outcome.Add("FIXTURE_ROOT_FORMAT"); return outcome; }
-            char drive = root[0];
-            if (!((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) || root[1] != ':' || root[2] != '\\'
-                || root.IndexOf('/') >= 0 || root.IndexOfAny(new[] { '*', '?', '"', '<', '>', '|' }) >= 0
-                || root.IndexOf(':', 2) >= 0 || root.EndsWith("\\", StringComparison.Ordinal))
-            {
-                outcome.Add("FIXTURE_ROOT_FORMAT");
-                return outcome;
-            }
-            string[] segments = root.Substring(3).Split('\\');
+            string[] segments = CanonicalSegments(root);
+            if (segments == null) { outcome.Add("FIXTURE_ROOT_FORMAT"); return outcome; }
             foreach (string segment in segments)
             {
-                if (segment.Length == 0 || segment == "." || segment == ".." || segment.Trim() != segment || segment.EndsWith(".", StringComparison.Ordinal))
-                    outcome.Add("FIXTURE_ROOT_FORMAT");
                 foreach (string banned in BannedSegments)
                 {
                     if (string.Equals(segment, banned, StringComparison.OrdinalIgnoreCase)) outcome.Add("FIXTURE_ROOT_PROTECTED");
@@ -219,11 +244,12 @@ namespace Qa59Installed
             string last = segments[segments.Length - 1];
             if (!last.StartsWith(RootPrefix, StringComparison.Ordinal) || !Fields.IsLowerHex(last.Substring(RootPrefix.Length), 32))
                 outcome.Add("FIXTURE_ROOT_NOT_RUNNER_OWNED");
-            if (protectedRoots == null) { outcome.Add("FIXTURE_PROTECTED_ROOTS_UNKNOWN"); return outcome; }
+            // An empty list protects nothing: it is as unknown as a missing one.
+            if (protectedRoots == null || protectedRoots.Count == 0) { outcome.Add("FIXTURE_PROTECTED_ROOTS_UNKNOWN"); return outcome; }
             foreach (string p in protectedRoots)
             {
-                if (string.IsNullOrEmpty(p)) { outcome.Add("FIXTURE_PROTECTED_ROOTS_UNKNOWN"); continue; }
-                string prot = p.TrimEnd('\\');
+                if (CanonicalSegments(p) == null) { outcome.Add("FIXTURE_PROTECTED_ROOTS_INVALID"); continue; }
+                string prot = p;
                 // Neither inside a protected root nor an ancestor of one.
                 if (string.Equals(root, prot, StringComparison.OrdinalIgnoreCase)
                     || root.StartsWith(prot + "\\", StringComparison.OrdinalIgnoreCase)
@@ -363,6 +389,25 @@ namespace Qa59Installed
         // (status string + files map of strings + optional drive map of
         // {status string}) before any job is judged; then jobs in key order,
         // job/file states before Drive. null text = file absent.
+        // recovery.rs reads raw bytes: invalid UTF-8 and a BOM are both parse
+        // errors there, so decode strictly here instead of letting a lenient
+        // caller decoder repair them.
+        public static FixtureClass Classify(byte[] bytes)
+        {
+            if (bytes == null) return FixtureClass.MISSING;
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) return FixtureClass.MALFORMED;
+            string text;
+            try
+            {
+                text = new UTF8Encoding(false, true).GetString(bytes);
+            }
+            catch (ArgumentException)
+            {
+                return FixtureClass.MALFORMED;
+            }
+            return Classify(text);
+        }
+
         public static FixtureClass Classify(string text)
         {
             if (text == null) return FixtureClass.MISSING;
@@ -373,7 +418,9 @@ namespace Qa59Installed
             }
             catch (JsonFormatException e)
             {
+                // serde_json has no 1 MiB cap, so oversize input may load in the product.
                 return e.Code == "JSON_DUPLICATE_KEY" || e.Code == "JSON_INTEGER_OUT_OF_RANGE" || e.Code == "JSON_TOO_DEEP"
+                    || e.Code == "JSON_TOO_LARGE"
                     ? FixtureClass.AMBIGUOUS : FixtureClass.MALFORMED;
             }
             if (jobs == null) return FixtureClass.MALFORMED;

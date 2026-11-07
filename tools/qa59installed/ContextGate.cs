@@ -29,6 +29,7 @@ namespace Qa59Installed
         public const string Kind = "QA59_EXECUTION_CONTEXT";
         public const string AllowedEvent = "workflow_dispatch";
         private const string RefPrefix = "refs/heads/";
+        public static readonly TimeSpan MaxCostEvidenceAge = TimeSpan.FromHours(1);
 
         private static readonly string[] RootKeys = { "schema", "kind", "repository", "run", "approval", "cost" };
         private static readonly string[] RepositoryKeys = { "full_name", "id", "owner", "visibility" };
@@ -89,7 +90,9 @@ namespace Qa59Installed
                 return;
             }
             if (!"private".Equals(repo.Get("visibility"))) outcome.Add("REPOSITORY_NOT_PRIVATE");
-            if (string.Equals(fullName, CandidatePins.ProductRepository, StringComparison.OrdinalIgnoreCase))
+            // By ID as well as name: a renamed product repository keeps its ID.
+            if (string.Equals(fullName, CandidatePins.ProductRepository, StringComparison.OrdinalIgnoreCase)
+                || (long)id == CandidatePins.ProductRepositoryId)
                 outcome.Add("REPOSITORY_IS_PRODUCT");
             int slash = fullName.IndexOf('/');
             if (slash <= 0 || slash != fullName.LastIndexOf('/') || slash == fullName.Length - 1
@@ -130,7 +133,7 @@ namespace Qa59Installed
         private static void CheckApproval(JsonObject approval, Outcome outcome)
         {
             var id = approval.Get("approval_id") as string;
-            if (string.IsNullOrEmpty(id) || !true.Equals(approval.Get("execution_approved")))
+            if (id == null || id.Trim().Length == 0 || id.Trim() != id || !true.Equals(approval.Get("execution_approved")))
                 outcome.Add("APPROVAL_MISSING");
         }
 
@@ -149,6 +152,13 @@ namespace Qa59Installed
             if (!hasVerified) outcome.Add("COST_NOT_VERIFIED");
             if (!hasDispatched) outcome.Add("DISPATCH_TIME_UNKNOWN");
             if (hasVerified && hasDispatched && verifiedAt >= dispatchedAt) outcome.Add("COST_NOT_VERIFIED_BEFORE_DISPATCH");
+            // Included usage resets per monthly cycle: evidence must be recent
+            // and from the same UTC calendar month as the dispatch, or it says
+            // nothing about this run's cost.
+            if (hasVerified && hasDispatched && verifiedAt < dispatchedAt
+                && (dispatchedAt - verifiedAt > MaxCostEvidenceAge
+                    || verifiedAt.Year != dispatchedAt.Year || verifiedAt.Month != dispatchedAt.Month))
+                outcome.Add("COST_EVIDENCE_STALE");
         }
 
         private static bool TryUtc(object value, out DateTime result)

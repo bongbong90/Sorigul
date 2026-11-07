@@ -18,14 +18,24 @@ foreach ($script in Get-ChildItem -LiteralPath $here -Filter '*.ps1' -File) {
     if (@($errors).Count -ne 0) { $failures++ }
 }
 
-# 2. Purity: contract sources may not reach I/O, processes, network, native
-#    code or the environment. Only ContractTests.cs reads its two inputs.
+# 2. Purity lint (an accident guard, not a sandbox): contract sources may not
+#    name I/O, process, network, native, reflection or environment APIs.
+#    Matched as whole identifiers after removing comments and whitespace
+#    around '.' and '(' (so 'System . IO' still matches). The contracts compile
+#    into their own library, so they cannot call into ContractTests.cs, the
+#    only file that reads its two inputs.
 $forbidden = @('System.IO', 'System.Net', 'System.Diagnostics', 'System.Runtime.InteropServices', 'System.Reflection',
-    'Microsoft.Win32', 'DllImport', 'Process', 'Environment', 'Registry', 'Socket', 'File.', 'Thread', 'unsafe')
-$contracts = Get-ChildItem -LiteralPath $here -Filter '*.cs' -File | Where-Object { $_.Name -ne 'ContractTests.cs' }
+    'Microsoft.Win32', 'DllImport', 'extern', 'Process', 'Environment', 'Registry', 'Socket', 'File.', 'Directory.',
+    'Thread', 'Task', 'unsafe', 'Console', 'AppDomain', 'Activator', 'Assembly.', 'GetType(', 'GetMethod', 'Invoke', 'Marshal')
+$contracts = @(Get-ChildItem -LiteralPath $here -Filter '*.cs' -File | Where-Object { $_.Name -ne 'ContractTests.cs' })
 foreach ($source in $contracts) {
     $text = [System.IO.File]::ReadAllText($source.FullName)
-    $hits = @($forbidden | Where-Object { $text.Contains($_) })
+    $text = [regex]::Replace($text, '/\*.*?\*/|//[^\n]*', '', 'Singleline')
+    $text = [regex]::Replace($text, '\s*([.(])\s*', '$1')
+    $hits = @($forbidden | Where-Object {
+            $suffix = if ($_ -match '\w$') { '(?![A-Za-z0-9_])' } else { '' }
+            $text -cmatch ('(?<![A-Za-z0-9_])' + [regex]::Escape($_) + $suffix)
+        })
     Write-Output ('PURITY {0} forbidden={1}' -f $source.Name, $hits.Count)
     if ($hits.Count -ne 0) { $failures++ }
 }
@@ -41,10 +51,13 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('qa59installed-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
+    $dll = Join-Path $work 'Qa59Contracts.dll'
     $exe = Join-Path $work 'ContractTests.exe'
-    $sources = @(Get-ChildItem -LiteralPath $here -Filter '*.cs' -File | ForEach-Object { $_.FullName })
-    $compilerLog = & $csc /nologo /noconfig /codepage:65001 /target:exe /warnaserror+ /checked+ `
-        /reference:System.dll /reference:System.Core.dll ('/out:' + $exe) $sources 2>&1
+    $common = @('/nologo', '/noconfig', '/codepage:65001', '/warnaserror+', '/checked+', '/reference:System.dll', '/reference:System.Core.dll')
+    $compilerLog = & $csc $common /target:library ('/out:' + $dll) @($contracts | ForEach-Object { $_.FullName }) 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $compilerLog = & $csc $common /target:exe ('/reference:' + $dll) ('/out:' + $exe) (Join-Path $here 'ContractTests.cs') 2>&1
+    }
     Write-Output ('COMPILE exit={0}' -f $LASTEXITCODE)
     if ($LASTEXITCODE -ne 0) {
         $compilerLog | ForEach-Object { Write-Output ('  ' + $_) }

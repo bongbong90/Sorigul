@@ -1,6 +1,10 @@
 // Shared vocabulary for the #59 installed-QA contracts. Pure: no I/O.
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+
+// Contracts build as their own library; only the test assembly sees internals.
+[assembly: InternalsVisibleTo("ContractTests")]
 
 namespace Qa59Installed
 {
@@ -12,6 +16,7 @@ namespace Qa59Installed
     public static class CandidatePins
     {
         public const string ProductRepository = "bongbong90/Sorigul";
+        public const long ProductRepositoryId = 1327637229;
         public const long ProductPr = 216;
         public const string ProductHead = "890364e21a4e80d2ff5185332834b4dbb67aeb01";
         public const string ReleaseFreezeSha256 = "9c6c21c08049a36d7c9111a070d3bc0ae4b72e4598bc613dbbbb666e4c637cbd";

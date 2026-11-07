@@ -171,15 +171,18 @@ namespace Qa59Installed
         {
             allPass = false;
             var list = value as List<object>;
-            if (list == null || list.Count != specs.Length) { outcome.Add("RESULT_RECORD_COUNT"); return Verdict.NOT_VERIFIED; }
+            if (list == null || list.Count != specs.Length) { outcome.Add("RESULT_RECORD_COUNT"); return Verdict.FAIL; }
             Verdict worst = Verdict.PASS;
             for (int k = 0; k < specs.Length; k++)
             {
+                // Every structural defect records a reason so the document is invalid, never silently FAIL.
                 var record = list[k] as JsonObject;
-                if (record == null || !Fields.ExactKeys(record, RecordKeys, outcome, "RESULT_RECORD_")) { worst = Verdict.FAIL; continue; }
+                if (record == null) { outcome.Add("RESULT_RECORD_NOT_OBJECT"); worst = Verdict.FAIL; continue; }
+                if (!Fields.ExactKeys(record, RecordKeys, outcome, "RESULT_RECORD_")) { worst = Verdict.FAIL; continue; }
                 if (!specs[k].Id.Equals(record.Get("id"))) { outcome.Add("RESULT_RECORD_ORDER"); worst = Verdict.FAIL; continue; }
                 var evidence = record.Get("evidence") as JsonObject;
-                if (evidence == null || !EvidenceShape(specs[k], evidence, outcome)) { worst = Verdict.FAIL; continue; }
+                if (evidence == null) { outcome.Add("RESULT_EVIDENCE_NOT_OBJECT"); worst = Verdict.FAIL; continue; }
+                if (!EvidenceShape(specs[k], evidence, outcome)) { worst = Verdict.FAIL; continue; }
 
                 Verdict derived = Derive(specs[k], evidence);
                 Verdict? declared = ParseVerdict(record.Get("verdict"));
@@ -224,7 +227,8 @@ namespace Qa59Installed
             var keys = new List<string>(SupervisorFlags);
             keys.AddRange(SupervisorCounts);
             keys.Add("normal_product_exit");
-            if (obj == null || !Fields.ExactKeys(obj, keys.ToArray(), outcome, "RESULT_SUPERVISOR_")) return Verdict.NOT_VERIFIED;
+            if (obj == null) { outcome.Add("RESULT_SUPERVISOR_NOT_OBJECT"); return Verdict.NOT_VERIFIED; }
+            if (!Fields.ExactKeys(obj, keys.ToArray(), outcome, "RESULT_SUPERVISOR_")) return Verdict.NOT_VERIFIED;
 
             Verdict worst = Verdict.PASS;
             foreach (string key in SupervisorFlags)
@@ -256,7 +260,8 @@ namespace Qa59Installed
         private static Verdict? Cleanup(object value, Outcome outcome)
         {
             var obj = value as JsonObject;
-            if (obj == null || !Fields.ExactKeys(obj, CleanupKeys, outcome, "RESULT_CLEANUP_")) return null;
+            if (obj == null) { outcome.Add("RESULT_CLEANUP_NOT_OBJECT"); return null; }
+            if (!Fields.ExactKeys(obj, CleanupKeys, outcome, "RESULT_CLEANUP_")) return null;
             Verdict derived = Verdict.PASS;
             foreach (string key in new[] { "harness_resources_released", "fixtures_restored" })
             {
