@@ -113,6 +113,16 @@ namespace Qa59Installed.Runtime
         private NativeHandle job, process;
         private string launchPhase = "ROOT";
         internal string NativeLaunchPhase { get { return launchPhase; } }
+        internal string ObservationCode { get; private set; }
+        internal string NativeAccountingSummary()
+        {
+            int total, active;
+            bool ok = Accounting(out total, out active);
+            uint exit = uint.MaxValue; bool hasExit = process != null && WinProcess.GetExitCodeProcess(process, out exit);
+            if (!hasExit) exit = uint.MaxValue;
+            return "ok=" + ok + " total=" + total + " active=" + active + " known=" + identities.Count + " tree=" + ObservationCode
+                + " wait=" + Wait(0) + " exit=" + exit;
+        }
         internal ProcessIdentity Identity { get; private set; }
         internal bool ForcedCleanup { get; private set; }
         internal bool CleanupVerified { get; private set; }
@@ -261,6 +271,7 @@ namespace Qa59Installed.Runtime
 
         internal Verdict ObserveTree(out int activeCount)
         {
+            ObservationCode = "START";
             activeCount = 0;
             if (!OwnershipVerified || job == null || job.IsClosed) return Verdict.NOT_VERIFIED;
             // Bounded snapshot. Oversize, races, exited children and query errors
@@ -270,7 +281,7 @@ namespace Qa59Installed.Runtime
             try
             {
                 uint returned;
-                if (!WinProcess.QueryInformationJobObject(job, 3, buffer, (uint)(8 + capacity * IntPtr.Size), out returned)) return Verdict.NOT_VERIFIED;
+                if (!WinProcess.QueryInformationJobObject(job, 3, buffer, (uint)(8 + capacity * IntPtr.Size), out returned)) { ObservationCode = "JOB_QUERY"; return Verdict.NOT_VERIFIED; }
                 int assigned = Marshal.ReadInt32(buffer, 0), listed = Marshal.ReadInt32(buffer, 4);
                 if (assigned != listed || listed < 0 || listed > capacity) return Verdict.NOT_VERIFIED;
                 var snapshot = new Dictionary<uint, ProcessIdentity>();
@@ -281,14 +292,14 @@ namespace Qa59Installed.Runtime
                     if (!observed.TryGetValue(pid, out handle))
                     {
                         if (observed.Count >= capacity) return Verdict.NOT_VERIFIED;
-                        handle = WinProcess.OpenProcess(0x101000, false, pid);
+                        handle = WinProcess.OpenProcess(0x101400, false, pid);
                         observed.Add(pid, handle); // bound handle count, prevent PID reuse
                     }
-                    if (handle.IsInvalid) return Verdict.NOT_VERIFIED;
+                    if (handle.IsInvalid) { ObservationCode = "OPEN_PROCESS"; return Verdict.NOT_VERIFIED; }
                     bool member;
-                    if (!WinProcess.IsProcessInJob(handle, job.DangerousGetHandle(), out member) || !member) return Verdict.NOT_VERIFIED;
+                    if (!WinProcess.IsProcessInJob(handle, job.DangerousGetHandle(), out member) || !member) { ObservationCode = "MEMBERSHIP"; return Verdict.NOT_VERIFIED; }
                     ProcessIdentity identity = Observe(handle), previous;
-                    if (identity == null) return Verdict.NOT_VERIFIED;
+                    if (identity == null) { ObservationCode = "IDENTITY"; return Verdict.NOT_VERIFIED; }
                     if (identities.TryGetValue(pid, out previous) && !previous.Same(identity)) return Verdict.FAIL;
                     snapshot.Add(pid, identity);
                 }
@@ -304,12 +315,13 @@ namespace Qa59Installed.Runtime
                 // A short-lived descendant may be absent from every PID
                 // snapshot. Cumulative Job accounting exposes that gap.
                 if (!Accounting(out total, out active) || !CompleteAccounting(total, active, identities.Count, listed))
-                    return Verdict.NOT_VERIFIED;
+                    { ObservationCode = "ACCOUNTING_GAP"; return Verdict.NOT_VERIFIED; }
                 Verdict exits = KnownChildExits();
                 if (exits != Verdict.PASS) return exits;
                 currentPids.Clear();
                 foreach (uint pid in snapshot.Keys) currentPids.Add(pid);
                 activeCount = listed;
+                ObservationCode = "PASS";
                 return Verdict.PASS;
             }
             catch { return Verdict.NOT_VERIFIED; }

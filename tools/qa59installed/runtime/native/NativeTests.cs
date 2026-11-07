@@ -95,8 +95,12 @@ namespace Qa59Installed.Runtime
                 Check("PID_REUSE_TUPLE_REFUSED", !owner.MatchesCurrentIdentity(wrong));
                 wrong = new ProcessIdentity(owner.Identity.Pid, owner.Identity.ParentPid, owner.Identity.Created, owner.Identity.Image, new string('0', 64));
                 Check("IMAGE_HASH_MISMATCH_REFUSED", !owner.MatchesCurrentIdentity(wrong));
-                Check("NORMAL_PROCESS_EXIT", owner.Wait(5000) == 0 && owner.NormalExit() && !owner.ForcedCleanup);
+                bool exited = owner.Wait(5000) == 0;
+                var normalClock = Stopwatch.StartNew();
+                while (!owner.NormalExit() && normalClock.ElapsedMilliseconds < 3000) Thread.Sleep(10);
+                Check("NORMAL_PROCESS_EXIT", exited && owner.NormalExit() && !owner.ForcedCleanup);
                 var counts = EndpointObserver.Observe(owner);
+                Console.WriteLine("NATIVE_ACCOUNTING " + owner.NativeAccountingSummary());
                 Check("NORMAL_RESIDUAL_ENDPOINTS_ZERO", counts.Verdict == Verdict.PASS && counts.Tcp == 0 && counts.Udp == 0);
             }
         }
@@ -108,6 +112,7 @@ namespace Qa59Installed.Runtime
                 fixture.Ready();
                 int active;
                 Verdict tree = owner.ObserveTree(out active);
+                Console.WriteLine("NATIVE_ACCOUNTING " + owner.NativeAccountingSummary());
                 if (mode == SyntheticMode.MissedChild)
                 {
                     Check("MISSED_CHILD_NOT_VERIFIED", tree == Verdict.NOT_VERIFIED);
@@ -140,6 +145,7 @@ namespace Qa59Installed.Runtime
                 while (!owner.NormalExit() && clock.ElapsedMilliseconds < 3000) Thread.Sleep(10);
                 Check("TREE_NORMAL_WITHOUT_FORCED_CLEANUP", owner.NormalExit() && !owner.ForcedCleanup);
                 counts = EndpointObserver.Observe(owner);
+                Console.WriteLine("NATIVE_ACCOUNTING " + owner.NativeAccountingSummary());
                 Check("TREE_RESIDUAL_PROCESSES_PORTS_ZERO", owner.ObserveTree(out active) == Verdict.PASS && active == 0 && counts.Verdict == Verdict.PASS && counts.Tcp == 0 && counts.Udp == 0);
             }
         }
