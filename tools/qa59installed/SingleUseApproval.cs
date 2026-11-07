@@ -4,7 +4,7 @@
 // (which also starts at run_attempt 1) cannot reuse it.
 //
 // This only defines the transitions. Real enforcement needs an external
-// control that performs Consume atomically BEFORE dispatch, outside the job
+// controller using durable versioned compare-and-swap BEFORE dispatch, outside the job
 // it authorizes. Until such a control is reviewed and added to
 // ContextGate's trusted list, execution stays BLOCKED.
 using System;
@@ -51,7 +51,11 @@ namespace Qa59Installed
             return new ApprovalRecord(approvalId, Issued, null);
         }
 
-        // Exactly one ISSUED -> CONSUMED transition per approval.
+        // Pure proposal only: calling twice with the same stale ISSUED snapshot
+        // can return two proposals. External storage MUST compare-and-swap the
+        // expected state AND version; exactly one proposal may be committed.
+        // A run ID exists only after dispatch. Stage 2A design adds a reserved
+        // state before dispatch; this legacy transition grants no authority.
         public static ApprovalRecord Consume(ApprovalRecord record, long runId, Outcome outcome)
         {
             if (record == null || !IsValidId(record.ApprovalId)) { outcome.Add("APPROVAL_ID_INVALID"); return null; }

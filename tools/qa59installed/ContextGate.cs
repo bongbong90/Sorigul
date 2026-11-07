@@ -23,7 +23,10 @@ namespace Qa59Installed
 
         internal GateDecision(Outcome outcome, bool downloadApproved, bool installApproved, string qaCommit, long? runId)
         {
-            Reasons = outcome.Reasons;
+#if !QA59_CONTRACT_TESTS
+            outcome.Add("EXTERNAL_CONTROL_NOT_IMPLEMENTED");
+#endif
+            Reasons = outcome.Snapshot().Reasons;
             ExecutionAllowed = outcome.Ok;
             MsiDownloadAllowed = ExecutionAllowed && downloadApproved;
             // Install never stands alone: it needs the download permit too.
@@ -44,7 +47,8 @@ namespace Qa59Installed
         // single-use approval for exactly one run and (b) enforce 0 KRW before
         // dispatch. None exists yet. Adding one is a reviewed code change,
         // never a context value.
-        private static readonly string[] TrustedControls = new string[0];
+        private static readonly string[] TrustedApprovalControls = new string[0];
+        private static readonly string[] TrustedBudgetControls = new string[0];
 
         private static readonly string[] RootKeys = { "schema", "kind", "repository", "run", "approval", "cost", "controls" };
         private static readonly string[] RepositoryKeys = { "full_name", "id", "owner", "visibility" };
@@ -63,11 +67,18 @@ namespace Qa59Installed
 
         public static GateDecision Evaluate(string text)
         {
-            return Evaluate(text, TrustedControls);
+            return EvaluateCore(text, TrustedApprovalControls, TrustedBudgetControls);
         }
 
-        // Tests inject a trusted control to exercise the remaining rules.
-        internal static GateDecision Evaluate(string text, IList<string> trustedControls)
+        // The seam is absent from the production assembly. A test assembly name
+        // is forgeable; a test build is never an execution authority.
+#if QA59_CONTRACT_TESTS
+        internal static GateDecision Evaluate(string text, IList<string> approvalControls, IList<string> budgetControls)
+        {
+            return EvaluateCore(text, approvalControls, budgetControls);
+        }
+#endif
+        private static GateDecision EvaluateCore(string text, IList<string> approvalControls, IList<string> budgetControls)
         {
             var outcome = new Outcome();
             bool downloadApproved = false;
@@ -90,7 +101,7 @@ namespace Qa59Installed
                     CheckRun(run, approval, outcome);
                     CheckApproval(approval, run, outcome);
                     CheckCost(cost, run, outcome);
-                    CheckControls(controls, trustedControls, outcome);
+                    CheckControls(controls, approvalControls, budgetControls, outcome);
                     downloadApproved = true.Equals(approval.Get("msi_download_approved"));
                     installApproved = true.Equals(approval.Get("msi_install_approved"));
                     qaCommit = run.Get("sha") as string;
@@ -201,10 +212,10 @@ namespace Qa59Installed
                 outcome.Add("COST_EVIDENCE_STALE");
         }
 
-        private static void CheckControls(JsonObject controls, IList<string> trusted, Outcome outcome)
+        private static void CheckControls(JsonObject controls, IList<string> approvalControls, IList<string> budgetControls, Outcome outcome)
         {
-            if (!IsTrusted(controls.Get("approval_consumption_control") as string, trusted)) outcome.Add("APPROVAL_CONTROL_UNTRUSTED");
-            if (!IsTrusted(controls.Get("budget_control") as string, trusted)) outcome.Add("BUDGET_CONTROL_UNTRUSTED");
+            if (!IsTrusted(controls.Get("approval_consumption_control") as string, approvalControls)) outcome.Add("APPROVAL_CONTROL_UNTRUSTED");
+            if (!IsTrusted(controls.Get("budget_control") as string, budgetControls)) outcome.Add("BUDGET_CONTROL_UNTRUSTED");
         }
 
         private static bool IsTrusted(string control, IList<string> trusted)

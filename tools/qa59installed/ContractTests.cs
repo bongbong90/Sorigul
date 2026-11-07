@@ -168,7 +168,7 @@ namespace Qa59Installed
   ""schema"": 2, ""kind"": ""QA59_EXECUTION_CONTEXT"",
   ""repository"": { ""full_name"": ""qa-owner/sorigul-qa59-private"", ""id"": 123456789, ""owner"": ""qa-owner"", ""visibility"": ""private"" },
   ""run"": { ""run_id"": 555000111, ""ref"": ""refs/heads/qa59-installed"", ""sha"": """ + QaSha + @""", ""event_name"": ""workflow_dispatch"", ""run_attempt"": 1, ""dispatched_at"": ""2026-11-07T01:00:00Z"" },
-  ""controls"": { ""approval_consumption_control"": ""TEST-CONTROL"", ""budget_control"": ""TEST-CONTROL"" },
+  ""controls"": { ""approval_consumption_control"": ""TEST-CONTROL"", ""budget_control"": ""TEST-BUDGET"" },
   ""approval"": { ""approval_id"": ""APPROVAL-TEST-1"", ""state"": ""CONSUMED"", ""consumed_by_run_id"": 555000111,
                 ""repository_id"": 123456789, ""repository_full_name"": ""qa-owner/sorigul-qa59-private"",
                 ""qa_commit"": """ + QaSha + @""", ""ref"": ""refs/heads/qa59-installed"", ""event_name"": ""workflow_dispatch"",
@@ -189,8 +189,8 @@ namespace Qa59Installed
         private const long RunId = 555000111;
         private static readonly string[] TestControls = { "TEST-CONTROL" };
 
-        // Only tests may inject a trusted control; the public Evaluate trusts none.
-        private static GateDecision Trusted(JsonObject ctx) { return ContextGate.Evaluate(JsonText.Write(ctx), TestControls); }
+        // The test-only build can inject controls; the public Evaluate trusts none.
+        private static GateDecision Trusted(JsonObject ctx) { return ContextGate.Evaluate(JsonText.Write(ctx), TestControls, new[] { "TEST-BUDGET" }); }
 
         private static void Deny(string name, GateDecision d, string reason)
         {
@@ -212,6 +212,8 @@ namespace Qa59Installed
             Check("claims alone never ALLOW (public gate)", !claimsOnly.ExecutionAllowed && !claimsOnly.MsiInstallAllowed && claimsOnly.QaCommit == null && !claimsOnly.RunId.HasValue
                 && claimsOnly.Reasons.Count == 2 && claimsOnly.Reasons.Contains("APPROVAL_CONTROL_UNTRUSTED") && claimsOnly.Reasons.Contains("BUDGET_CONTROL_UNTRUSTED"));
 
+            Deny("approval role cannot supply budget", GateWith("controls", "budget_control", "TEST-CONTROL"), "BUDGET_CONTROL_UNTRUSTED");
+            Deny("budget role cannot supply approval", GateWith("controls", "approval_consumption_control", "TEST-BUDGET"), "APPROVAL_CONTROL_UNTRUSTED");
             GateDecision allowed = Trusted(AllowedContext());
             Check("fully approved synthetic context ALLOW (test control)", allowed.ExecutionAllowed && allowed.MsiDownloadAllowed && allowed.MsiInstallAllowed && allowed.Reasons.Count == 0
                 && allowed.QaCommit == QaSha && allowed.RunId == RunId);
@@ -505,7 +507,7 @@ namespace Qa59Installed
         {
             const int S08 = 7, S09 = 8;
             StepSpec spec = ResultContract.Steps[S08];
-            Check("S08 evidence is click/requested/inserted/hit", spec.Id == "S08_RESTART_CLICK" && spec.Evidence.Length == 4
+            Check("S08 evidence is click/requested/inserted/hit", spec.Id == "S08_RESTART_CLICK" && spec.Evidence.Length == 5
                 && spec.Evidence[0].Key == "user_click_count" && spec.Evidence[0].ExpectedCount == 1
                 && spec.Evidence[1].Key == "sendinput_events_requested" && spec.Evidence[1].ExpectedCount == 2
                 && spec.Evidence[2].Key == "sendinput_events_inserted" && spec.Evidence[2].ExpectedCount == 2);
@@ -519,7 +521,10 @@ namespace Qa59Installed
                 new object[] { "sendinput_events_requested", 4L, Verdict.FAIL, "two clicks of events" },
                 new object[] { "sendinput_events_inserted", 1L, Verdict.FAIL, "partial insertion (UIPI/blocked)" },
                 new object[] { "sendinput_events_inserted", 0L, Verdict.FAIL, "SendInput returned 0" },
-                new object[] { "foreground_hit_target", false, Verdict.FAIL, "missed hit target" },
+                new object[] { "hit_target_confirmed", false, Verdict.FAIL, "missed hit target" },
+                new object[] { "foreground_confirmed", false, Verdict.FAIL, "wrong foreground" },
+                new object[] { "foreground_confirmed", JsonNull.Value, Verdict.NOT_VERIFIED, "foreground unmeasured" },
+                new object[] { "hit_target_confirmed", JsonNull.Value, Verdict.NOT_VERIFIED, "hit target unmeasured" },
                 new object[] { "user_click_count", JsonNull.Value, Verdict.NOT_VERIFIED, "click count unmeasured" },
                 new object[] { "sendinput_events_requested", JsonNull.Value, Verdict.NOT_VERIFIED, "requested unmeasured" },
                 new object[] { "sendinput_events_inserted", JsonNull.Value, Verdict.NOT_VERIFIED, "inserted unmeasured" },
@@ -664,6 +669,10 @@ namespace Qa59Installed
             Check("no evidence -> not accepted", Accept(PassingResult(), manifestText, gate, null).Acceptance == Verdict.NOT_VERIFIED);
             GateDecision downloadOnly = GateWith("approval", "msi_install_approved", false);
             Check("install not approved -> FAIL", Accept(PassingResult(), manifestText, downloadOnly, Observed()).Outcome.Has("RUN_NOT_AUTHORIZED"));
+            Check("invalid result QA SHA gets reason", Accept(null, manifestText, gate, Observed()).Outcome.Has("RESULT_QA_COMMIT_MISSING"));
+            bool immutable = false;
+            try { all.Outcome.Add("FORGED"); } catch (InvalidOperationException) { immutable = true; }
+            Check("acceptance reasons frozen", immutable);
             Check("no gate -> FAIL", Accept(PassingResult(), manifestText, null, Observed()).Run == Verdict.FAIL);
         }
 

@@ -22,16 +22,21 @@ namespace Qa59Installed
     public sealed class StepSpec
     {
         public readonly string Id;
-        public readonly EvidenceSpec[] Evidence;
-        public StepSpec(string id, params EvidenceSpec[] evidence) { Id = id; Evidence = evidence; }
+        private readonly EvidenceSpec[] evidence;
+        public EvidenceSpec[] Evidence { get { return (EvidenceSpec[])evidence.Clone(); } }
+        public StepSpec(string id, params EvidenceSpec[] evidence) { Id = id; this.evidence = (EvidenceSpec[])evidence.Clone(); }
     }
 
     public sealed class ResultValidation
     {
-        public readonly Outcome Outcome = new Outcome();
-        public Verdict? Overall;
-        public Verdict? Cleanup;
-        public string QaCommit;
+        public readonly Outcome Outcome;
+        public readonly Verdict? Overall;
+        public readonly Verdict? Cleanup;
+        public readonly string QaCommit;
+        internal ResultValidation(Outcome outcome, Verdict? overall, Verdict? cleanup, string qaCommit)
+        {
+            Outcome = outcome.Snapshot(); Overall = overall; Cleanup = cleanup; QaCommit = qaCommit;
+        }
 
         // An invalid document proves nothing: it is never PASS.
         public Verdict EffectiveOverall
@@ -43,11 +48,12 @@ namespace Qa59Installed
     public static class ResultContract
     {
         public const string Kind = "QA59_INSTALLED_RESULT";
-        public const long Schema = 2;
+        public const long Schema = 3;
         public const int MaxLength = 64 * 1024;
         public const long MaxCount = 4096;
 
-        public static readonly StepSpec[] Steps =
+        public static StepSpec[] Steps { get { return (StepSpec[])steps.Clone(); } }
+        private static readonly StepSpec[] steps =
         {
             new StepSpec("S01_MSI_HASH_SIZE", EvidenceSpec.True("msi_sha256_match"), EvidenceSpec.True("msi_size_match")),
             // 3010/1641 (reboot) are not normal completion: only exit 0 passes.
@@ -62,14 +68,15 @@ namespace Qa59Installed
             // separately, so a partial or blocked injection cannot pass.
             // Delivery is not button success: the actual ONLINE recovery is S09.
             new StepSpec("S08_RESTART_CLICK", EvidenceSpec.Count("user_click_count", 1), EvidenceSpec.Count("sendinput_events_requested", 2),
-                EvidenceSpec.Count("sendinput_events_inserted", 2), EvidenceSpec.True("foreground_hit_target")),
+                EvidenceSpec.Count("sendinput_events_inserted", 2), EvidenceSpec.True("foreground_confirmed"), EvidenceSpec.True("hit_target_confirmed")),
             new StepSpec("S09_ONLINE_SYNC_B", EvidenceSpec.Count("backend_roots", 1), EvidenceSpec.True("owned_listener"), EvidenceSpec.True("ui_folder_b"), EvidenceSpec.True("ui_jobs_b")),
             new StepSpec("S10_NEGATIVE_MATRIX", EvidenceSpec.True("negative_matrix_pass")),
             new StepSpec("S11_TRAY_EXIT", EvidenceSpec.True("tray_exit_online"), EvidenceSpec.True("tray_exit_offline")),
             new StepSpec("S12_CENTRAL_CLEANUP", EvidenceSpec.True("normal_product_exit"), EvidenceSpec.Count("residual_processes", 0), EvidenceSpec.Count("residual_tcp", 0), EvidenceSpec.Count("residual_udp", 0)),
         };
 
-        public static readonly StepSpec[] Negatives =
+        public static StepSpec[] Negatives { get { return (StepSpec[])negatives.Clone(); } }
+        private static readonly StepSpec[] negatives =
         {
             new StepSpec("N01_DUPLICATE_RESTART", EvidenceSpec.True("second_input_observed"), EvidenceSpec.True("busy_block_observed"), EvidenceSpec.Count("backend_roots_max", 1)),
             new StepSpec("N02_ACTIVE_JOB", EvidenceSpec.True("ui_reason_shown"), EvidenceSpec.Count("spawn_count", 0), EvidenceSpec.True("fixture_preserved")),
@@ -80,7 +87,8 @@ namespace Qa59Installed
             new StepSpec("N07_LIVE_BACKEND", EvidenceSpec.True("restart_hidden_or_disabled"), EvidenceSpec.Count("spawn_count", 0), EvidenceSpec.True("backend_pid_unchanged")),
         };
 
-        public static readonly string[] ReasonCodes =
+        public static string[] ReasonCodes { get { return (string[])reasoncodes.Clone(); } }
+        private static readonly string[] reasoncodes =
         {
             "EVIDENCE_MISSING", "EXPECTATION_UNMET", "DEADLINE_EXCEEDED", "UIA_WORKER_HUNG",
             "PROVIDER_FAILED", "FORCED_CLEANUP", "SKIPPED", "PRECONDITION_FAILED",
@@ -140,13 +148,12 @@ namespace Qa59Installed
 
         public static ResultValidation Validate(string text)
         {
-            var result = new ResultValidation();
-            Outcome outcome = result.Outcome;
-            if (text != null && text.Length > MaxLength) { outcome.Add("RESULT_TOO_LARGE"); return result; }
+            var outcome = new Outcome();
+            if (text != null && text.Length > MaxLength) { outcome.Add("RESULT_TOO_LARGE"); return new ResultValidation(outcome, null, null, null); }
             JsonObject root = Fields.ParseObject(text, outcome);
-            if (root == null || !Fields.ExactKeys(root, RootKeys, outcome, "RESULT_")) return result;
+            if (root == null || !Fields.ExactKeys(root, RootKeys, outcome, "RESULT_")) return new ResultValidation(outcome, null, null, null);
 
-            // Schema 2: S08 split into click / requested / inserted input counts.
+            // Schema 3: foreground and hit target are separately measured.
             if (!(root.Get("schema") is long) || (long)root.Get("schema") != Schema) outcome.Add("RESULT_SCHEMA_MISMATCH");
             if (!Kind.Equals(root.Get("kind"))) outcome.Add("RESULT_KIND_MISMATCH");
             if (!CandidatePins.ProductHead.Equals(root.Get("product_head"))) outcome.Add("RESULT_PRODUCT_HEAD_MISMATCH");
@@ -164,13 +171,12 @@ namespace Qa59Installed
 
             Verdict supervisor = Supervisor(root.Get("supervisor"), outcome);
             if (supervisor > worst) worst = supervisor;
-            result.Cleanup = Cleanup(root.Get("cleanup"), outcome);
+            Verdict? cleanup = Cleanup(root.Get("cleanup"), outcome);
 
             Verdict? declared = ParseVerdict(root.Get("overall"));
             if (!declared.HasValue) outcome.Add("RESULT_OVERALL_INVALID");
             else if (declared.Value != worst) outcome.Add("RESULT_OVERALL_MISMATCH");
-            if (outcome.Ok) { result.Overall = worst; result.QaCommit = qaCommit; }
-            return result;
+            return new ResultValidation(outcome, outcome.Ok ? (Verdict?)worst : null, cleanup, outcome.Ok ? qaCommit : null);
         }
 
         // negativesAllPass (input) is checked against S10's own evidence so the

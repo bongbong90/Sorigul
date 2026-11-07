@@ -32,6 +32,14 @@ function Get-PurityHits([string]$text) {
     # comment: verbatim strings, regular strings, char literals, comments.
     $lexer = '@"(?:[^"]|"")*"|"(?:\\.|[^"\\\n])*"|''(?:\\.|[^''\\\n])*''|/\*.*?\*/|//[^\n]*'
     $text = [regex]::Replace($text, $lexer, { param($m) if ($m.Value.StartsWith('/')) { ' ' } else { '""' } }, 'Singleline')
+    # C# escaped and verbatim identifiers normalize after literals/comments.
+    $text = [regex]::Replace($text, '\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})', {
+        param($m)
+        $hex = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
+        $n = [Convert]::ToInt32($hex, 16)
+        if ($n -le 65535) { [string][char]$n } else { 'INVALID_IDENTIFIER' }
+    })
+    $text = [regex]::Replace($text, '@(?=[A-Za-z_])', '')
     $text = [regex]::Replace($text, '\s*([.(])\s*', '$1')
     return @($forbidden | Where-Object {
             $suffix = if ($_ -match '\w$') { '(?![A-Za-z0-9_])' } else { '' }
@@ -41,6 +49,11 @@ function Get-PurityHits([string]$text) {
 
 # Lint self-test: known bypasses must hit, known identifiers/strings must not.
 $lintCases = @(
+    @{ text = 'using System.\u0049O;'; hit = $true },
+    @{ text = 'using System.\U00000049O;'; hit = $true },
+    @{ text = 'using @System . @IO;'; hit = $true },
+    @{ text = 'var x = "escaped \" //"; Console.Beep();'; hit = $true },
+    @{ text = 'char x = ''\''''; Console.Beep();'; hit = $true },
     @{ text = 'var u = "http://x"; System.Console.WriteLine(u);'; hit = $true },
     @{ text = 'var u = @"C:\a\"" //"; Console.Beep();'; hit = $true },
     @{ text = 'char c = ''"''; Console.Beep();'; hit = $true },
@@ -70,7 +83,7 @@ if ($workflows.Count -ne 0) { $failures++ }
 
 # 4. Compile (C# 5, warnings as errors, checked arithmetic, UTF-8 sources) and run.
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$work = Join-Path ([System.IO.Path]::GetTempPath()) ('qa59installed-' + [guid]::NewGuid().ToString('N'))
+$work = Join-Path $here ('qa59-build-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     $dll = Join-Path $work 'Qa59Contracts.dll'
@@ -78,7 +91,16 @@ try {
     $common = @('/nologo', '/noconfig', '/codepage:65001', '/warnaserror+', '/checked+', '/reference:System.dll', '/reference:System.Core.dll')
     $compilerLog = & $csc $common /target:library ('/out:' + $dll) @($contracts | ForEach-Object { $_.FullName }) 2>&1
     if ($LASTEXITCODE -eq 0) {
-        $compilerLog = & $csc $common /target:exe ('/reference:' + $dll) ('/out:' + $exe) (Join-Path $here 'ContractTests.cs') 2>&1
+        # Production assembly has no test seam. Compile test-only authority in
+        # a separate folder; it must never be shipped or used by runtime code.
+        $testDir = Join-Path $work 'test-only'
+        New-Item -ItemType Directory -Path $testDir | Out-Null
+        $testDll = Join-Path $testDir 'Qa59Contracts.dll'
+        $exe = Join-Path $testDir 'ContractTests.exe'
+        $compilerLog = & $csc $common /define:QA59_CONTRACT_TESTS /target:library ('/out:' + $testDll) @($contracts | ForEach-Object { $_.FullName }) 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $compilerLog = & $csc $common /target:exe ('/reference:' + $testDll) ('/out:' + $exe) (Join-Path $here 'ContractTests.cs') 2>&1
+        }
     }
     Write-Output ('COMPILE exit={0}' -f $LASTEXITCODE)
     if ($LASTEXITCODE -ne 0) {
@@ -92,6 +114,9 @@ try {
     }
 }
 finally {
+    $resolvedWork = [System.IO.Path]::GetFullPath($work)
+    if (-not $resolvedWork.StartsWith($here + [System.IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+        [System.IO.Path]::GetFileName($resolvedWork) -notmatch '^qa59-build-[0-9a-f]{32}$') { throw 'QA_BUILD_CLEANUP_DENIED' }
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
