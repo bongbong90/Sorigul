@@ -33,9 +33,16 @@ internal static class InstalledServerHarness
         {
             var read=process.StandardOutput.ReadToEndAsync();
             if(!process.WaitForExit(15000)) { process.Kill(); process.WaitForExit(5000); throw new InvalidOperationException("UI_WORKER_DEADLINE"); }
-            if(process.ExitCode!=0 || !read.Wait(1000) || read.Result.Length>4096) throw new InvalidOperationException("UI_RESULT_INVALID");
+            if(!read.Wait(1000) || read.Result.Length>4096) throw new InvalidOperationException("UI_RESULT_INVALID");
             var obj=StrictJson.Parse(read.Result.Trim()) as JsonObject;
-            if(obj==null || !1L.Equals(obj.Get("schema")) || !Flag(obj,"ok")) throw new InvalidOperationException("UI_OBSERVATION_FAILED");
+            if(obj==null || !1L.Equals(obj.Get("schema"))) throw new InvalidOperationException("UI_RESULT_INVALID");
+            if(process.ExitCode!=0 || !Flag(obj,"ok"))
+            {
+                string reason=obj.Get("input_failure") as string;
+                if(Array.IndexOf(new[]{"NONE","ELEMENT_UNAVAILABLE","FOREGROUND_DENIED","RECT_INVALID","CURSOR_FAILED","HIT_MISMATCH","SENDINPUT_INCOMPLETE","PROVIDER_FAILED"},reason)<0) reason="UNCLASSIFIED";
+                Console.WriteLine("SERVER_INPUT_DIAG mode="+mode+" reason="+reason+" foreground="+Flag(obj,"foreground")+" hit="+Flag(obj,"hit_target")+" clicks="+Count(obj,"clicks")+" requested="+Count(obj,"requested")+" inserted="+Count(obj,"inserted")+" exit="+process.ExitCode);
+                throw new InvalidOperationException("UI_OBSERVATION_FAILED");
+            }
             return obj;
         }
     }

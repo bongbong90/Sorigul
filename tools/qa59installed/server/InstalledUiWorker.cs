@@ -19,30 +19,54 @@ internal static class InstalledUiWorker
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr handle);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle,out uint pid);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint first,uint second,bool attach);
+    [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr handle);
+    [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] input, int size);
     private static bool foreground, hit;
     private static int clicks, inserted;
+    private static string inputFailure="NONE";
+    private static void Focus(IntPtr window)
+    {
+        uint unused; uint current=GetCurrentThreadId();
+        uint foregroundThread=GetWindowThreadProcessId(GetForegroundWindow(),out unused);
+        uint targetThread=GetWindowThreadProcessId(window,out unused);
+        bool first=false,second=false;
+        try
+        {
+            if(foregroundThread!=0&&foregroundThread!=current) first=AttachThreadInput(current,foregroundThread,true);
+            if(targetThread!=0&&targetThread!=current&&targetThread!=foregroundThread) second=AttachThreadInput(current,targetThread,true);
+            BringWindowToTop(window); SetForegroundWindow(window); Thread.Sleep(150);
+        }
+        finally
+        {
+            if(second) AttachThreadInput(current,targetThread,false);
+            if(first) AttachThreadInput(current,foregroundThread,false);
+        }
+    }
     private static AutomationElement Named(AutomationElement root, string name)
     { return root.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.NameProperty, name)); }
     private static bool Click(AutomationElement element, IntPtr expectedWindow, bool right)
     {
-        if (element == null || element.Current.IsOffscreen || !element.Current.IsEnabled) return false;
-        if (expectedWindow != IntPtr.Zero) { SetForegroundWindow(expectedWindow); Thread.Sleep(120); }
+        if (element == null || element.Current.IsOffscreen || !element.Current.IsEnabled) { inputFailure="ELEMENT_UNAVAILABLE"; return false; }
+        if (expectedWindow != IntPtr.Zero && GetForegroundWindow()!=expectedWindow) Focus(expectedWindow);
         foreground = expectedWindow != IntPtr.Zero && GetForegroundWindow() == expectedWindow;
-        if (expectedWindow != IntPtr.Zero && !foreground) return false;
+        if (expectedWindow != IntPtr.Zero && !foreground) { inputFailure="FOREGROUND_DENIED"; return false; }
         Rect rectangle = element.Current.BoundingRectangle;
-        if (rectangle.IsEmpty || rectangle.Width <= 0 || rectangle.Height <= 0) return false;
+        if (rectangle.IsEmpty || rectangle.Width <= 0 || rectangle.Height <= 0) { inputFailure="RECT_INVALID"; return false; }
         int x = (int)(rectangle.Left + rectangle.Width / 2), y = (int)(rectangle.Top + rectangle.Height / 2);
-        if (Math.Abs(x) > 65536 || Math.Abs(y) > 65536 || !SetCursorPos(x, y)) return false;
+        if (Math.Abs(x) > 65536 || Math.Abs(y) > 65536 || !SetCursorPos(x, y)) { inputFailure="CURSOR_FAILED"; return false; }
         var under = AutomationElement.FromPoint(new Point(x, y));
         hit = false;
         for (int i = 0; under != null && i < 12; i++, under = TreeWalker.ControlViewWalker.GetParent(under))
             if (Automation.Compare(under, element)) { hit = true; break; }
-        if (!hit) return false;
+        if (!hit) { inputFailure="HIT_MISMATCH"; return false; }
         var input = new Input[2]; input[0].Mouse.Flags = right ? 8U : 2U; input[1].Mouse.Flags = right ? 16U : 4U;
         uint sent = SendInput(2, input, Marshal.SizeOf(typeof(Input)));
         inserted += (int)sent; clicks++;
+        if(sent!=2) inputFailure="SENDINPUT_INCOMPLETE";
         return sent == 2;
     }
     private static void Report(bool ok, bool online, bool offline, bool visible, bool enabled, bool folder, int files, int done, int failed, bool guard)
@@ -50,7 +74,7 @@ internal static class InstalledUiWorker
         Console.WriteLine("{\"schema\":1,\"ok\":" + Bool(ok) + ",\"online\":" + Bool(online) + ",\"offline\":" + Bool(offline)
             + ",\"restart_visible\":" + Bool(visible) + ",\"restart_enabled\":" + Bool(enabled) + ",\"folder\":" + Bool(folder)
             + ",\"files\":" + files + ",\"done\":" + done + ",\"failed\":" + failed + ",\"guard\":" + Bool(guard)
-            + ",\"foreground\":" + Bool(foreground) + ",\"hit_target\":" + Bool(hit) + ",\"clicks\":" + clicks + ",\"requested\":" + (clicks * 2) + ",\"inserted\":" + inserted + "}");
+            + ",\"foreground\":" + Bool(foreground) + ",\"hit_target\":" + Bool(hit) + ",\"clicks\":" + clicks + ",\"requested\":" + (clicks * 2) + ",\"inserted\":" + inserted + ",\"input_failure\":\""+inputFailure+"\"}");
     }
     private static string Bool(bool value) { return value ? "true" : "false"; }
     [STAThread]
@@ -59,6 +83,9 @@ internal static class InstalledUiWorker
         try
         {
             if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" || Environment.GetEnvironmentVariable("ImageOS") != "win22" || args.Length != 6) return 64;
+            // UIA rectangles and SendInput must use the same physical screen
+            // coordinates as the per-monitor-aware Tauri window.
+            SetThreadDpiAwarenessContext(new IntPtr(-4));
             string mode = args[0]; int pid = int.Parse(args[1]);
             string folder = Encoding.UTF8.GetString(Convert.FromBase64String(args[2]));
             if(folder==" ") folder=""; // explicit unmeasured folder sentinel
@@ -131,6 +158,6 @@ internal static class InstalledUiWorker
                 return success ? 0 : 1;
             }
         }
-        catch { Report(false,false,false,false,false,false,0,0,0,false); return 1; }
+        catch { inputFailure="PROVIDER_FAILED"; Report(false,false,false,false,false,false,0,0,0,false); return 1; }
     }
 }
