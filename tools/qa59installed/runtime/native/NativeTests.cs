@@ -211,17 +211,21 @@ namespace Qa59Installed.Runtime
             Console.WriteLine(string.Join("|", new[] { owner.Identity.Pid.ToString(), owner.Identity.Created.ToString(), fixture.Boundary.Root, fixture.Scratch,
                 rootId.Volume.ToString(), rootId.IndexHigh.ToString(), rootId.IndexLow.ToString(), scratchId.Volume.ToString(), scratchId.IndexHigh.ToString(), scratchId.IndexLow.ToString() }));
             Console.Out.Flush();
-            string command = Console.ReadLine();
-            // A redirected .NET Framework StreamWriter can prefix its first
-            // input with a UTF-8 BOM. That encoding preamble is not a command.
-            if (command == null || command.TrimStart('\uFEFF') != "GO") return 75;
+            // No console-input dependency in a headless hosted process. The
+            // parent acknowledges only after pinning the actual worker handle.
+            string acknowledgement = Path.Combine(fixture.Boundary.Root,"supervisor-ack");
+            var clock = Stopwatch.StartNew();
+            while (!File.Exists(acknowledgement) && clock.ElapsedMilliseconds < 5000) Thread.Sleep(10);
+            if (!File.Exists(acknowledgement)) return 75;
+            byte[] command = File.ReadAllBytes(acknowledgement);
+            if (command.Length != 1 || command[0] != 71) return 75;
             Environment.Exit(37);
             return 76;
         }
         private static void SupervisorDeath()
         {
             var start = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--vanish")
-                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardInput = true, RedirectStandardError = true };
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
             using (var helper = Process.Start(start))
             {
                 try
@@ -243,8 +247,9 @@ namespace Qa59Installed.Runtime
                             || WinProcess.NtQueryInformationProcess(witness, 0, out info, System.Runtime.InteropServices.Marshal.SizeOf(typeof(WinProcess.BasicInfo)), out returned) != 0
                             || info.ParentPid.ToInt64() != helper.Id) throw new BoundaryException();
                         var identity = new ProcessIdentity(pid, (uint)helper.Id, birth, root + "\\Qa59SyntheticWorker.exe", "");
-                        byte[] command = new byte[] { 71, 79, 10 };
-                        helper.StandardInput.BaseStream.Write(command, 0, command.Length); helper.StandardInput.BaseStream.Flush();
+                        using (var acknowledgement = new FileStream(Path.Combine(root,"supervisor-ack-pending"),FileMode.CreateNew,FileAccess.Write))
+                        { acknowledgement.WriteByte(71); acknowledgement.Flush(true); }
+                        File.Move(Path.Combine(root,"supervisor-ack-pending"),Path.Combine(root,"supervisor-ack"));
                         bool helperExited = helper.WaitForExit(5000);
                         Console.WriteLine("NATIVE_HELPER_EXIT observed=" + helperExited + " code=" + (helperExited ? helper.ExitCode : -1));
                         Check("SUPERVISOR_ABRUPT_EXIT", helperExited && helper.ExitCode == 37);
@@ -262,6 +267,8 @@ namespace Qa59Installed.Runtime
                         if (!WinFiles.GetFileInformationByHandle(rootHandle, out actual) || actual.Volume != uint.Parse(data[4]) || actual.IndexHigh != uint.Parse(data[5]) || actual.IndexLow != uint.Parse(data[6])) throw new BoundaryException();
                         if (!WinFiles.GetFileInformationByHandle(scratchHandle, out actual) || actual.Volume != uint.Parse(data[7]) || actual.IndexHigh != uint.Parse(data[8]) || actual.IndexLow != uint.Parse(data[9])) throw new BoundaryException();
                         NativeFixture.DeleteFile(root, "worker-ready", null);
+                        NativeFixture.DeleteFile(root, "supervisor-ack", null);
+                        NativeFixture.DeleteFile(root, "supervisor-ack-pending", null);
                         NativeFixture.DeleteFile(root, "Qa59SyntheticWorker.exe", null);
                         Check("SUPERVISOR_DEATH_ROOT_CLEANUP", WinFiles.DeleteOwned(rootHandle));
                     }
