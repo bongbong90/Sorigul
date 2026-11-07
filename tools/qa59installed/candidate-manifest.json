@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "QA59_CANDIDATE_MANIFEST",
+  "not_execution_authorization": true,
+  "product_repository": "bongbong90/Sorigul",
+  "product_pr": 216,
+  "product_head": "890364e21a4e80d2ff5185332834b4dbb67aeb01",
+  "release_freeze_sha256": "9c6c21c08049a36d7c9111a070d3bc0ae4b72e4598bc613dbbbb666e4c637cbd",
+  "original_build_run": "Sorigul_20261101_890364e_a00202c7532b",
+  "msi_sha256": "002b94e82caeb7d540e4f0834ecfb1b191491fbd226eb6cee457a03062ea0166",
+  "msi_size_bytes": 70606848,
+  "desktop_sha256": "2bd26d28cba80aceb8fa6b1fa93632c315350fc36f83953d073d434b85da66a5",
+  "core_sha256": "ab4286af74542f03e8da1d3076301f870aed8e8124c899267229b9ee2558b669",
+  "ffmpeg_sha256": "2ce797a0f88d7f067180338fb227f7b1928ea727bd9a4d7a1d022f7c52af71a3",
+  "embedded_manifest_sha256": "beff844e393f0313ef746aaf9658d8a6c81b2c92e1f87c629ebaf390b486e3b7"
+}
