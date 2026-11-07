@@ -211,7 +211,10 @@ namespace Qa59Installed.Runtime
             Console.WriteLine(string.Join("|", new[] { owner.Identity.Pid.ToString(), owner.Identity.Created.ToString(), fixture.Boundary.Root, fixture.Scratch,
                 rootId.Volume.ToString(), rootId.IndexHigh.ToString(), rootId.IndexLow.ToString(), scratchId.Volume.ToString(), scratchId.IndexHigh.ToString(), scratchId.IndexLow.ToString() }));
             Console.Out.Flush();
-            if (Console.ReadLine() != "GO") return 75;
+            string command = Console.ReadLine();
+            // A redirected .NET Framework StreamWriter can prefix its first
+            // input with a UTF-8 BOM. That encoding preamble is not a command.
+            if (command == null || command.TrimStart('\uFEFF') != "GO") return 75;
             Environment.Exit(37);
             return 76;
         }
@@ -240,8 +243,11 @@ namespace Qa59Installed.Runtime
                             || WinProcess.NtQueryInformationProcess(witness, 0, out info, System.Runtime.InteropServices.Marshal.SizeOf(typeof(WinProcess.BasicInfo)), out returned) != 0
                             || info.ParentPid.ToInt64() != helper.Id) throw new BoundaryException();
                         var identity = new ProcessIdentity(pid, (uint)helper.Id, birth, root + "\\Qa59SyntheticWorker.exe", "");
-                        helper.StandardInput.WriteLine("GO"); helper.StandardInput.Flush();
-                        Check("SUPERVISOR_ABRUPT_EXIT", helper.WaitForExit(5000) && helper.ExitCode == 37);
+                        byte[] command = new byte[] { 71, 79, 10 };
+                        helper.StandardInput.BaseStream.Write(command, 0, command.Length); helper.StandardInput.BaseStream.Flush();
+                        bool helperExited = helper.WaitForExit(5000);
+                        Console.WriteLine("NATIVE_HELPER_EXIT observed=" + helperExited + " code=" + (helperExited ? helper.ExitCode : -1));
+                        Check("SUPERVISOR_ABRUPT_EXIT", helperExited && helper.ExitCode == 37);
                         Check("JOB_CLOSE_KILLS_OWNED_WORKER", WinProcess.WaitForSingleObject(witness, 5000) == 0);
                         var counts = EndpointObserver.ExitedWitness(witness, identity);
                         Check("SUPERVISOR_DEATH_RESIDUAL_ENDPOINTS_ZERO", counts.Verdict == Verdict.PASS && counts.Tcp == 0 && counts.Udp == 0);
