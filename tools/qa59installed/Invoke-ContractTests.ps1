@@ -27,15 +27,37 @@ foreach ($script in Get-ChildItem -LiteralPath $here -Filter '*.ps1' -File) {
 $forbidden = @('System.IO', 'System.Net', 'System.Diagnostics', 'System.Runtime.InteropServices', 'System.Reflection',
     'Microsoft.Win32', 'DllImport', 'extern', 'Process', 'Environment', 'Registry', 'Socket', 'File.', 'Directory.',
     'Thread', 'Task', 'unsafe', 'Console', 'AppDomain', 'Activator', 'Assembly.', 'GetType(', 'GetMethod', 'Invoke', 'Marshal')
-$contracts = @(Get-ChildItem -LiteralPath $here -Filter '*.cs' -File | Where-Object { $_.Name -ne 'ContractTests.cs' })
-foreach ($source in $contracts) {
-    $text = [System.IO.File]::ReadAllText($source.FullName)
-    $text = [regex]::Replace($text, '/\*.*?\*/|//[^\n]*', '', 'Singleline')
+function Get-PurityHits([string]$text) {
+    # One left-to-right pass, so '//' inside "http://x" is a string, not a
+    # comment: verbatim strings, regular strings, char literals, comments.
+    $lexer = '@"(?:[^"]|"")*"|"(?:\\.|[^"\\\n])*"|''(?:\\.|[^''\\\n])*''|/\*.*?\*/|//[^\n]*'
+    $text = [regex]::Replace($text, $lexer, { param($m) if ($m.Value.StartsWith('/')) { ' ' } else { '""' } }, 'Singleline')
     $text = [regex]::Replace($text, '\s*([.(])\s*', '$1')
-    $hits = @($forbidden | Where-Object {
+    return @($forbidden | Where-Object {
             $suffix = if ($_ -match '\w$') { '(?![A-Za-z0-9_])' } else { '' }
             $text -cmatch ('(?<![A-Za-z0-9_])' + [regex]::Escape($_) + $suffix)
         })
+}
+
+# Lint self-test: known bypasses must hit, known identifiers/strings must not.
+$lintCases = @(
+    @{ text = 'var u = "http://x"; System.Console.WriteLine(u);'; hit = $true },
+    @{ text = 'var u = @"C:\a\"" //"; Console.Beep();'; hit = $true },
+    @{ text = 'char c = ''"''; Console.Beep();'; hit = $true },
+    @{ text = 'using System /* x */ . IO;'; hit = $true },
+    @{ text = '// Console.WriteLine();'; hit = $false },
+    @{ text = 'string s = "Process File. Console";'; hit = $false },
+    @{ text = 'bool MayInvokeMsiexec; int external_drive_calls;'; hit = $false }
+)
+foreach ($case in $lintCases) {
+    $actual = @(Get-PurityHits $case.text).Count -gt 0
+    if ($actual -ne $case.hit) { Write-Output ('LINT SELFTEST FAIL: ' + $case.text); $failures++ }
+}
+Write-Output ('LINT SELFTEST cases={0}' -f $lintCases.Count)
+
+$contracts = @(Get-ChildItem -LiteralPath $here -Filter '*.cs' -File | Where-Object { $_.Name -ne 'ContractTests.cs' })
+foreach ($source in $contracts) {
+    $hits = @(Get-PurityHits ([System.IO.File]::ReadAllText($source.FullName)))
     Write-Output ('PURITY {0} forbidden={1}' -f $source.Name, $hits.Count)
     if ($hits.Count -ne 0) { $failures++ }
 }

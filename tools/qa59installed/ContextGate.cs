@@ -1,6 +1,10 @@
 // Execution context gate. Pure: the caller supplies the context JSON (repo,
-// run, approval record, pre-dispatch cost evidence). Unknown = deny. Cost
-// evidence must predate dispatch; a job checking its own cost is too late.
+// run, approval record, pre-dispatch cost evidence, external controls).
+// Unknown = deny. Cost evidence must predate dispatch; a job checking its own
+// cost is too late. Booleans and IDs in the context are claims, not proof:
+// execution additionally needs the approval consumption and the budget to be
+// enforced by external pre-dispatch controls on a reviewed, compiled-in
+// allowlist. That allowlist is empty today, so every context is denied.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -13,14 +17,19 @@ namespace Qa59Installed
         public readonly bool MsiDownloadAllowed;
         public readonly bool MsiInstallAllowed;
         public readonly IList<string> Reasons;
+        // Bound identities, set only when execution is allowed.
+        public readonly string QaCommit;
+        public readonly long? RunId;
 
-        internal GateDecision(Outcome outcome, bool downloadApproved, bool installApproved)
+        internal GateDecision(Outcome outcome, bool downloadApproved, bool installApproved, string qaCommit, long? runId)
         {
             Reasons = outcome.Reasons;
             ExecutionAllowed = outcome.Ok;
             MsiDownloadAllowed = ExecutionAllowed && downloadApproved;
             // Install never stands alone: it needs the download permit too.
             MsiInstallAllowed = MsiDownloadAllowed && installApproved;
+            QaCommit = ExecutionAllowed ? qaCommit : null;
+            RunId = ExecutionAllowed ? runId : null;
         }
     }
 
@@ -31,45 +40,64 @@ namespace Qa59Installed
         private const string RefPrefix = "refs/heads/";
         public static readonly TimeSpan MaxCostEvidenceAge = TimeSpan.FromHours(1);
 
-        private static readonly string[] RootKeys = { "schema", "kind", "repository", "run", "approval", "cost" };
+        // External pre-dispatch controls trusted to (a) atomically consume a
+        // single-use approval for exactly one run and (b) enforce 0 KRW before
+        // dispatch. None exists yet. Adding one is a reviewed code change,
+        // never a context value.
+        private static readonly string[] TrustedControls = new string[0];
+
+        private static readonly string[] RootKeys = { "schema", "kind", "repository", "run", "approval", "cost", "controls" };
         private static readonly string[] RepositoryKeys = { "full_name", "id", "owner", "visibility" };
-        private static readonly string[] RunKeys = { "ref", "sha", "event_name", "run_attempt", "dispatched_at" };
+        private static readonly string[] RunKeys = { "run_id", "ref", "sha", "event_name", "run_attempt", "dispatched_at" };
         private static readonly string[] ApprovalKeys =
         {
-            "approval_id", "repository_id", "repository_full_name", "qa_commit", "ref", "event_name",
-            "execution_approved", "msi_download_approved", "msi_install_approved",
+            "approval_id", "state", "consumed_by_run_id", "repository_id", "repository_full_name", "qa_commit", "ref",
+            "event_name", "execution_approved", "msi_download_approved", "msi_install_approved",
         };
         private static readonly string[] CostKeys =
         {
             "maximum_allowed_cost_krw", "paid_usage_approved",
             "free_allowance_verified", "paid_overage_block_verified", "verified_at",
         };
+        private static readonly string[] ControlKeys = { "approval_consumption_control", "budget_control" };
 
         public static GateDecision Evaluate(string text)
+        {
+            return Evaluate(text, TrustedControls);
+        }
+
+        // Tests inject a trusted control to exercise the remaining rules.
+        internal static GateDecision Evaluate(string text, IList<string> trustedControls)
         {
             var outcome = new Outcome();
             bool downloadApproved = false;
             bool installApproved = false;
+            string qaCommit = null;
+            long? runId = null;
             JsonObject root = Fields.ParseObject(text, outcome);
             if (root != null && Fields.ExactKeys(root, RootKeys, outcome, "CONTEXT_"))
             {
-                if (!(root.Get("schema") is long) || (long)root.Get("schema") != 1) outcome.Add("CONTEXT_SCHEMA_MISMATCH");
+                if (!(root.Get("schema") is long) || (long)root.Get("schema") != 2) outcome.Add("CONTEXT_SCHEMA_MISMATCH");
                 if (!Kind.Equals(root.Get("kind"))) outcome.Add("CONTEXT_KIND_MISMATCH");
                 JsonObject repo = Section(root, "repository", RepositoryKeys, outcome);
                 JsonObject run = Section(root, "run", RunKeys, outcome);
                 JsonObject approval = Section(root, "approval", ApprovalKeys, outcome);
                 JsonObject cost = Section(root, "cost", CostKeys, outcome);
-                if (repo != null && run != null && approval != null && cost != null)
+                JsonObject controls = Section(root, "controls", ControlKeys, outcome);
+                if (repo != null && run != null && approval != null && cost != null && controls != null)
                 {
                     CheckRepository(repo, approval, outcome);
                     CheckRun(run, approval, outcome);
-                    CheckApproval(approval, outcome);
+                    CheckApproval(approval, run, outcome);
                     CheckCost(cost, run, outcome);
+                    CheckControls(controls, trustedControls, outcome);
                     downloadApproved = true.Equals(approval.Get("msi_download_approved"));
                     installApproved = true.Equals(approval.Get("msi_install_approved"));
+                    qaCommit = run.Get("sha") as string;
+                    if (run.Get("run_id") is long) runId = (long)run.Get("run_id");
                 }
             }
-            return new GateDecision(outcome, downloadApproved, installApproved);
+            return new GateDecision(outcome, downloadApproved, installApproved, qaCommit, runId);
         }
 
         private static JsonObject Section(JsonObject root, string key, string[] keys, Outcome outcome)
@@ -125,16 +153,28 @@ namespace Qa59Installed
             if (eventName != AllowedEvent || !AllowedEvent.Equals(approval.Get("event_name")))
                 outcome.Add("EVENT_NOT_APPROVED");
 
+            // attempt 1 stops re-runs of one run; it cannot stop a second
+            // dispatch, which also starts at attempt 1. The single-use approval
+            // consumption below covers that.
             object attempt = run.Get("run_attempt");
             if (!(attempt is long)) outcome.Add("RUN_ATTEMPT_UNKNOWN");
             else if ((long)attempt != 1) outcome.Add("RERUN_DENIED");
         }
 
-        private static void CheckApproval(JsonObject approval, Outcome outcome)
+        // In-job view of the single-use approval: it must already be consumed
+        // by this exact run. ISSUED here means nothing guarded the dispatch.
+        private static void CheckApproval(JsonObject approval, JsonObject run, Outcome outcome)
         {
-            var id = approval.Get("approval_id") as string;
-            if (id == null || id.Trim().Length == 0 || id.Trim() != id || !true.Equals(approval.Get("execution_approved")))
+            if (!SingleUseApproval.IsValidId(approval.Get("approval_id") as string) || !true.Equals(approval.Get("execution_approved")))
                 outcome.Add("APPROVAL_MISSING");
+            object runId = run.Get("run_id");
+            if (!(runId is long) || (long)runId <= 0) { outcome.Add("RUN_ID_UNKNOWN"); return; }
+            object consumedBy = approval.Get("consumed_by_run_id");
+            string state = approval.Get("state") as string;
+            if (state == SingleUseApproval.Issued) outcome.Add("APPROVAL_NOT_CONSUMED");
+            else if (state == SingleUseApproval.Revoked) outcome.Add("APPROVAL_REVOKED");
+            else if (state != SingleUseApproval.Consumed) outcome.Add("APPROVAL_STATE_UNKNOWN");
+            else if (!(consumedBy is long) || (long)consumedBy != (long)runId) outcome.Add("APPROVAL_CONSUMED_BY_OTHER_RUN");
         }
 
         private static void CheckCost(JsonObject cost, JsonObject run, Outcome outcome)
@@ -159,6 +199,22 @@ namespace Qa59Installed
                 && (dispatchedAt - verifiedAt > MaxCostEvidenceAge
                     || verifiedAt.Year != dispatchedAt.Year || verifiedAt.Month != dispatchedAt.Month))
                 outcome.Add("COST_EVIDENCE_STALE");
+        }
+
+        private static void CheckControls(JsonObject controls, IList<string> trusted, Outcome outcome)
+        {
+            if (!IsTrusted(controls.Get("approval_consumption_control") as string, trusted)) outcome.Add("APPROVAL_CONTROL_UNTRUSTED");
+            if (!IsTrusted(controls.Get("budget_control") as string, trusted)) outcome.Add("BUDGET_CONTROL_UNTRUSTED");
+        }
+
+        private static bool IsTrusted(string control, IList<string> trusted)
+        {
+            if (control == null || trusted == null) return false;
+            foreach (string t in trusted)
+            {
+                if (string.Equals(control, t, StringComparison.Ordinal)) return true;
+            }
+            return false;
         }
 
         private static bool TryUtc(object value, out DateTime result)

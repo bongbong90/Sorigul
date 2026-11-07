@@ -35,6 +35,7 @@ namespace Qa59Installed
             Suite("Context Gate"); GateTests(contextText, manifestText);
             Suite("Result Schema"); ResultTests();
             Suite("Synthetic Fixture"); FixtureTests();
+            Suite("Acceptance Gate"); AcceptanceTests(manifestText, contextText);
 
             int failed = 0;
             foreach (string name in suiteOrder)
@@ -164,10 +165,12 @@ namespace Qa59Installed
         private static JsonObject AllowedContext()
         {
             return Obj(@"{
-  ""schema"": 1, ""kind"": ""QA59_EXECUTION_CONTEXT"",
+  ""schema"": 2, ""kind"": ""QA59_EXECUTION_CONTEXT"",
   ""repository"": { ""full_name"": ""qa-owner/sorigul-qa59-private"", ""id"": 123456789, ""owner"": ""qa-owner"", ""visibility"": ""private"" },
-  ""run"": { ""ref"": ""refs/heads/qa59-installed"", ""sha"": """ + QaSha + @""", ""event_name"": ""workflow_dispatch"", ""run_attempt"": 1, ""dispatched_at"": ""2026-11-07T01:00:00Z"" },
-  ""approval"": { ""approval_id"": ""APPROVAL-TEST-1"", ""repository_id"": 123456789, ""repository_full_name"": ""qa-owner/sorigul-qa59-private"",
+  ""run"": { ""run_id"": 555000111, ""ref"": ""refs/heads/qa59-installed"", ""sha"": """ + QaSha + @""", ""event_name"": ""workflow_dispatch"", ""run_attempt"": 1, ""dispatched_at"": ""2026-11-07T01:00:00Z"" },
+  ""controls"": { ""approval_consumption_control"": ""TEST-CONTROL"", ""budget_control"": ""TEST-CONTROL"" },
+  ""approval"": { ""approval_id"": ""APPROVAL-TEST-1"", ""state"": ""CONSUMED"", ""consumed_by_run_id"": 555000111,
+                ""repository_id"": 123456789, ""repository_full_name"": ""qa-owner/sorigul-qa59-private"",
                 ""qa_commit"": """ + QaSha + @""", ""ref"": ""refs/heads/qa59-installed"", ""event_name"": ""workflow_dispatch"",
                 ""execution_approved"": true, ""msi_download_approved"": true, ""msi_install_approved"": true },
   ""cost"": { ""maximum_allowed_cost_krw"": 0, ""paid_usage_approved"": false, ""free_allowance_verified"": true,
@@ -178,10 +181,16 @@ namespace Qa59Installed
         private static GateDecision GateWith(string section, string key, object value)
         {
             JsonObject ctx = AllowedContext();
-            if (section == null) { if (value == null) ctx.Remove(key); else ctx.TryAdd(key, value); }
+            if (section == null) { if (value == null) ctx.Remove(key); else if (ctx.Has(key)) ctx.Replace(key, value); else ctx.TryAdd(key, value); }
             else ((JsonObject)ctx.Get(section)).Replace(key, value);
-            return ContextGate.Evaluate(JsonText.Write(ctx));
+            return Trusted(ctx);
         }
+
+        private const long RunId = 555000111;
+        private static readonly string[] TestControls = { "TEST-CONTROL" };
+
+        // Only tests may inject a trusted control; the public Evaluate trusts none.
+        private static GateDecision Trusted(JsonObject ctx) { return ContextGate.Evaluate(JsonText.Write(ctx), TestControls); }
 
         private static void Deny(string name, GateDecision d, string reason)
         {
@@ -196,8 +205,35 @@ namespace Qa59Installed
             Check("current: approval missing", current.Reasons.Contains("APPROVAL_MISSING"));
             Check("current: repository unknown", current.Reasons.Contains("REPOSITORY_UNKNOWN"));
 
-            GateDecision allowed = ContextGate.Evaluate(JsonText.Write(AllowedContext()));
-            Check("fully approved synthetic context ALLOW", allowed.ExecutionAllowed && allowed.MsiDownloadAllowed && allowed.MsiInstallAllowed && allowed.Reasons.Count == 0);
+            Check("current: no trusted external control", current.Reasons.Contains("APPROVAL_CONTROL_UNTRUSTED") && current.Reasons.Contains("BUDGET_CONTROL_UNTRUSTED"));
+
+            // Every claim satisfied, but the public gate trusts no external control yet.
+            GateDecision claimsOnly = ContextGate.Evaluate(JsonText.Write(AllowedContext()));
+            Check("claims alone never ALLOW (public gate)", !claimsOnly.ExecutionAllowed && !claimsOnly.MsiInstallAllowed && claimsOnly.QaCommit == null && !claimsOnly.RunId.HasValue
+                && claimsOnly.Reasons.Count == 2 && claimsOnly.Reasons.Contains("APPROVAL_CONTROL_UNTRUSTED") && claimsOnly.Reasons.Contains("BUDGET_CONTROL_UNTRUSTED"));
+
+            GateDecision allowed = Trusted(AllowedContext());
+            Check("fully approved synthetic context ALLOW (test control)", allowed.ExecutionAllowed && allowed.MsiDownloadAllowed && allowed.MsiInstallAllowed && allowed.Reasons.Count == 0
+                && allowed.QaCommit == QaSha && allowed.RunId == RunId);
+
+            Deny("untrusted approval control", GateWith("controls", "approval_consumption_control", "SELF-ATTESTED"), "APPROVAL_CONTROL_UNTRUSTED");
+            Deny("missing budget control", GateWith("controls", "budget_control", JsonNull.Value), "BUDGET_CONTROL_UNTRUSTED");
+            Deny("control id case variant", GateWith("controls", "budget_control", "test-control"), "BUDGET_CONTROL_UNTRUSTED");
+            Deny("approval still ISSUED in job", GateWith("approval", "state", "ISSUED"), "APPROVAL_NOT_CONSUMED");
+            Deny("approval revoked", GateWith("approval", "state", "REVOKED"), "APPROVAL_REVOKED");
+            Deny("approval state unknown", GateWith("approval", "state", "APPROVED"), "APPROVAL_STATE_UNKNOWN");
+            Deny("approval state null", GateWith("approval", "state", JsonNull.Value), "APPROVAL_STATE_UNKNOWN");
+            Deny("second dispatch reusing consumed approval", GateWith("run", "run_id", 555000112L), "APPROVAL_CONSUMED_BY_OTHER_RUN");
+            Deny("consumed without run binding", GateWith("approval", "consumed_by_run_id", JsonNull.Value), "APPROVAL_CONSUMED_BY_OTHER_RUN");
+            Deny("run id unknown", GateWith("run", "run_id", JsonNull.Value), "RUN_ID_UNKNOWN");
+            Deny("run id zero", GateWith("run", "run_id", 0L), "RUN_ID_UNKNOWN");
+            Deny("schema 1 context", GateWith(null, "schema", 1L), "CONTEXT_SCHEMA_MISMATCH");
+            Deny("zero-width approval id", GateWith("approval", "approval_id", "​"), "APPROVAL_MISSING");
+            Deny("approval id with zero-width suffix", GateWith("approval", "approval_id", "APPROVAL-TEST-1​"), "APPROVAL_MISSING");
+            Deny("non-ASCII approval id", GateWith("approval", "approval_id", "승인-1"), "APPROVAL_MISSING");
+            Deny("overlong approval id", GateWith("approval", "approval_id", new string('a', 65)), "APPROVAL_MISSING");
+
+            ApprovalTests();
 
             Deny("public repository", GateWith("repository", "visibility", "public"), "REPOSITORY_NOT_PRIVATE");
             Deny("unknown visibility", GateWith("repository", "visibility", JsonNull.Value), "REPOSITORY_NOT_PRIVATE");
@@ -205,7 +241,7 @@ namespace Qa59Installed
             ((JsonObject)product.Get("repository")).Replace("full_name", "BongBong90/sorigul");
             ((JsonObject)product.Get("repository")).Replace("owner", "bongbong90");
             ((JsonObject)product.Get("approval")).Replace("repository_full_name", "bongbong90/Sorigul");
-            Deny("public product repository by name (any case)", ContextGate.Evaluate(JsonText.Write(product)), "REPOSITORY_IS_PRODUCT");
+            Deny("public product repository by name (any case)", Trusted(product), "REPOSITORY_IS_PRODUCT");
             Deny("other repository id", GateWith("repository", "id", 987654321L), "REPOSITORY_NOT_APPROVED");
             Deny("renamed repository", GateWith("repository", "full_name", "qa-owner/other"), "REPOSITORY_NOT_APPROVED");
             Deny("owner mismatch", GateWith("repository", "owner", "intruder"), "REPOSITORY_OWNER_MISMATCH");
@@ -214,7 +250,7 @@ namespace Qa59Installed
             JsonObject productSha = AllowedContext();
             ((JsonObject)productSha.Get("run")).Replace("sha", CandidatePins.ProductHead);
             ((JsonObject)productSha.Get("approval")).Replace("qa_commit", CandidatePins.ProductHead);
-            Deny("QA SHA equal to product head", ContextGate.Evaluate(JsonText.Write(productSha)), "QA_COMMIT_IS_PRODUCT_HEAD");
+            Deny("QA SHA equal to product head", Trusted(productSha), "QA_COMMIT_IS_PRODUCT_HEAD");
             Deny("unapproved QA SHA", GateWith("run", "sha", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), "QA_COMMIT_NOT_APPROVED");
             Deny("short QA SHA", GateWith("run", "sha", "aaaaaaa"), "QA_COMMIT_FORMAT");
             Deny("uppercase QA SHA", GateWith("run", "sha", QaSha.ToUpperInvariant()), "QA_COMMIT_FORMAT");
@@ -233,7 +269,7 @@ namespace Qa59Installed
             JsonObject crossMonth = AllowedContext();
             ((JsonObject)crossMonth.Get("cost")).Replace("verified_at", "2026-10-31T23:30:00Z");
             ((JsonObject)crossMonth.Get("run")).Replace("dispatched_at", "2026-11-01T00:10:00Z");
-            Deny("cost evidence from previous billing month", ContextGate.Evaluate(JsonText.Write(crossMonth)), "COST_EVIDENCE_STALE");
+            Deny("cost evidence from previous billing month", Trusted(crossMonth), "COST_EVIDENCE_STALE");
             Deny("renamed product repository by ID", GateWith("repository", "id", CandidatePins.ProductRepositoryId), "REPOSITORY_IS_PRODUCT");
             Deny("free allowance unverified", GateWith("cost", "free_allowance_verified", false), "COST_NOT_VERIFIED");
             Deny("overage block unverified", GateWith("cost", "paid_overage_block_verified", JsonNull.Value), "COST_NOT_VERIFIED");
@@ -292,7 +328,7 @@ namespace Qa59Installed
             cleanup.TryAdd("harness_resources_released", true);
             cleanup.TryAdd("fixtures_restored", true);
             var root = new JsonObject();
-            root.TryAdd("schema", 1L);
+            root.TryAdd("schema", ResultContract.Schema);
             root.TryAdd("kind", ResultContract.Kind);
             root.TryAdd("product_head", CandidatePins.ProductHead);
             root.TryAdd("msi_sha256", CandidatePins.MsiSha256);
@@ -340,10 +376,12 @@ namespace Qa59Installed
             Check("declared overall PASS over FAIL rejected", Run(reboot).Outcome.Has("RESULT_OVERALL_MISMATCH") && Run(reboot).EffectiveOverall == Verdict.NOT_VERIFIED);
 
             JsonObject downgrade = PassingResult();
-            EvidenceOf(downgrade, "steps", 7).Replace("native_input_count", 2L);
+            EvidenceOf(downgrade, "steps", 7).Replace("sendinput_events_inserted", 1L);
             SetStep(downgrade, "steps", 7, "NOT_VERIFIED", "EXPECTATION_UNMET");
             downgrade.Replace("overall", "NOT_VERIFIED");
             Check("FAIL evidence cannot be declared NOT_VERIFIED", Run(downgrade).Outcome.Has("RESULT_VERDICT_PROMOTED"));
+
+            S08Tests();
 
             JsonObject worse = PassingResult();
             SetStep(worse, "steps", 0, "FAIL", "DEADLINE_EXCEEDED");
@@ -462,6 +500,173 @@ namespace Qa59Installed
             LatchTests();
         }
 
+        // S08: one user click = one down + one up event requested and inserted.
+        private static void S08Tests()
+        {
+            const int S08 = 7, S09 = 8;
+            StepSpec spec = ResultContract.Steps[S08];
+            Check("S08 evidence is click/requested/inserted/hit", spec.Id == "S08_RESTART_CLICK" && spec.Evidence.Length == 4
+                && spec.Evidence[0].Key == "user_click_count" && spec.Evidence[0].ExpectedCount == 1
+                && spec.Evidence[1].Key == "sendinput_events_requested" && spec.Evidence[1].ExpectedCount == 2
+                && spec.Evidence[2].Key == "sendinput_events_inserted" && spec.Evidence[2].ExpectedCount == 2);
+            Check("S08 has no button-success evidence", Array.TrueForAll(spec.Evidence, e => e.Key.IndexOf("online", StringComparison.OrdinalIgnoreCase) < 0 && e.Key.IndexOf("recover", StringComparison.OrdinalIgnoreCase) < 0));
+
+            var cases = new[]
+            {
+                new object[] { "user_click_count", 2L, Verdict.FAIL, "double click is not one click" },
+                new object[] { "user_click_count", 0L, Verdict.FAIL, "no click" },
+                new object[] { "sendinput_events_requested", 1L, Verdict.FAIL, "down without up" },
+                new object[] { "sendinput_events_requested", 4L, Verdict.FAIL, "two clicks of events" },
+                new object[] { "sendinput_events_inserted", 1L, Verdict.FAIL, "partial insertion (UIPI/blocked)" },
+                new object[] { "sendinput_events_inserted", 0L, Verdict.FAIL, "SendInput returned 0" },
+                new object[] { "foreground_hit_target", false, Verdict.FAIL, "missed hit target" },
+                new object[] { "user_click_count", JsonNull.Value, Verdict.NOT_VERIFIED, "click count unmeasured" },
+                new object[] { "sendinput_events_requested", JsonNull.Value, Verdict.NOT_VERIFIED, "requested unmeasured" },
+                new object[] { "sendinput_events_inserted", JsonNull.Value, Verdict.NOT_VERIFIED, "inserted unmeasured" },
+            };
+            foreach (object[] c in cases)
+            {
+                JsonObject doc = PassingResult();
+                EvidenceOf(doc, "steps", S08).Replace((string)c[0], c[1]);
+                Verdict expected = (Verdict)c[2];
+                Check("S08 " + c[3] + " -> derived " + expected, ResultContract.Derive(spec, EvidenceOf(doc, "steps", S08)) == expected);
+                Check("S08 " + c[3] + " cannot be declared PASS", Run(doc).Outcome.Has("RESULT_VERDICT_PROMOTED"));
+                SetStep(doc, "steps", S08, ResultContract.Name(expected), "EXPECTATION_UNMET");
+                doc.Replace("overall", ResultContract.Name(expected));
+                Check("S08 " + c[3] + " -> overall " + expected, Run(doc).Outcome.Ok && Run(doc).Overall == expected);
+            }
+            JsonObject legacy = PassingResult();
+            EvidenceOf(legacy, "steps", S08).TryAdd("native_input_count", 1L);
+            Check("legacy native_input_count key rejected", Run(legacy).Outcome.Has("RESULT_EVIDENCE_UNKNOWN_KEY"));
+            JsonObject schema1 = PassingResult();
+            schema1.Replace("schema", 1L);
+            Check("schema 1 result rejected", Run(schema1).Outcome.Has("RESULT_SCHEMA_MISMATCH"));
+
+            // Perfect input delivery does not make the restart succeed: S09 decides.
+            JsonObject delivered = PassingResult();
+            EvidenceOf(delivered, "steps", S09).Replace("backend_roots", 0L);
+            SetStep(delivered, "steps", S09, "FAIL", "EXPECTATION_UNMET");
+            delivered.Replace("overall", "FAIL");
+            ResultValidation r = Run(delivered);
+            Check("S08 PASS + S09 FAIL -> overall FAIL", r.Outcome.Ok && r.Overall == Verdict.FAIL
+                && ResultContract.Derive(spec, EvidenceOf(delivered, "steps", S08)) == Verdict.PASS);
+            JsonObject unsynced = PassingResult();
+            EvidenceOf(unsynced, "steps", S09).Replace("ui_jobs_b", JsonNull.Value);
+            SetStep(unsynced, "steps", S09, "NOT_VERIFIED", "EVIDENCE_MISSING");
+            unsynced.Replace("overall", "NOT_VERIFIED");
+            Check("S08 PASS + S09 unmeasured -> NOT_VERIFIED", Run(unsynced).Outcome.Ok && Run(unsynced).Overall == Verdict.NOT_VERIFIED);
+        }
+
+        private static void ApprovalTests()
+        {
+            var o = new Outcome();
+            ApprovalRecord issued = SingleUseApproval.Issue("APPROVAL-TEST-1", o);
+            Check("issue valid id", issued != null && issued.State == SingleUseApproval.Issued && !issued.ConsumedByRunId.HasValue && o.Ok);
+            ApprovalRecord consumed = SingleUseApproval.Consume(issued, RunId, o);
+            Check("first consume binds run", consumed != null && consumed.State == SingleUseApproval.Consumed && consumed.ConsumedByRunId == RunId && o.Ok);
+            Check("issued record unchanged (immutable)", issued.State == SingleUseApproval.Issued);
+            var again = new Outcome();
+            Check("second dispatch cannot consume again", SingleUseApproval.Consume(consumed, RunId + 1, again) == null && again.Has("APPROVAL_ALREADY_CONSUMED"));
+            var same = new Outcome();
+            Check("same run cannot consume again", SingleUseApproval.Consume(consumed, RunId, same) == null && same.Has("APPROVAL_ALREADY_CONSUMED"));
+            var rv = new Outcome();
+            ApprovalRecord revoked = SingleUseApproval.Revoke(issued, rv);
+            var afterRevoke = new Outcome();
+            Check("revoked cannot be consumed", revoked != null && SingleUseApproval.Consume(revoked, RunId, afterRevoke) == null && afterRevoke.Has("APPROVAL_REVOKED"));
+            var revokeConsumed = new Outcome();
+            ApprovalRecord revokedAfterUse = SingleUseApproval.Revoke(consumed, revokeConsumed);
+            Check("consumed can be revoked, keeps run binding", revokedAfterUse != null && revokedAfterUse.State == SingleUseApproval.Revoked && revokedAfterUse.ConsumedByRunId == RunId);
+            var twice = new Outcome();
+            Check("revoked cannot be revoked again", SingleUseApproval.Revoke(revoked, twice) == null && twice.Has("APPROVAL_REVOKED"));
+            var badRun = new Outcome();
+            Check("consume needs a positive run id", SingleUseApproval.Consume(issued, 0, badRun) == null && badRun.Has("RUN_ID_UNKNOWN"));
+            var nullRecord = new Outcome();
+            Check("consume of no record denied", SingleUseApproval.Consume(null, RunId, nullRecord) == null && nullRecord.Has("APPROVAL_ID_INVALID"));
+            foreach (string bad in new[] { null, "", " ", "​", "A​B", "APPROVAL TEST", "승인", "a/b", new string('a', 65) })
+            {
+                var b = new Outcome();
+                Check("invalid approval id rejected: " + (bad == null ? "null" : bad.Length.ToString()), !SingleUseApproval.IsValidId(bad) && SingleUseApproval.Issue(bad, b) == null && b.Has("APPROVAL_ID_INVALID"));
+            }
+            Check("64-char id accepted", SingleUseApproval.IsValidId(new string('a', 64)));
+        }
+
+        // ---- Acceptance gate ------------------------------------------------
+
+        private static ExecutionEvidence Observed()
+        {
+            return new ExecutionEvidence { RunId = RunId, QaCommit = QaSha, MsiSha256 = CandidatePins.MsiSha256.ToUpperInvariant(), MsiSizeBytes = CandidatePins.MsiSizeBytes };
+        }
+
+        private static AcceptanceDecision Accept(JsonObject result, string manifest, GateDecision gate, ExecutionEvidence evidence)
+        {
+            return AcceptanceGate.Evaluate(result == null ? null : JsonText.Write(result), manifest, gate, evidence);
+        }
+
+        private static void AcceptanceTests(string manifestText, string contextText)
+        {
+            GateDecision gate = Trusted(AllowedContext());
+            AcceptanceDecision all = Accept(PassingResult(), manifestText, gate, Observed());
+            Check("all four parts PASS -> ACCEPT", all.Acceptance == Verdict.PASS && all.Product == Verdict.PASS && all.Cleanup == Verdict.PASS
+                && all.Run == Verdict.PASS && all.Msi == Verdict.PASS && all.Outcome.Ok);
+
+            AcceptanceDecision current = AcceptanceGate.Evaluate(JsonText.Write(PassingResult()), manifestText, contextText, Observed());
+            Check("current committed context -> not accepted", current.Acceptance == Verdict.FAIL && current.Run == Verdict.FAIL && current.Outcome.Has("RUN_NOT_AUTHORIZED"));
+            AcceptanceDecision claims = AcceptanceGate.Evaluate(JsonText.Write(PassingResult()), manifestText, JsonText.Write(AllowedContext()), Observed());
+            Check("public path with claims only -> not accepted", claims.Acceptance == Verdict.FAIL && claims.Outcome.Has("RUN_NOT_AUTHORIZED"));
+
+            // Cleanup and product are independent: neither covers the other.
+            JsonObject cleanupFail = PassingResult();
+            ((JsonObject)cleanupFail.Get("cleanup")).Replace("fixtures_restored", false);
+            ((JsonObject)cleanupFail.Get("cleanup")).Replace("verdict", "FAIL");
+            AcceptanceDecision cf = Accept(cleanupFail, manifestText, gate, Observed());
+            Check("product PASS does not cover cleanup FAIL", cf.Product == Verdict.PASS && cf.Cleanup == Verdict.FAIL && cf.Acceptance == Verdict.FAIL && cf.Outcome.Has("CLEANUP_FAIL"));
+            JsonObject cleanupNv = PassingResult();
+            ((JsonObject)cleanupNv.Get("cleanup")).Replace("fixtures_restored", JsonNull.Value);
+            ((JsonObject)cleanupNv.Get("cleanup")).Replace("verdict", "NOT_VERIFIED");
+            AcceptanceDecision cn = Accept(cleanupNv, manifestText, gate, Observed());
+            Check("unmeasured cleanup -> NOT_VERIFIED", cn.Product == Verdict.PASS && cn.Acceptance == Verdict.NOT_VERIFIED);
+
+            JsonObject productFail = PassingResult();
+            EvidenceOf(productFail, "steps", 8).Replace("ui_folder_b", false);
+            SetStep(productFail, "steps", 8, "FAIL", "EXPECTATION_UNMET");
+            productFail.Replace("overall", "FAIL");
+            AcceptanceDecision pf = Accept(productFail, manifestText, gate, Observed());
+            Check("cleanup PASS does not upgrade product FAIL", pf.Cleanup == Verdict.PASS && pf.Product == Verdict.FAIL && pf.Acceptance == Verdict.FAIL && pf.Outcome.Has("PRODUCT_FAIL"));
+            JsonObject productNv = PassingResult();
+            ((JsonObject)productNv.Get("supervisor")).Replace("deadline_exceeded", true);
+            productNv.Replace("overall", "NOT_VERIFIED");
+            Check("product NOT_VERIFIED -> not accepted", Accept(productNv, manifestText, gate, Observed()).Acceptance == Verdict.NOT_VERIFIED);
+            JsonObject invalid = PassingResult();
+            invalid.Replace("overall", "FAIL");
+            AcceptanceDecision inv = Accept(invalid, manifestText, gate, Observed());
+            Check("invalid result document -> NOT_VERIFIED", inv.Acceptance == Verdict.NOT_VERIFIED && inv.Outcome.Has("RESULT_INVALID"));
+            Check("missing result document -> NOT_VERIFIED", Accept(null, manifestText, gate, Observed()).Acceptance == Verdict.NOT_VERIFIED);
+
+            ExecutionEvidence otherMsi = Observed(); otherMsi.MsiSha256 = FlipHex(CandidatePins.MsiSha256);
+            Check("other MSI bytes -> FAIL", Accept(PassingResult(), manifestText, gate, otherMsi).Acceptance == Verdict.FAIL);
+            ExecutionEvidence otherSize = Observed(); otherSize.MsiSizeBytes = CandidatePins.MsiSizeBytes + 1;
+            Check("other MSI size -> FAIL", Accept(PassingResult(), manifestText, gate, otherSize).Msi == Verdict.FAIL);
+            ExecutionEvidence noMsi = Observed(); noMsi.MsiSha256 = null;
+            Check("unmeasured MSI -> NOT_VERIFIED", Accept(PassingResult(), manifestText, gate, noMsi).Acceptance == Verdict.NOT_VERIFIED);
+            Check("invalid manifest -> FAIL", Accept(PassingResult(), Mutate(manifestText, "msi_size_bytes", 1L), gate, Observed()).Msi == Verdict.FAIL);
+
+            ExecutionEvidence otherSha = Observed(); otherSha.QaCommit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            AcceptanceDecision os = Accept(PassingResult(), manifestText, gate, otherSha);
+            Check("executed QA SHA differs from approved -> FAIL", os.Run == Verdict.FAIL && os.Outcome.Has("QA_COMMIT_MISMATCH"));
+            JsonObject resultSha = PassingResult();
+            resultSha.Replace("qa_commit", "cccccccccccccccccccccccccccccccccccccccc");
+            AcceptanceDecision rs = Accept(resultSha, manifestText, gate, Observed());
+            Check("result QA SHA differs from run -> FAIL", rs.Run == Verdict.FAIL && rs.Outcome.Has("RESULT_QA_COMMIT_MISMATCH"));
+            ExecutionEvidence otherRun = Observed(); otherRun.RunId = RunId + 1;
+            Check("evidence from another run -> FAIL", Accept(PassingResult(), manifestText, gate, otherRun).Outcome.Has("RUN_ID_MISMATCH"));
+            ExecutionEvidence noRun = Observed(); noRun.RunId = null;
+            Check("run evidence unmeasured -> NOT_VERIFIED", Accept(PassingResult(), manifestText, gate, noRun).Run == Verdict.NOT_VERIFIED);
+            Check("no evidence -> not accepted", Accept(PassingResult(), manifestText, gate, null).Acceptance == Verdict.NOT_VERIFIED);
+            GateDecision downloadOnly = GateWith("approval", "msi_install_approved", false);
+            Check("install not approved -> FAIL", Accept(PassingResult(), manifestText, downloadOnly, Observed()).Outcome.Has("RUN_NOT_AUTHORIZED"));
+            Check("no gate -> FAIL", Accept(PassingResult(), manifestText, null, Observed()).Run == Verdict.FAIL);
+        }
+
         private static void LatchTests()
         {
             var ids = new[] { "S01_MSI_HASH_SIZE", "S02_RUNNER_INSTALL", "S03_PRODUCT_REGISTRATION" };
@@ -552,7 +757,7 @@ namespace Qa59Installed
             Check("8.3 alias of protected Desktop rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\RUNNER~1\\DESKTO~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
             Check("8.3 alias of protected leaf rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\runneradmin\\DESKTO~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
             Check("8.3 alias of banned segment rejected", SyntheticFixtures.ValidateRoot("C:\\Users\\u\\AppData\\Local\\SORIGU~1\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
-            foreach (string device in new[] { "CON", "nul", "COM1", "LPT9", "aux.txt", "CONIN$" })
+            foreach (string device in new[] { "CON", "nul", "COM1", "LPT9", "aux.txt", "CONIN$", "COM0", "lpt0", "COM¹", "LPT³", "CON .txt", "nul  .log" })
             {
                 Check("device segment rejected: " + device, SyntheticFixtures.ValidateRoot("D:\\a\\" + device + "\\" + Hex, Protected).Has("FIXTURE_ROOT_FORMAT"));
             }

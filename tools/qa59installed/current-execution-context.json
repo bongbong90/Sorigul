@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "kind": "QA59_EXECUTION_CONTEXT",
   "repository": {
     "full_name": null,
@@ -8,6 +8,7 @@
     "visibility": null
   },
   "run": {
+    "run_id": null,
     "ref": null,
     "sha": null,
     "event_name": null,
@@ -16,6 +17,8 @@
   },
   "approval": {
     "approval_id": null,
+    "state": null,
+    "consumed_by_run_id": null,
     "repository_id": null,
     "repository_full_name": null,
     "qa_commit": null,
@@ -31,5 +34,9 @@
     "free_allowance_verified": false,
     "paid_overage_block_verified": false,
     "verified_at": null
+  },
+  "controls": {
+    "approval_consumption_control": null,
+    "budget_control": null
   }
 }

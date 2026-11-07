@@ -214,7 +214,8 @@ namespace Qa59Installed
                 {
                     if (c < 0x20) return null;
                 }
-                string stem = segment.Split('.')[0].ToUpperInvariant();
+                // Win32 ignores spaces before the extension ("CON .txt" is CON).
+                string stem = segment.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
                 if (Array.IndexOf(DeviceNames, stem) >= 0) return null;
             }
             return segments;
@@ -223,12 +224,19 @@ namespace Qa59Installed
         private static readonly string[] DeviceNames =
         {
             "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "COM¹", "COM²", "COM³",
+            "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "LPT¹", "LPT²", "LPT³",
         };
 
         // protectedRoots must be the caller's canonical long-path roots
         // (e.g. GetLongPathName of LOCALAPPDATA\Sorigul, Desktop, Program Files\Sorigul).
+        // String checks cannot see junctions/symlinks. RUNTIME BOUNDARY
+        // REQUIREMENT (later stage): before creating or writing anything, the
+        // runtime must refuse the root if it or any ancestor is a reparse
+        // point, and must compare the final resolved path (handle-based)
+        // against the resolved protected roots again.
         public static Outcome ValidateRoot(string root, IList<string> protectedRoots)
         {
             var outcome = new Outcome();

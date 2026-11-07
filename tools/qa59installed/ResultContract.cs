@@ -31,6 +31,7 @@ namespace Qa59Installed
         public readonly Outcome Outcome = new Outcome();
         public Verdict? Overall;
         public Verdict? Cleanup;
+        public string QaCommit;
 
         // An invalid document proves nothing: it is never PASS.
         public Verdict EffectiveOverall
@@ -42,6 +43,7 @@ namespace Qa59Installed
     public static class ResultContract
     {
         public const string Kind = "QA59_INSTALLED_RESULT";
+        public const long Schema = 2;
         public const int MaxLength = 64 * 1024;
         public const long MaxCount = 4096;
 
@@ -55,7 +57,12 @@ namespace Qa59Installed
             new StepSpec("S05_MAIN_WEBVIEW", EvidenceSpec.True("main_webview_unique"), EvidenceSpec.True("source_unchanged")),
             new StepSpec("S06_IDLE_A", EvidenceSpec.True("fixture_a_valid"), EvidenceSpec.True("ui_folder_a"), EvidenceSpec.True("ui_jobs_a")),
             new StepSpec("S07_BACKEND_OFFLINE", EvidenceSpec.True("backend_only_stopped"), EvidenceSpec.True("descendants_released"), EvidenceSpec.True("ui_offline")),
-            new StepSpec("S08_RESTART_CLICK", EvidenceSpec.Count("native_input_count", 1), EvidenceSpec.True("foreground_hit_target")),
+            // One logical user click = one SendInput down + one up. Requested
+            // events and events SendInput reported as inserted are counted
+            // separately, so a partial or blocked injection cannot pass.
+            // Delivery is not button success: the actual ONLINE recovery is S09.
+            new StepSpec("S08_RESTART_CLICK", EvidenceSpec.Count("user_click_count", 1), EvidenceSpec.Count("sendinput_events_requested", 2),
+                EvidenceSpec.Count("sendinput_events_inserted", 2), EvidenceSpec.True("foreground_hit_target")),
             new StepSpec("S09_ONLINE_SYNC_B", EvidenceSpec.Count("backend_roots", 1), EvidenceSpec.True("owned_listener"), EvidenceSpec.True("ui_folder_b"), EvidenceSpec.True("ui_jobs_b")),
             new StepSpec("S10_NEGATIVE_MATRIX", EvidenceSpec.True("negative_matrix_pass")),
             new StepSpec("S11_TRAY_EXIT", EvidenceSpec.True("tray_exit_online"), EvidenceSpec.True("tray_exit_offline")),
@@ -139,7 +146,8 @@ namespace Qa59Installed
             JsonObject root = Fields.ParseObject(text, outcome);
             if (root == null || !Fields.ExactKeys(root, RootKeys, outcome, "RESULT_")) return result;
 
-            if (!(root.Get("schema") is long) || (long)root.Get("schema") != 1) outcome.Add("RESULT_SCHEMA_MISMATCH");
+            // Schema 2: S08 split into click / requested / inserted input counts.
+            if (!(root.Get("schema") is long) || (long)root.Get("schema") != Schema) outcome.Add("RESULT_SCHEMA_MISMATCH");
             if (!Kind.Equals(root.Get("kind"))) outcome.Add("RESULT_KIND_MISMATCH");
             if (!CandidatePins.ProductHead.Equals(root.Get("product_head"))) outcome.Add("RESULT_PRODUCT_HEAD_MISMATCH");
             if (!CandidatePins.MsiSha256.Equals(root.Get("msi_sha256"))) outcome.Add("RESULT_MSI_MISMATCH");
@@ -161,7 +169,7 @@ namespace Qa59Installed
             Verdict? declared = ParseVerdict(root.Get("overall"));
             if (!declared.HasValue) outcome.Add("RESULT_OVERALL_INVALID");
             else if (declared.Value != worst) outcome.Add("RESULT_OVERALL_MISMATCH");
-            if (outcome.Ok) result.Overall = worst;
+            if (outcome.Ok) { result.Overall = worst; result.QaCommit = qaCommit; }
             return result;
         }
 
