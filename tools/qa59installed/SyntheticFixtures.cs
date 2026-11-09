@@ -35,25 +35,31 @@ namespace Qa59Installed
         public const string DriveExamRootDefault = "2026 제37회 공인중개사 자격시험";
         public const string UnknownEnum = "QA59_UNKNOWN_STATE";
 
-        public static readonly string[] FileStatuses =
+        public static string[] FileStatuses { get { return (string[])filestatuses.Clone(); } }
+        private static readonly string[] filestatuses =
         {
             "WAITING", "PREPARING", "TRANSCRIBING", "SAVING", "VERIFYING", "DONE",
             "FAILED", "STOPPED", "CANCELLED", "CRASHED", "CANCEL_REQUESTED",
         };
-        public static readonly string[] DriveStatuses =
+        public static string[] DriveStatuses { get { return (string[])drivestatuses.Clone(); } }
+        private static readonly string[] drivestatuses =
         {
             "DISABLED", "AUTH_REQUIRED", "CLASSIFICATION_FAILED", "PENDING", "UPLOADING", "DONE", "FAILED",
         };
         // recovery.rs confirm_saved_idle terminal sets.
-        public static readonly string[] TerminalFileStatuses = { "DONE", "FAILED", "STOPPED", "CANCELLED", "CRASHED" };
-        public static readonly string[] IdleDriveStatuses = { "DISABLED", "AUTH_REQUIRED", "CLASSIFICATION_FAILED", "DONE", "FAILED" };
+        public static string[] TerminalFileStatuses { get { return (string[])terminalfilestatuses.Clone(); } }
+        private static readonly string[] terminalfilestatuses = { "DONE", "FAILED", "STOPPED", "CANCELLED", "CRASHED" };
+        public static string[] IdleDriveStatuses { get { return (string[])idledrivestatuses.Clone(); } }
+        private static readonly string[] idledrivestatuses = { "DISABLED", "AUTH_REQUIRED", "CLASSIFICATION_FAILED", "DONE", "FAILED" };
 
-        public static readonly string[] SettingsKeys =
+        public static string[] SettingsKeys { get { return (string[])settingskeys.Clone(); } }
+        private static readonly string[] settingskeys =
         {
             "notifications", "close_behavior", "shutdown", "transcription_folder", "last_course",
             "last_subject", "last_engine", "subject_stage_overrides", "drive_exam_root",
         };
-        public static readonly string[] JobKeys =
+        public static string[] JobKeys { get { return (string[])jobkeys.Clone(); } }
+        private static readonly string[] jobkeys =
         {
             "job_id", "created_at", "updated_at", "status", "folder", "engine", "engine_config",
             "force_retranscribe", "upload_to_drive", "total_files", "done_files", "failed_files",
