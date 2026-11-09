@@ -16,6 +16,22 @@ $common=@('/nologo','/noconfig','/codepage:65001','/warnaserror+','/checked+','/
 $contracts=@(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | Where-Object Name -ne 'ContractTests.cs' | ForEach-Object FullName)
 $runtime=@(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'runtime') -Filter '*.cs' -File | Where-Object Name -ne 'RuntimeTests.cs' | ForEach-Object FullName)
 function Compile([object[]]$arguments) { $messages=& $csc @arguments 2>&1; if($LASTEXITCODE -ne 0){foreach($message in $messages){if([string]$message -match 'CS[0-9]+'){Write-Output $message}};throw 'LOCAL_COMPILE_FAILED'} }
+function BoundedCheck([string]$executable,[string[]]$arguments,[int]$expected=0) {
+    $info=[Diagnostics.ProcessStartInfo]::new($executable,(@($arguments|ForEach-Object {'"'+$_+'"'}) -join ' '))
+    $info.UseShellExecute=$false;$info.CreateNoWindow=$true;$info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true
+    $child=[Diagnostics.Process]::Start($info)
+    $read=$child.StandardOutput.ReadToEndAsync();$errorRead=$child.StandardError.ReadToEndAsync()
+    try {
+        if(-not $child.WaitForExit(15000)){throw 'LOCAL_CHECK_DEADLINE'}
+        if(-not $read.Wait(1000) -or -not $errorRead.Wait(1000)){throw 'LOCAL_CHECK_OUTPUT_DEADLINE'}
+        if($read.Result.Length -gt 4096){throw 'LOCAL_CHECK_OUTPUT_INVALID'}
+        foreach($line in ($read.Result -split "`n")){if($line -match '^WINDOWS11_[A-Z_]+ '){Write-Output $line.Trim()}}
+        if($child.ExitCode -ne $expected){throw 'LOCAL_CHECK_FAILED'}
+    } finally {
+        if(-not $child.HasExited){$child.Kill();if(-not $child.WaitForExit(5000)){throw 'LOCAL_CHECK_RESIDUAL'}}
+        $child.Dispose()
+    }
+}
 function Digest([string]$file) { (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Literal([string]$value) { '@"'+$value.Replace('"','""')+'"' }
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -65,9 +81,10 @@ Compile ($common+$uiRefs+@('/target:exe',('/out:'+(Join-Path $build 'HostedUiCom
 $probeSource=@'
 using System;
 using System.Reflection;
+using System.Windows.Automation;
 using Qa59Installed;
 internal static class GateProbe {
- public static int Main(string[] args) {
+ [STAThread] public static int Main(string[] args) {
   int checks=0;
   foreach(string path in new[]{args[0],args[1]}) {
    var gate=Assembly.LoadFrom(path).GetType("LocalWin11Policy").GetMethod("Verified",BindingFlags.Static|BindingFlags.NonPublic);
@@ -85,6 +102,11 @@ internal static class GateProbe {
    if((bool)pathRule.Invoke(null,new object[]{path,udf}))return 1;
   if(!(bool)pathRule.Invoke(null,new object[]{udf+@"\EBWebView",udf}))return 1;
   Console.WriteLine("WINDOWS11_EXACT_WEBVIEW_PATH checks=5");
+  var shell=AutomationElement.RootElement.FindFirst(TreeScope.Children,new PropertyCondition(AutomationElement.ClassNameProperty,"Shell_TrayWnd"));
+  var locator=Assembly.LoadFrom(args[1]).GetType("InstalledUiWorker").GetMethod("TrayChevron",BindingFlags.Static|BindingFlags.NonPublic);
+  var chevron=shell==null?null:(AutomationElement)locator.Invoke(null,new object[]{shell});
+  if(chevron==null||chevron.Current.ProcessId!=shell.Current.ProcessId||chevron.Current.IsOffscreen||!chevron.Current.IsEnabled)return 1;
+  Console.WriteLine("WINDOWS11_TRAY_CHEVRON_LOCATOR PASS");
   Console.WriteLine("WINDOWS11_LIBRARY_DENY_AND_FIXTURE_GATE checks="+checks);return 0;
  }
 }
@@ -93,20 +115,17 @@ $probePath=Join-Path $build 'GateProbe.cs'; [IO.File]::WriteAllText($probePath,$
 $runtimeDll=Join-Path $build 'Qa59Runtime.dll'
 Compile ($common+@('/target:library',('/out:'+$runtimeDll),('/reference:'+$dll))+$runtime)
 $probeExe=Join-Path $build 'GateProbe.exe'
-Compile ($common+@('/target:exe',('/out:'+$probeExe),('/reference:'+$dll),$probePath))
-& $probeExe $hostExe (Join-Path $build 'InstalledUiWorker.exe') $runtimeDll
-if($LASTEXITCODE -ne 0){throw 'LOCAL_GATE_LEAK'}
+Compile ($common+$uiRefs+@('/target:exe',('/out:'+$probeExe),('/reference:'+$dll),$probePath))
+BoundedCheck $probeExe @($hostExe,(Join-Path $build 'InstalledUiWorker.exe'),$runtimeDll)
 $identitySource='using System; internal static class IdentityProbe { public static int Main(){return LocalWin11Policy.Verified()?0:1;} }'
 $identityPath=Join-Path $build 'IdentityProbe.cs'; [IO.File]::WriteAllText($identityPath,$identitySource,[Text.UTF8Encoding]::new($false))
 $identityExe=Join-Path $build 'IdentityProbe.exe'
 Compile ($common+@('/target:exe',('/out:'+$identityExe),$identityPath,$policyPath))
-& $identityExe
-if($LASTEXITCODE -ne 0){throw 'CURRENT_LOCAL_IDENTITY_UNPROVEN'}
+BoundedCheck $identityExe @()
 $mutantPath=Join-Path $build 'WrongIdentityPolicy.cs'; [IO.File]::WriteAllText($mutantPath,$policy.Replace($sid,'S-1-0-0'),[Text.UTF8Encoding]::new($false))
 $mutantExe=Join-Path $build 'WrongIdentityProbe.exe'
 Compile ($common+@('/target:exe',('/out:'+$mutantExe),$identityPath,$mutantPath))
-& $mutantExe
-if($LASTEXITCODE -ne 1){throw 'IDENTITY_MISMATCH_NOT_BLOCKED'}
+BoundedCheck $mutantExe @() 1
 Write-Output 'WINDOWS11_ACTUAL_IDENTITY_AND_MISMATCH PASS'
 $consumeSource=@'
 using System;
@@ -129,8 +148,7 @@ $consumePolicy=Join-Path $build 'ConsumePolicy.cs'; [IO.File]::WriteAllText($con
 $consumeExe=Join-Path $build 'ConsumeProbe.exe'
 Compile ($common+@('/define:QA59_WIN11_LOCAL_TESTS','/target:exe','/main:ConsumeProbe',('/out:'+$consumeExe),('/reference:'+$dll))+$runtime+@((Join-Path $server 'ProductOwnedJob.cs'),(Join-Path $server 'InstalledServerHarness.cs'),(Join-Path $server 'Windows11Session.cs'),$consumePolicy,$consumePath))
 [IO.File]::WriteAllText($probeApproval,'QA59_WIN11_APPROVED_SINGLE_SESSION',[Text.Encoding]::ASCII)
-& $consumeExe
-if($LASTEXITCODE -ne 0){throw 'SINGLE_CONSUMPTION_FAILED'}
+BoundedCheck $consumeExe @()
 $probeStart=[Diagnostics.ProcessStartInfo]::new($hostExe,'--probe-ui-owner');$probeStart.UseShellExecute=$false;$probeStart.CreateNoWindow=$true
 $parentProbe=[Diagnostics.Process]::Start($probeStart)
 if(-not $parentProbe.WaitForExit(10000)){ $parentProbe.Kill();throw 'UI_PARENT_PROBE_DEADLINE' }

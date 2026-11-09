@@ -55,6 +55,34 @@ internal static class InstalledUiWorker
     private static bool foreground, hit;
     private static int clicks, inserted;
     private static string inputFailure="NONE";
+    internal static AutomationElement TrayChevron(AutomationElement shell)
+    {
+        var legacy=shell.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.AutomationIdProperty,"1502"));
+        if(legacy.Count==1)return legacy[0];
+#if QA59_WIN11_LOCAL_TESTS
+        var modern=shell.FindAll(TreeScope.Descendants,new AndCondition(
+            new PropertyCondition(AutomationElement.ClassNameProperty,"SystemTray.NormalButton"),
+            new PropertyCondition(AutomationElement.AutomationIdProperty,"SystemTrayIcon"),
+            new PropertyCondition(AutomationElement.NameProperty,"숨겨진 아이콘 표시"),
+            new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),
+            new PropertyCondition(AutomationElement.ProcessIdProperty,shell.Current.ProcessId)));
+        if(legacy.Count==0&&modern.Count==1)return modern[0];
+#endif
+        return null;
+    }
+    private static AutomationElement TrayOverflow(AutomationElement desktop,int shellPid)
+    {
+#if QA59_WIN11_LOCAL_TESTS
+        var candidates=desktop.FindAll(TreeScope.Children,new AndCondition(
+            new PropertyCondition(AutomationElement.ProcessIdProperty,shellPid),
+            new OrCondition(new PropertyCondition(AutomationElement.ClassNameProperty,"NotifyIconOverflowWindow"),new PropertyCondition(AutomationElement.ClassNameProperty,"TopLevelWindowForOverflowXamlIsland"))));
+        AutomationElement result=null;
+        foreach(AutomationElement item in candidates)if(!item.Current.IsOffscreen){if(result!=null)return null;result=item;}
+        return result;
+#else
+        return desktop.FindFirst(TreeScope.Children,new PropertyCondition(AutomationElement.ClassNameProperty,"NotifyIconOverflowWindow"));
+#endif
+    }
     private static void Focus(IntPtr window)
     {
         uint unused; uint current=GetCurrentThreadId();
@@ -143,10 +171,10 @@ internal static class InstalledUiWorker
                     AutomationElement icon=icons.Count==1?icons[0]:null;
                     if (icon == null || icon.Current.IsOffscreen)
                     {
-                        var chevron = shell.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "1502"));
+                        var chevron = TrayChevron(shell);
                         if (!Click(chevron, IntPtr.Zero, false)) { Report(false,false,false,false,false,false,0,0,0,false); return 1; }
                         Thread.Sleep(300);
-                        var overflow=desktop.FindFirst(TreeScope.Children,new PropertyCondition(AutomationElement.ClassNameProperty,"NotifyIconOverflowWindow"));
+                        var overflow=TrayOverflow(desktop,shellPid);
                         if(overflow==null||overflow.Current.ProcessId!=shellPid) { Report(false,false,false,false,false,false,0,0,0,false); return 1; }
                         icons=overflow.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,"Sorigul - 대기 중"));
                         icon=icons.Count==1?icons[0]:null;
