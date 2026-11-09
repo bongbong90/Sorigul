@@ -34,18 +34,25 @@ internal sealed class ProductOwnedJob : IDisposable
     private static extern int QueryCommandLine(NativeHandle process,int kind,IntPtr data,int length,out int needed);
     [DllImport("shell32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr CommandLineToArgvW(string command,out int count);
     [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
-    private void VerifyWebview(Item item)
+    internal static bool ExpectedWebviewDataPath(string measured,string environmentRoot)
+    {
+        // WebView2's environment UDF contains the browser's fixed EBWebView
+        // directory. Require this exact path, never an arbitrary descendant.
+        return !string.IsNullOrEmpty(measured)&&string.Equals(Path.GetFullPath(measured),Path.Combine(environmentRoot,"EBWebView"),StringComparison.OrdinalIgnoreCase);
+    }
+    internal static void VerifyWebview(Item item,string webviewPath)
     {
         if(!string.Equals(Path.GetFileName(item.Image),"msedgewebview2.exe",StringComparison.OrdinalIgnoreCase)) return;
-        int needed; QueryCommandLine(item.Handle,60,IntPtr.Zero,0,out needed);
-        if(needed<16 || needed>65536) throw new BoundaryException();
+        int needed; int initial=QueryCommandLine(item.Handle,60,IntPtr.Zero,0,out needed);
+        if(needed<16 || needed>65536) { Console.WriteLine("WIN11_OBSERVER_DENY stage=COMMAND_SIZE native="+initial); throw new BoundaryException(); }
         IntPtr data=Marshal.AllocHGlobal(needed);
         try
         {
             int returned;
-            if(QueryCommandLine(item.Handle,60,data,needed,out returned)!=0) throw new BoundaryException();
+            int status=QueryCommandLine(item.Handle,60,data,needed,out returned);
+            if(status!=0) { Console.WriteLine("WIN11_OBSERVER_DENY stage=COMMAND_READ native="+status); throw new BoundaryException(); }
             int length=unchecked((ushort)Marshal.ReadInt16(data)); IntPtr value=Marshal.ReadIntPtr(data,IntPtr.Size==8?8:4);
-            if(length<=0 || length%2!=0 || value.ToInt64()<data.ToInt64() || value.ToInt64()+length>data.ToInt64()+needed) throw new BoundaryException();
+            if(length<=0 || length%2!=0 || value.ToInt64()<data.ToInt64() || value.ToInt64()+length>data.ToInt64()+needed) { Console.WriteLine("WIN11_OBSERVER_DENY stage=COMMAND_BUFFER native=0"); throw new BoundaryException(); }
             string command=Marshal.PtrToStringUni(value,length/2); int count; IntPtr args=CommandLineToArgvW(command,out count);
             if(args==IntPtr.Zero) throw new BoundaryException();
             try
@@ -57,11 +64,11 @@ internal sealed class ProductOwnedJob : IDisposable
                     const string prefix="--user-data-dir=";
                     if(arg.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))
                     {
-                        if(!string.Equals(Path.GetFullPath(arg.Substring(prefix.Length)),webviewPath,StringComparison.OrdinalIgnoreCase)) throw new BoundaryException();
+                        if(!ExpectedWebviewDataPath(arg.Substring(prefix.Length),webviewPath)) { Console.WriteLine("WIN11_OBSERVER_DENY stage=USER_DATA_PATH_MISMATCH native=0"); throw new BoundaryException(); }
                         matched=true;
                     }
                 }
-                if(!matched) throw new BoundaryException();
+                if(!matched) { Console.WriteLine("WIN11_OBSERVER_DENY stage=USER_DATA_ARGUMENT_MISSING native=0"); throw new BoundaryException(); }
             }
             finally { LocalFree(args); }
         }
@@ -181,7 +188,7 @@ internal sealed class ProductOwnedJob : IDisposable
                     known.Add(pid,item);
                 }
 #if QA59_WIN11_LOCAL_TESTS
-                if(WinProcess.WaitForSingleObject(item.Handle,0)==258) VerifyWebview(item);
+                if(WinProcess.WaitForSingleObject(item.Handle,0)==258) VerifyWebview(item,webviewPath);
 #endif
                 if (WinProcess.WaitForSingleObject(item.Handle,0) == 258) result.Add(item);
             }

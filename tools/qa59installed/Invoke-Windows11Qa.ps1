@@ -79,6 +79,12 @@ internal static class GateProbe {
   var roots=(string[])policy.GetField("ProtectedRoots",BindingFlags.Static|BindingFlags.NonPublic).GetValue(null);
   string sample=@"C:\Users\Public\qa59-scratch-"+new string('0',32)+@"\qa59-fixture-"+new string('1',32);
   if(!SyntheticFixtures.ValidateRoot(sample,roots).Ok)return 1;checks++;
+  var pathRule=Assembly.LoadFrom(args[0]).GetType("ProductOwnedJob").GetMethod("ExpectedWebviewDataPath",BindingFlags.Static|BindingFlags.NonPublic);
+  string udf=@"C:\qa59-scratch-00000000000000000000000000000000\webview";
+  foreach(string path in new[]{udf,udf+@"\other",udf+@"\EBWebView-extra",@"C:\qa59-foreign\EBWebView"})
+   if((bool)pathRule.Invoke(null,new object[]{path,udf}))return 1;
+  if(!(bool)pathRule.Invoke(null,new object[]{udf+@"\EBWebView",udf}))return 1;
+  Console.WriteLine("WINDOWS11_EXACT_WEBVIEW_PATH checks=5");
   Console.WriteLine("WINDOWS11_LIBRARY_DENY_AND_FIXTURE_GATE checks="+checks);return 0;
  }
 }
