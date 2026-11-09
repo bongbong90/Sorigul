@@ -661,7 +661,14 @@ Current recommended personal-use direction:
 - preserve job/results;
 - no infinite automatic restart daemon unless a real need is demonstrated.
 
-Lock and validate the final behavior.
+2026-11-01 user-approved #59 boundary: preserve health-only reconnect and add
+explicit manual Backend restart only after owned exit, an empty supervision job,
+idle saved Jobs/Drive state, and a free port are proved. Block live/unknown work
+and duplicate startup; verify listener ownership and synchronize Settings/Jobs/
+the selected folder. No automatic restart. Offline exit uses the same safety
+evidence and the existing central cleanup path; unknown evidence remains HOLD.
+Source validation and a Draft PR do not establish installed QA or a new Release
+Freeze. #47 PASS and #48 BLOCKED remain separate gates.
 
 ### Workstream 10 — Actual shutdown
 
