@@ -33,7 +33,7 @@ from src.domain.models import (
     ScannedFile,
 )
 from src.services.colab_rendezvous import ColabRendezvousService, RendezvousState
-from src.services.desktop_state import ApplicationEvent, ApplicationEventStore, DesktopCoordinator
+from src.services.desktop_state import ApplicationEvent, ApplicationEventStore, DesktopCoordinator, ShutdownPhase, ShutdownState
 from src.services.drive import (
     DRIVE_SCOPE,
     DriveError,
@@ -219,7 +219,25 @@ def update_settings(req: SettingsPatch):
 
 @router.get("/desktop/shutdown")
 def get_shutdown_state():
-    return desktop_coordinator.state()
+    # An earlier Job can finish uploading after a new Job has started.
+    # Cancel its shutdown request while any transcription/upload is owned;
+    # the next normally completed Job can apply the saved policy again.
+    state = desktop_coordinator.state()
+    guard = get_close_guard()
+    if guard.protect_exit:
+        finishing_job = job_manager.get_job(state.job_id) if state.job_id else None
+        if (
+            guard.activity == "transcription" and guard.job_id == state.job_id
+            and finishing_job is not None and finishing_job.batch_completed
+            and finishing_job.status in (FileStatus.DONE, FileStatus.FAILED)
+            and not drive_service.has_in_flight()
+            and not drive_execution_service.has_pending_work()
+        ):
+            # Its own terminal callback runs just before the runner Future
+            # returns. Hide readiness for that interval, preserving policy.
+            return ShutdownState(phase=ShutdownPhase.INACTIVE, job_id=state.job_id)
+        return desktop_coordinator.cancel_shutdown()
+    return state
 
 
 @router.post("/desktop/shutdown/cancel")

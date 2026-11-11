@@ -199,6 +199,18 @@ class FFmpegAudioSplitter:
             clock=self._clock,
         )
 
+    @staticmethod
+    def _has_audio(path: Path) -> bool:
+        size = path.stat().st_size
+        if size >= 2048:
+            return True
+        # A small file can contain real audio, or only ID3 headers when
+        # source duration includes encoder padding past a chunk boundary.
+        # Keep short decodable MP3s, never send a header-only tail to Whisper.
+        from src.services.audio_metadata import AudioMetadataService
+        duration = AudioMetadataService().duration_seconds(path) if size else None
+        return duration is not None and duration > 0
+
     def split(
         self,
         source_path: Path,
@@ -239,7 +251,7 @@ class FFmpegAudioSplitter:
                     token.raise_if_requested()
                 start = index * chunk_seconds
                 chunk_duration = min(chunk_seconds, max(0.0, duration - start))
-                if chunk_duration < 1.0:
+                if chunk_duration <= 0.0:
                     continue
                 path = self._temp_dir / f"chunk-{index:05d}.mp3"
                 command = [
@@ -260,7 +272,9 @@ class FFmpegAudioSplitter:
                     str(path),
                 ]
                 self._run(command, token)
-                if path.stat().st_size < 2048:
+                # Short MP3s (including the tail after a 300s boundary) can
+                # be smaller than 2 KiB and still contain valid speech.
+                if not self._has_audio(path):
                     path.unlink(missing_ok=True)
                     continue
                 chunks.append(AudioChunk(index, path, float(start), chunk_duration))
@@ -301,7 +315,7 @@ class FFmpegAudioSplitter:
             self._run(command, token)
 
             for path in sorted(self._temp_dir.glob("chunk-*.mp3")):
-                if path.stat().st_size < 2048:
+                if not self._has_audio(path):
                     path.unlink(missing_ok=True)
                     continue
 

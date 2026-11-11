@@ -207,15 +207,36 @@ class GoogleDriveClient:
     def _escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace("'", "\\'")
 
+    def _find_unique(self, query: str) -> Optional[str]:
+        # Drive permits duplicate names, including folders. Never pick an
+        # arbitrary existing object to update or an arbitrary upload subtree.
+        found = None
+        page_token = None
+        while True:
+            options = dict(q=query, fields="nextPageToken,files(id,name)", pageSize=2)
+            if page_token:
+                options["pageToken"] = page_token
+            page = self.service.files().list(**options).execute()
+            for item in page.get("files", []):
+                if found is not None:
+                    raise DriveError(
+                        "DRIVE_TARGET_AMBIGUOUS",
+                        "Google Drive에 같은 이름의 대상이 여러 개 있습니다. 중복을 확인한 뒤 다시 시도해 주세요.",
+                    )
+                found = item["id"]
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                return found
+
     def find_or_create_folder(self, parent_id: str, name: str) -> str:
         query = (
             f"'{self._escape(parent_id)}' in parents and "
             f"name = '{self._escape(name)}' and "
             "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         )
-        files = self.service.files().list(q=query, fields="files(id,name)", pageSize=10).execute().get("files", [])
-        if files:
-            return files[0]["id"]
+        existing = self._find_unique(query)
+        if existing is not None:
+            return existing
         created = self.service.files().create(
             body={
                 "name": name,
@@ -229,10 +250,10 @@ class GoogleDriveClient:
     def find_file(self, parent_id: str, name: str) -> Optional[str]:
         query = (
             f"'{self._escape(parent_id)}' in parents and "
-            f"name = '{self._escape(name)}' and trashed = false"
+            f"name = '{self._escape(name)}' and "
+            "mimeType != 'application/vnd.google-apps.folder' and trashed = false"
         )
-        files = self.service.files().list(q=query, fields="files(id,name)", pageSize=10).execute().get("files", [])
-        return files[0]["id"] if files else None
+        return self._find_unique(query)
 
     def create_file(self, parent_id: str, name: str, local_path: Path) -> str:
         from googleapiclient.http import MediaFileUpload
@@ -739,6 +760,10 @@ class DriveUploadService:
         self.event_callback = event_callback
         self._in_flight: set[Tuple[str, str]] = set()
         self._in_flight_lock = threading.Lock()
+        # Manual retries and automatic uploads from different Jobs can resolve
+        # to the same Drive destination. Serialize lookup/create within this
+        # app so both cannot observe a missing folder/file and create copies.
+        self._upload_lock = threading.Lock()
 
     def upload(self, job_id: str, file_id: str) -> DriveFileState:
         key = (job_id, file_id)
@@ -749,7 +774,8 @@ class DriveUploadService:
                 )
             self._in_flight.add(key)
         try:
-            return self._upload(job_id, file_id)
+            with self._upload_lock:
+                return self._upload(job_id, file_id)
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(key)
@@ -843,6 +869,7 @@ class DriveUploadService:
                 DriveStatus.FAILED,
                 DRIVE_NETWORK_FAILURE_MESSAGE
                 if _is_network_failure(exc)
+                else exc.user_message if isinstance(exc, DriveError)
                 else "Google Drive 파일 업로드에 실패했습니다.",
                 remote_ids,
             )
@@ -897,7 +924,6 @@ class DriveExecutionService:
     transcription runner, so Drive network I/O can never hold a
     transcription completion. One task per (job, file) at a time; every
     task's failure is contained here and only ever recorded as Drive state.
-    A single worker keeps tasks FIFO, which `after_pending_uploads` relies on.
     """
 
     def __init__(self, upload_service: DriveUploadService, max_workers: int = 1):
@@ -931,13 +957,29 @@ class DriveExecutionService:
         """Runs ``callback`` once every upload already scheduled for this Job
         has finished (inline when there is none)."""
         with self._lock:
-            pending = any(
-                key[0] == job_id and not future.done() for key, future in self._futures.items()
-            )
-            if pending:
-                self._executor.submit(self._contain, callback)
-                return
-        self._contain(callback)
+            pending = [
+                future for key, future in self._futures.items()
+                if key[0] == job_id and not future.done()
+            ]
+        if not pending:
+            self._contain(callback)
+            return
+        # A FIFO barrier can run before an earlier upload completes when the
+        # executor has multiple workers. Observe completion of the actual
+        # Futures instead, without occupying (or deadlocking) a worker.
+        remaining = len(pending)
+        completion_lock = threading.Lock()
+
+        def finished(_future):
+            nonlocal remaining
+            with completion_lock:
+                remaining -= 1
+                last = remaining == 0
+            if last:
+                self._contain(callback)
+
+        for future in pending:
+            future.add_done_callback(finished)
 
     def _run(self, job_id: str, file_id: str):
         try:
