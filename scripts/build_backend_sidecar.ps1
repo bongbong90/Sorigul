@@ -12,6 +12,24 @@
 
 $ErrorActionPreference = "Stop"
 $SelfTestTimeoutSeconds = 300
+$CoreArtifactSizeLimitMiB = 250 # First-split regression ceiling, not a final product contract.
+$CoreSidecarSizeLimitBytes = $CoreArtifactSizeLimitMiB * 1MB
+
+function Resolve-TrustedTaskkill {
+    # Resolve from the OS-backed system directory only; never PATH or env vars.
+    $SystemDirectory = [System.Environment]::SystemDirectory
+    if ([string]::IsNullOrWhiteSpace($SystemDirectory) -or
+        -not [System.IO.Path]::IsPathRooted($SystemDirectory) -or
+        -not (Test-Path -LiteralPath $SystemDirectory -PathType Container)) {
+        throw "TRUSTED_SYSTEM_DIRECTORY_UNAVAILABLE"
+    }
+    $TaskkillPath = Join-Path $SystemDirectory "taskkill.exe"
+    if (-not [System.IO.Path]::IsPathRooted($TaskkillPath) -or
+        -not (Test-Path -LiteralPath $TaskkillPath -PathType Leaf)) {
+        throw "TRUSTED_TASKKILL_UNAVAILABLE"
+    }
+    return $TaskkillPath
+}
 
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
@@ -143,11 +161,7 @@ if ($UnstagedTrackedDirty -ne 0 -or $StagedTrackedDirty -ne 0) {
 }
 
 Write-Step "Installing/verifying backend + packaging requirements"
-& $VenvPython -m pip install --no-cache-dir -r "tools\requirements-torch-cuda.txt"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "backend\requirements.txt"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $VenvPython -m pip install --no-cache-dir -r "backend\requirements-whisper.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "tools\requirements-packaging.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -164,45 +178,6 @@ try {
     New-Item -ItemType Directory -Path $DistDir | Out-Null
     New-Item -ItemType Directory -Path $CandidateDir | Out-Null
 
-    Write-Step "Validating CUDA release runtime before PyInstaller"
-    $CudaPreflight = @'
-import torch
-
-EXPECTED_TORCH = "2.13.0+cu130"
-EXPECTED_CUDA = "13.0"
-
-print("torch.__version__ =", torch.__version__)
-print("torch.version.cuda =", torch.version.cuda)
-print("torch.cuda.is_available =", torch.cuda.is_available())
-print("torch.cuda.device_count =", torch.cuda.device_count())
-if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-    print("torch.cuda.get_device_name(0) =", torch.cuda.get_device_name(0))
-
-if torch.__version__ != EXPECTED_TORCH or torch.version.cuda != EXPECTED_CUDA:
-    raise SystemExit(41)
-if torch.version.cuda is None or not torch.cuda.is_available() or torch.cuda.device_count() < 1:
-    raise SystemExit(42)
-'@
-    $CudaPreflightId = [guid]::NewGuid().ToString("N")
-    $CudaPreflightPath = Join-Path $TempRoot "Sorigul_CudaPreflight_$CudaPreflightId.py"
-    $CudaPreflightExit = $null
-    try {
-        [System.IO.File]::WriteAllText(
-            $CudaPreflightPath,
-            $CudaPreflight,
-            (New-Object System.Text.UTF8Encoding($false))
-        )
-        & $VenvPython $CudaPreflightPath
-        $CudaPreflightExit = $LASTEXITCODE
-    } finally {
-        if (Test-Path -LiteralPath $CudaPreflightPath) {
-            Remove-Item -LiteralPath $CudaPreflightPath -Force
-        }
-    }
-    if ($CudaPreflightExit -eq 41) { throw "CUDA_RELEASE_VARIANT_MISMATCH" }
-    if ($CudaPreflightExit -eq 42) { throw "CUDA_RELEASE_RUNTIME_UNAVAILABLE" }
-    if ($CudaPreflightExit -ne 0) { throw "CUDA_RELEASE_PREFLIGHT_FAILED" }
-
     Write-Step "Running PyInstaller into isolated current-run output"
     & $VenvPython -m PyInstaller --clean --noconfirm `
         --distpath $DistDir `
@@ -215,6 +190,35 @@ if torch.version.cuda is None or not torch.cuda.is_available() or torch.cuda.dev
     $BuiltExe = Join-Path $DistDir "sorigul-backend.exe"
     if (-not (Test-Path -LiteralPath $BuiltExe -PathType Leaf)) {
         throw "Expected build output not found: $BuiltExe"
+    }
+    $BuiltExeSize = (Get-Item -LiteralPath $BuiltExe).Length
+    if ($BuiltExeSize -gt $CoreSidecarSizeLimitBytes) {
+        throw "CORE_SIDECAR_SIZE_REGRESSION: $BuiltExeSize bytes"
+    }
+    Write-Step "Checking Core archive for Local-only dependencies"
+    $CoreArchiveInventory = @(
+        & $VenvPython -m PyInstaller.utils.cliutils.archive_viewer -l $BuiltExe 2>&1
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "CORE_ARCHIVE_INVENTORY_FAILED"
+    }
+    $CoreArchiveText = $CoreArchiveInventory -join "`n"
+    $ForbiddenCorePatterns = @(
+        "torch",
+        "cuda",
+        "torch_cuda",
+        "cublas",
+        "cudnn",
+        "cufft",
+        "cusparse",
+        "cusolver",
+        "(^|[\\/., ])whisper($|[\\/., ])"
+    )
+    $CoreArchiveViolations = @(
+        $ForbiddenCorePatterns | Where-Object { $CoreArchiveText -match $_ }
+    )
+    if ($CoreArchiveViolations.Count -ne 0) {
+        throw "CORE_ARCHIVE_LOCAL_RUNTIME_DEPENDENCY: $($CoreArchiveViolations -join ', ')"
     }
     $CandidateExe = Join-Path $CandidateDir "sorigul-backend.exe"
     Copy-Item -LiteralPath $BuiltExe -Destination $CandidateExe
@@ -281,6 +285,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         Remove-Item -LiteralPath $SelfTestLog -Force
     }
 
+    $TaskkillPath = Resolve-TrustedTaskkill
     Write-Step "Running isolated candidate self-test (timeout: $SelfTestTimeoutSeconds seconds)"
     $SelfTestProcess = Start-Process `
         -FilePath $CandidateExe `
@@ -299,7 +304,7 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
     }
     if ($SelfTestTimedOut) {
         Write-Error "PACKAGED_SELFTEST_TIMEOUT" -ErrorAction Continue
-        & taskkill.exe /PID $SelfTestProcess.Id /T /F | Out-Host
+        & $TaskkillPath /PID $SelfTestProcess.Id /T /F | Out-Host
         $TaskKillExit = $LASTEXITCODE
         $Stopped = $SelfTestProcess.WaitForExit(10000)
         if ($TaskKillExit -ne 0 -or -not $Stopped) {
@@ -324,11 +329,6 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         "fastapi_app_import",
         "uvicorn_import",
         "google_drive_runtime_import",
-        "whisper_import",
-        "torch_import",
-        "torch_cuda_build",
-        "torch_cuda_available",
-        "torch_cuda_compute",
         "bundled_ffmpeg_execution",
         "audio_metadata_service_import",
         "runtime_path_initialization"
@@ -358,19 +358,9 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
 
     $CandidateExeMetadata = Get-FileMetadata $CandidateExe
     $CandidateFfmpegMetadata = Get-FileMetadata $CandidateFfmpeg
-    $TorchRequirement = (
-        Get-Content -LiteralPath (Join-Path $RepoRoot "tools\requirements-torch-cuda.txt") |
-        Where-Object { $_ -match '^torch==' } |
-        Select-Object -First 1
-    )
-    if ([string]::IsNullOrWhiteSpace($TorchRequirement)) {
-        throw "BUILD_MANIFEST_TORCH_REQUIREMENT_MISSING"
-    }
     $CriticalInputs = [ordered]@{}
     $CriticalInputPaths = [ordered]@{
-        requirements_torch_cuda = "tools\requirements-torch-cuda.txt"
         backend_requirements = "backend\requirements.txt"
-        whisper_requirements = "backend\requirements-whisper.txt"
         packaging_requirements = "tools\requirements-packaging.txt"
         pyinstaller_spec = "backend\packaging\sorigul_backend.spec"
     }
@@ -383,18 +373,35 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         source_head = $SourceHead
         generated_at_utc = [DateTime]::UtcNow.ToString("o")
         tracked_tree_clean = $true
-        torch_requirement = $TorchRequirement
-        expected_cuda = "13.0"
+        core_sidecar_size_limit_mib = $CoreArtifactSizeLimitMiB
         sidecar_size = $CandidateExeMetadata.size
         sidecar_sha256 = $CandidateExeMetadata.sha256
         ffmpeg_size = $CandidateFfmpegMetadata.size
         ffmpeg_sha256 = $CandidateFfmpegMetadata.sha256
         release_input_sha256 = $CriticalInputs
     }
+    $ManifestJson = ($Manifest | ConvertTo-Json -Depth 4) + "`n"
+    try {
+        $RoundTrippedManifest = $ManifestJson | ConvertFrom-Json
+    } catch {
+        throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
+    }
+    if (
+        -not (
+            $RoundTrippedManifest.core_sidecar_size_limit_mib -is [int] -or
+            $RoundTrippedManifest.core_sidecar_size_limit_mib -is [long]
+        ) -or
+        $RoundTrippedManifest.core_sidecar_size_limit_mib -ne $CoreArtifactSizeLimitMiB -or
+        -not ($RoundTrippedManifest.source_head -is [string]) -or
+        $RoundTrippedManifest.source_head -cne $SourceHead
+    ) {
+        throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
+    }
+
     $CandidateManifest = Join-Path $CandidateDir "sorigul-build-manifest.json"
     [System.IO.File]::WriteAllText(
         $CandidateManifest,
-        ($Manifest | ConvertTo-Json -Depth 4) + "`n",
+        $ManifestJson,
         (New-Object System.Text.UTF8Encoding($false))
     )
     if (-not (Test-Path -LiteralPath $CandidateManifest -PathType Leaf)) {

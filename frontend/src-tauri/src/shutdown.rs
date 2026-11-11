@@ -12,14 +12,27 @@ pub trait ShutdownExecutor: Send + Sync {
 /// command line.
 pub struct RealShutdownExecutor;
 
+/// `System32\shutdown.exe /s /t 0` by trusted absolute path (#122); never
+/// resolved through `PATH`. Built separately so tests inspect it unexecuted.
+#[cfg(target_os = "windows")]
+fn shutdown_command() -> Result<std::process::Command, String> {
+    use crate::windows_system::SystemUtility;
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let executable = SystemUtility::Shutdown
+        .path()
+        .map_err(|err| format!("SHUTDOWN_SPAWN_FAILED: {err}"))?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .args(["/s", "/t", "0"])
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
+}
+
 impl ShutdownExecutor for RealShutdownExecutor {
     #[cfg(target_os = "windows")]
     fn execute(&self) -> Result<(), String> {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let status = std::process::Command::new("shutdown.exe")
-            .args(["/s", "/t", "0"])
-            .creation_flags(CREATE_NO_WINDOW)
+        let status = shutdown_command()?
             .status()
             .map_err(|err| format!("SHUTDOWN_SPAWN_FAILED: {err}"))?;
         if status.success() {
@@ -63,6 +76,20 @@ impl ShutdownGate {
         executor.execute()
     }
 
+    /// Recheck all work at the native boundary: a stale ready event from an
+    /// earlier Job must never shut down a later transcription/Drive upload.
+    pub fn trigger_guarded<E: ShutdownExecutor>(
+        &self,
+        report: Result<crate::close_guard::GuardReport, String>,
+        executor: &E,
+    ) -> Result<(), String> {
+        match report {
+            Ok(crate::close_guard::GuardReport::Idle) => self.trigger(executor),
+            Ok(crate::close_guard::GuardReport::Active(_)) => Err("SHUTDOWN_WORK_ACTIVE".into()),
+            Err(_) => Err("SHUTDOWN_WORK_UNKNOWN".into()),
+        }
+    }
+
     pub fn reset(&self) {
         self.executed.store(false, Ordering::SeqCst);
     }
@@ -89,6 +116,30 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn active_or_unknown_work_never_executes_or_consumes_shutdown_gate() {
+        use crate::close_guard::{ActiveWork, GuardReport};
+        let gate = ShutdownGate::new();
+        let executor = CountingExecutor::default();
+        for report in [
+            Ok(GuardReport::Active(ActiveWork::Drive)),
+            Ok(GuardReport::Active(ActiveWork::Transcription {
+                current_file: None,
+                progress: None,
+            })),
+            Err("backend unavailable".into()),
+        ] {
+            assert!(gate.trigger_guarded(report, &executor).is_err());
+            assert!(!gate.has_executed());
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        }
+        gate.trigger_guarded(Ok(GuardReport::Idle), &executor)
+            .unwrap();
+        gate.trigger_guarded(Ok(GuardReport::Idle), &executor)
+            .unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -134,5 +185,23 @@ mod tests {
     fn never_triggered_gate_has_not_executed() {
         let gate = ShutdownGate::new();
         assert!(!gate.has_executed());
+    }
+
+    /// Inspects the command only -- it is never spawned (#58 gate).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shutdown_command_uses_trusted_system32_path_and_fixed_args() {
+        use crate::windows_system::SystemUtility;
+        let command = shutdown_command().unwrap();
+        let program = std::path::Path::new(command.get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(program, SystemUtility::Shutdown.path().unwrap());
+        assert!(program
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .unwrap()
+            .eq_ignore_ascii_case("System32"));
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["/s", "/t", "0"]);
     }
 }

@@ -7,10 +7,12 @@
 export type Stage = '1차' | '2차'
 
 // CORE_WORKFLOW_REFINEMENT_PLAN.md D16 -- exact, trimmed subject strings only.
+// #192 permits only the exact 공인중개사법/중개사법 pair.
 export const KNOWN_SUBJECT_STAGE: Record<string, Stage> = {
   부동산학개론: '1차',
   민법: '1차',
   공인중개사법: '2차',
+  중개사법: '2차',
   부동산공법: '2차',
   부동산공시법: '2차',
   부동산세법: '2차',
@@ -44,6 +46,22 @@ export function validateClassificationText(raw: string, fieldLabel: string): Cla
     return { value: trimmed, error: `${fieldLabel}은(는) 마침표(.)로 끝날 수 없습니다.` }
   }
   return { value: trimmed }
+}
+
+export interface WeekValidation {
+  value?: number
+  error?: string
+}
+
+// #180 manual week: digits only ("1", not "1주차"), a positive safe integer.
+// Mirrors backend validate_manual_week, which re-validates independently.
+export function validateWeekInput(raw: string): WeekValidation {
+  const trimmed = raw.trim()
+  if (!trimmed) return { error: '주차를 입력해 주세요.' }
+  if (!/^[0-9]+$/.test(trimmed)) return { error: '주차는 숫자만 입력해 주세요. (예: 1)' }
+  const value = Number(trimmed)
+  if (!Number.isSafeInteger(value) || value < 1) return { error: '주차는 1 이상의 정수로 입력해 주세요.' }
+  return { value }
 }
 
 export function knownStageFor(subject: string): Stage | undefined {

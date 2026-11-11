@@ -1,0 +1,54 @@
+/* Completion toast window (Issue #110) -- fixed 360x172 borderless window. */
+
+.completion-toast {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-compact);
+  height: 100svh;
+  padding: var(--space-component);
+  overflow: hidden;
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border-strong);
+  user-select: none;
+}
+
+.completion-toast-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-compact);
+  color: var(--color-text-secondary);
+}
+
+.completion-toast-icon {
+  width: var(--icon-size-small);
+  height: var(--icon-size-small);
+  stroke-width: var(--icon-stroke-width);
+  color: var(--color-status-done-text);
+}
+
+.completion-toast-title,
+.completion-toast-message,
+.completion-toast-error {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.completion-toast-message {
+  color: var(--color-text-secondary);
+}
+
+.completion-toast-error {
+  color: var(--color-status-failed-text);
+}
+
+.completion-toast-actions {
+  display: flex;
+  gap: var(--space-compact);
+  margin-top: auto;
+}
+
+.completion-toast-actions .btn {
+  flex: 1;
+}

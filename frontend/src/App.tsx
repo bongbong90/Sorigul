@@ -3,10 +3,12 @@ import { AppShell } from './components/layout/AppShell'
 import type { NavigationId } from './components/layout/AppShell'
 import { useCloseBehaviorSync } from './hooks/useCloseBehaviorSync'
 import { useDesktopNotifications } from './hooks/useDesktopNotifications'
+import { useTrayProgress } from './hooks/useTrayProgress'
 import { FoldersPage } from './pages/FoldersPage'
 import { LogPage } from './pages/LogPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { TranscriptionPage } from './pages/TranscriptionPage'
+import type { EngineConnection } from './components/transcription/EngineSection'
 import { retrySidecarStartup, watchSidecarStatus, type SidecarStatus } from './lib/native'
 
 const pageTitles: Record<NavigationId, string> = {
@@ -33,8 +35,15 @@ function pageFromPath(pathname: string): NavigationId {
 function App() {
   const [activePage, setActivePage] = useState<NavigationId>(() => pageFromPath(window.location.pathname))
   const [sidecarStatus, setSidecarStatus] = useState<SidecarStatus | null>(null)
+  const [engine, setEngine] = useState<EngineConnection['engine']>('local_whisper')
+  const [connectedBaseUrl, setConnectedBaseUrl] = useState<string | null>(null)
+  const connection: EngineConnection = {
+    engine, connectedBaseUrl, onBaseUrlChange: setConnectedBaseUrl,
+    onChangeEngine: (value) => { setEngine(value); if (value === 'local_whisper') setConnectedBaseUrl(null) },
+  }
   useDesktopNotifications()
   useCloseBehaviorSync()
+  useTrayProgress()
 
   useEffect(() => {
     const handlePopState = () => setActivePage(pageFromPath(window.location.pathname))
@@ -67,10 +76,10 @@ function App() {
   }
 
   const page = {
-    transcription: <TranscriptionPage />,
+    transcription: null,
     log: <LogPage />,
     folders: <FoldersPage />,
-    settings: <SettingsPage />,
+    settings: <SettingsPage connection={connection} />,
   }[activePage]
 
   return (
@@ -81,6 +90,9 @@ function App() {
       sidecarStatus={sidecarStatus}
       onRetrySidecar={() => void retrySidecarStartup()}
     >
+      <div hidden={activePage !== 'transcription'}>
+        <TranscriptionPage active={activePage === 'transcription'} connection={connection} onOpenSettings={() => handleNavigate('settings')} />
+      </div>
       {page}
     </AppShell>
   )

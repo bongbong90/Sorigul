@@ -306,7 +306,7 @@ def test_job_create_modes(tmp_path, test_dir):
     # CONTINUE_ORIGINAL resolution -- otherwise Job creation is blocked
     # (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
     req1 = CreateJobRequest(
-        folder=str(d), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법",
+        folder=str(d), file_ids=[], scope="all_incomplete", course="개념완성", subject="민법", week=1,
         file_resolutions={"no_srt": "CONTINUE_ORIGINAL", "invalid_json": "CONTINUE_ORIGINAL"},
     )
     job1 = create_job(req1)
@@ -317,7 +317,7 @@ def test_job_create_modes(tmp_path, test_dir):
 
     # selected mode
     req2 = CreateJobRequest(
-        folder=str(d), file_ids=["invalid_json"], scope="selected", course="개념완성", subject="민법",
+        folder=str(d), file_ids=["invalid_json"], scope="selected", course="개념완성", subject="민법", week=1,
         file_resolutions={"invalid_json": "CONTINUE_ORIGINAL"},
     )
     job2 = create_job(req2)
