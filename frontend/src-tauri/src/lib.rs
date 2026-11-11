@@ -183,8 +183,13 @@ fn set_close_behavior(state: State<AppState>, behavior: String) {
 /// Only meaningful once the backend has reported `ready_to_shutdown`.
 /// Idempotent: a duplicate/stale call after the first is a silent no-op.
 #[tauri::command]
-fn native_shutdown(state: State<AppState>) -> Result<(), String> {
-    state.shutdown_gate.trigger(&RealShutdownExecutor)
+async fn native_shutdown(state: State<'_, AppState>) -> Result<(), String> {
+    let report = tauri::async_runtime::spawn_blocking(|| fetch_close_guard(&close_guard_url()))
+        .await
+        .map_err(|_| "SHUTDOWN_WORK_UNKNOWN".to_string())?;
+    state
+        .shutdown_gate
+        .trigger_guarded(report, &RealShutdownExecutor)
 }
 
 /// Re-arms the shutdown gate once the backend state has left the

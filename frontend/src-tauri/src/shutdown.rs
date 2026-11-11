@@ -76,6 +76,20 @@ impl ShutdownGate {
         executor.execute()
     }
 
+    /// Recheck all work at the native boundary: a stale ready event from an
+    /// earlier Job must never shut down a later transcription/Drive upload.
+    pub fn trigger_guarded<E: ShutdownExecutor>(
+        &self,
+        report: Result<crate::close_guard::GuardReport, String>,
+        executor: &E,
+    ) -> Result<(), String> {
+        match report {
+            Ok(crate::close_guard::GuardReport::Idle) => self.trigger(executor),
+            Ok(crate::close_guard::GuardReport::Active(_)) => Err("SHUTDOWN_WORK_ACTIVE".into()),
+            Err(_) => Err("SHUTDOWN_WORK_UNKNOWN".into()),
+        }
+    }
+
     pub fn reset(&self) {
         self.executed.store(false, Ordering::SeqCst);
     }
@@ -102,6 +116,30 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn active_or_unknown_work_never_executes_or_consumes_shutdown_gate() {
+        use crate::close_guard::{ActiveWork, GuardReport};
+        let gate = ShutdownGate::new();
+        let executor = CountingExecutor::default();
+        for report in [
+            Ok(GuardReport::Active(ActiveWork::Drive)),
+            Ok(GuardReport::Active(ActiveWork::Transcription {
+                current_file: None,
+                progress: None,
+            })),
+            Err("backend unavailable".into()),
+        ] {
+            assert!(gate.trigger_guarded(report, &executor).is_err());
+            assert!(!gate.has_executed());
+            assert_eq!(executor.calls.load(Ordering::SeqCst), 0);
+        }
+        gate.trigger_guarded(Ok(GuardReport::Idle), &executor)
+            .unwrap();
+        gate.trigger_guarded(Ok(GuardReport::Idle), &executor)
+            .unwrap();
+        assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
