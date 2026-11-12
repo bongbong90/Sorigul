@@ -52,6 +52,6 @@ Greenfield implementation, Legacy behavioral parity.
 - fresh lightweight current-HEAD build/install과 native integration
 - real Local audio 및 안전하게 확인된 zero-cost Colab/Drive validation
 - recovery와 승인된 shutdown 검증
-- #114 final Study Workflow Regression과 bottom-up merge closeout
+- #114 final Study Workflow Regression과 single consolidated integration PR merge closeout
 
 실행 순서와 일정은 [`SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md`](SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md)를 따른다.

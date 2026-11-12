@@ -55,6 +55,27 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - MP3/TXT/JSON/SRT collision을 인식한다.
 - next available lesson allocation과 safe same-stem bundle rename/rollback을 유지한다.
 
+#### Manual week and Eduwill no-week normalization (#180)
+
+- Canonical filename은 `{과정명}_{과목명}_{N주차}_{M강}`이다.
+- 사용자는 과정명 + 과목명 + 주차를 입력한다. 주차는 1 이상의 정수이며 server-side에서 검증한다.
+- 주차는 `RuntimeSettings`에 persist하지 않는다. 실제 folder 변경 시 입력값을 지운다.
+- Legacy week/lesson detection precedence는 보존한다: `[N-M]` bracket → `N주차 M강` → `[N주차]`/`N주차` week only. leading `N강`은 course-wide counter이며 주차 내 lesson이 아니다. (#124)
+- source filename에 명시적인 주차가 없고 standalone global `N강` counter가 정확히 하나만 있는 Eduwill형 파일은:
+  - `N강`을 주차로 해석하지 않는다.
+  - `N강`을 주차 내 lesson으로 해석하지 않는다.
+  - 사용자가 입력한 주차를 사용한다.
+  - 해당 주차에서 first/next available lesson을 배정한다.
+- source explicit week == manual week이면 기존 동작과 동일하다.
+- source explicit week != manual week이면:
+  - silent overwrite를 금지한다.
+  - `WEEK_MISMATCH`로 explicit review를 요구한다.
+  - 사용자가 명시적으로 선택해야만 typed week(과정명 + 과목명 + manual week)로 rename한다.
+- `CONTINUE_ORIGINAL`:
+  - unresolved classification으로 원래 이름을 유지한 채 Local 전사는 가능하다.
+  - 해당 run의 Drive upload는 강제 OFF다.
+  - 계속 진행한 `WEEK_MISMATCH`는 week/lesson을 확정된 metadata로 기록하지 않는다.
+
 ### Job and recovery
 
 - `STOPPED`, `CANCELLED`, `CRASHED`를 구분한다.
@@ -137,7 +158,7 @@ managed folder로 MP3를 import, copy 또는 move하는 기능은 제거한다. 
 
 ### E. Course and subject
 
-Legacy fixed detection/dropdown primary flow 대신 course와 subject를 user free-text로 입력한다. week/lesson은 filename에서 감지한다.
+Legacy fixed detection/dropdown primary flow 대신 course와 subject를 user free-text로 입력한다. 주차는 사용자가 입력하고(persist 안 함), filename의 명시적 week/lesson 감지는 Legacy precedence대로 유지한다. 상세 규칙은 §4 Filename의 #180 계약을 따른다.
 
 ### F. Drive classification
 
@@ -208,6 +229,8 @@ Manifest ownership도 이 split-runtime 계약에 고정한다.
 
 Historical pre-split Core torch metadata acceptance는 현재 manifest ownership을 override하지 않는다. stale gate를 만족시키기 위해 Local-only metadata를 Core/MSI에 복구하지 않는다.
 
+Local Runtime 자체의 크기(약 2GB)는 현재 lightweight 계약 위반이 아니다. 현재 release blocker는 Core/MSI heavy payload exclusion과 Core/MSI `<= 250 MiB`뿐이다. #169 Local Runtime size optimization은 **OPEN / NON-BLOCKING / POST-DEADLINE OPTIMIZATION**이며 Freeze, #113, #114 또는 main merge의 blocker가 아니다.
+
 ## 8. Zero-cost contract
 
 다음을 자동 선택, 구매, 활성화 또는 fallback으로 사용하지 않는다.
@@ -228,13 +251,34 @@ Target: **`STUDY USE READY = YES`**
 
 Public release는 project goal이 아니다. 일정, acceptance와 final workflow는 #116 및 [`SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md`](SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md)를 따른다.
 
+### Study-use concurrency
+
+같은 Windows PC에서 사용자가 브라우저의 인터넷 강의를 시청하는 동안 Sorigul Local 전사를 병행할 수 있어야 한다. 이 계약은 성능 저하가 전혀 없다는 보장이 아니다.
+
+Acceptance 의미:
+
+- 인터넷 강의 재생 중 Local transcription을 시작할 수 있다.
+- Sorigul은 browser/video playback을 의도적으로 pause/close/block하지 않는다.
+- Local Job이 정상 진행 및 완료된다.
+- browser가 실사용 가능한 상태로 유지된다.
+- Sorigul worker/backend process ownership과 cleanup이 정상이다.
+- 결과 TXT/JSON/SRT가 정상이다.
+
+이 요구사항은 #47 installed real-study gate에서 실제 환경으로 검증한다. 실제 contention으로 공부가 곤란하면 #47 PASS를 주장하지 않고 evidence와 함께 새 Issue로 분리한다.
+
+### Pre-Freeze decisions (not adopted / measurement only)
+
+- **Process priority:** Local worker `BELOW_NORMAL` 등 scheduler/process-priority 변경은 **NOT ADOPTED by default**. Freeze 전에 예방적으로 우선순위를 낮추지 않는다. #47에서 실제 동시 재생 contention이 재현되고 evidence가 있을 때만 새 Issue로 검토한다.
+- **Colab retry interval:** No current retry-interval change. Revisit only if a real zero-cost Colab 524 condition is reproduced with evidence and a safe remediation is justified. 추측에 의한 interval 값을 계약에 넣지 않는다.
+- **Local startup:** measurement only. Fresh #113이 PASS한 같은 installed artifact에서 #56/#63 진행 시 COLD/WARM Local startup을 측정한다. 측정 구간은 explicit Local Start부터 기존 app event/log에서 일관되게 관측 가능한 worker/job-ready milestone까지이며, cold/warm 모두 같은 milestone 정의를 evidence에 명시한다. 새 PASS threshold를 만들지 않고, 느리다는 이유만으로 같은 Freeze에서 packaging을 변경하지 않으며 onefile → onedir 자동 전환을 금지한다. 문제가 명백하면 evidence → 새 Issue → 새 source cycle이다.
+
 ## 10. Git/GitHub contract
 
 모든 work unit에 다음 lifecycle이 필수다.
 
 `Issue → dedicated branch → implementation/review → test → meaningful commit → push → PR create/update → Issue update → #7 update → approved merge gate`
 
-완료된 작업을 local에만 남기지 않는다. 독립 defect는 독립 Issue로 분리한다. `git add .`, `git add -A`, rebase, force push, `reset --hard`, `git clean`, `main` 직접 개발을 금지한다. #114 PASS 전에는 main merge를 금지하고 최종 stack은 bottom-up으로 merge한다. 상세 규칙은 [`DEVELOPMENT_RULES.md`](DEVELOPMENT_RULES.md)를 따른다.
+완료된 작업을 local에만 남기지 않는다. 독립 defect는 독립 Issue로 분리한다. `git add .`, `git add -A`, rebase, force push, `reset --hard`, `git clean`, `main` 직접 개발을 금지한다. #114 PASS 전에는 main merge를 금지한다. constituent stacked PR은 review/evidence surface로 유지하며 main에 하나씩 merge하지 않는다. final source ancestry를 모두 포함하는 하나의 consolidated integration PR만 #114 PASS와 final gate approval 후 main에 merge한다(single consolidated integration merge). rebase, force push 또는 squash로 constituent ancestry를 재작성하지 않는다. 상세 규칙은 [`DEVELOPMENT_RULES.md`](DEVELOPMENT_RULES.md)를 따른다.
 
 ## 11. Contract supersession map
 
@@ -245,6 +289,8 @@ Public release는 project goal이 아니다. 일정, acceptance와 final workflo
 | Prompt/corrections | subject prompt와 text correction | 미이식 | Approved Intentional Change | §5C | decoding options는 유지 |
 | MP3 import/move | managed import/move path | import/copy/move 없음 | Approved Intentional Change | §5D | selected folder scan |
 | Course/subject | fixed alias detection/dropdown | user free-text | Approved Intentional Change | §5E | week/lesson 감지는 유지 |
+| Week source | filename week detection only | user manual week (not persisted); explicit filename week precedence 유지; Eduwill no-week global `N강` normalization; WEEK_MISMATCH explicit review | Approved Intentional Change | §4 Filename / #180 | silent overwrite 금지; CONTINUE_ORIGINAL은 Drive OFF |
+| Study-use concurrency | 명시 계약 없음 | 인터넷 강의 시청 중 Local 전사 병행; 무저하 보장 아님 | Current goal | §9 / #47 | process priority 변경 NOT ADOPTED |
 | Drive classification | filename 재파싱 | new Job metadata truth | Approved Intentional Change | §5F | legacy Job만 narrow fallback |
 | Stage mapping | fixed mapping 중심 | known auto mapping + unknown exact override | Approved Intentional Change | §5G | override persist |
 | Exam root | fixed/root assumption | configurable exam root | Approved Intentional Change | §5H | Drive setting |
@@ -260,6 +306,7 @@ Public release는 project goal이 아니다. 일정, acceptance와 final workflo
 | Zero-cost | external path cost가 명시적이지 않음 | paid/billing/credit/fallback 금지 | Current constraint | §8 | 불명확하면 PENDING |
 | Study-use deadline | public release 중심 sequence | 2026-10-31 KST STUDY USE READY | Current goal | §9 / #116 | public release 불필요 |
 | Git lifecycle | commit/push/PR이 선택적 정리 단계 | 전체 lifecycle이 work-unit 완료 조건 | Governance lock | §10 / #107 | #7 update 포함 |
+| Main merge | stacked PR bottom-up merge | single consolidated integration PR merge after #114 PASS | Governance lock | §10 / Pre-Freeze reconciliation | constituent PR은 review/evidence surface |
 
 ## 12. Historical preservation
 
