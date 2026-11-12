@@ -3,6 +3,7 @@ import { AppShell } from './components/layout/AppShell'
 import type { NavigationId } from './components/layout/AppShell'
 import { useCloseBehaviorSync } from './hooks/useCloseBehaviorSync'
 import { useDesktopNotifications } from './hooks/useDesktopNotifications'
+import { useTrayProgress } from './hooks/useTrayProgress'
 import { FoldersPage } from './pages/FoldersPage'
 import { LogPage } from './pages/LogPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -35,6 +36,7 @@ function App() {
   const [sidecarStatus, setSidecarStatus] = useState<SidecarStatus | null>(null)
   useDesktopNotifications()
   useCloseBehaviorSync()
+  useTrayProgress()
 
   useEffect(() => {
     const handlePopState = () => setActivePage(pageFromPath(window.location.pathname))
