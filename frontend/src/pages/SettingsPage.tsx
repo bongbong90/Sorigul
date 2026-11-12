@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { Bell, Cloud, MonitorCog, Power, Server, XCircle } from 'lucide-react'
-import { api, getUserMessage, type DriveAuthState, type RuntimeSettings, type ShutdownState } from '../api/client'
+import { api, getUserMessage, isRequestAbort, isRequestTimeout, type DriveAuthState, type RuntimeSettings, type ShutdownState } from '../api/client'
 import { isTauri, openInBrowser } from '../lib/native'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -22,33 +22,64 @@ const driveAuthLabel: Record<DriveAuthState, string> = {
   REFRESH_FAILED: '갱신 실패 · 재연결 필요', REAUTH_REQUIRED: '재연결 필요',
 }
 
+function pollDelay(ms: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(false); return }
+    const timer = window.setTimeout(() => { cleanup(); resolve(true) }, ms)
+    const abort = () => { window.clearTimeout(timer); cleanup(); resolve(false) }
+    const cleanup = () => signal.removeEventListener('abort', abort)
+    signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
 export function SettingsPage() {
   const [settings, setSettings] = useState<RuntimeSettings>(defaults)
   const [shutdown, setShutdown] = useState<ShutdownState>()
   const [driveAuth, setDriveAuth] = useState<DriveAuthState>()
   const [driveMessage, setDriveMessage] = useState<string>()
   const drivePolling = useRef(false)
+  const drivePollController = useRef<AbortController | null>(null)
   const [backend, setBackend] = useState<'STARTING' | 'CONNECTED' | 'OFFLINE'>('STARTING')
   const [message, setMessage] = useState('설정을 불러오는 중입니다.')
   const shutdownTriggered = useRef(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setBackend('STARTING')
     try {
-      await api.health()
-      const [saved, state, drive] = await Promise.all([api.settings(), api.shutdown(), api.driveStatus()])
+      await api.health(signal)
+      const [saved, state, drive] = await Promise.all([api.settings(signal), api.shutdown(signal), api.driveStatus(signal)])
       setSettings(saved); setShutdown(state); setDriveAuth(drive.auth_state); setBackend('CONNECTED'); setMessage('저장된 설정을 불러왔습니다.')
-    } catch (cause) { setBackend('OFFLINE'); setMessage(getUserMessage(cause)) }
+    } catch (cause) {
+      if (isRequestAbort(cause)) return
+      setBackend('OFFLINE'); setMessage(getUserMessage(cause))
+    }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const controller = new AbortController()
+    void load(controller.signal)
+    return () => controller.abort()
+  }, [load])
   useEffect(() => {
     if (backend !== 'CONNECTED') return
-    const timer = window.setInterval(async () => {
-      try { setShutdown(await api.shutdown()) } catch { setBackend('OFFLINE') }
-    }, 1000)
-    return () => window.clearInterval(timer)
+    let active = true
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const poll = async () => {
+      controller = new AbortController()
+      try { setShutdown(await api.shutdown(controller.signal)) }
+      catch (cause) { if (active && !isRequestAbort(cause)) setBackend('OFFLINE') }
+      finally { if (active) timer = window.setTimeout(() => void poll(), 1000) }
+    }
+    timer = window.setTimeout(() => void poll(), 1000)
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      controller?.abort()
+    }
   }, [backend])
+
+  useEffect(() => () => drivePollController.current?.abort(), [])
 
   // Tauri caches close_behavior synchronously so the window "close" handler
   // never has to make a blocking HTTP call.
@@ -64,14 +95,18 @@ export function SettingsPage() {
     if (!isTauri()) return
     if (shutdown?.phase === 'ready_to_shutdown' && !shutdownTriggered.current) {
       shutdownTriggered.current = true
+      const controller = new AbortController()
       void (async () => {
         try {
-          const fresh = await api.shutdown()
+          const fresh = await api.shutdown(controller.signal)
           setShutdown(fresh)
           if (fresh.phase === 'ready_to_shutdown') await invoke('native_shutdown')
           else shutdownTriggered.current = false
-        } catch { shutdownTriggered.current = false }
+        } catch (cause) {
+          if (!isRequestAbort(cause)) shutdownTriggered.current = false
+        }
       })()
+      return () => controller.abort()
     }
     if (shutdownTriggered.current && (shutdown?.phase === 'inactive' || shutdown?.phase === 'cancelled')) {
       shutdownTriggered.current = false
@@ -82,7 +117,15 @@ export function SettingsPage() {
   async function save(next: RuntimeSettings) {
     setSettings(next); setMessage('설정을 저장하는 중입니다.')
     try { setSettings(await api.saveSettings(next)); setMessage('설정이 저장되었습니다.') }
-    catch (cause) { setMessage(getUserMessage(cause)) }
+    catch (cause) {
+      if (isRequestTimeout(cause)) {
+        setMessage(getUserMessage(cause))
+        try {
+          setSettings(await api.settings())
+          setMessage('요청 시간이 초과되어 현재 저장 상태를 다시 확인했습니다.')
+        } catch { /* keep the explicit uncertain-result message */ }
+      } else setMessage(getUserMessage(cause))
+    }
   }
 
   async function cancelShutdown() {
@@ -111,20 +154,27 @@ export function SettingsPage() {
   async function pollDriveStatus() {
     if (drivePolling.current) return
     drivePolling.current = true
+    const controller = new AbortController()
+    drivePollController.current?.abort()
+    drivePollController.current = controller
     try {
       for (let attempt = 0; attempt < 150; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000))
+        if (!await pollDelay(2000, controller.signal)) return
         try {
-          const drive = await api.driveStatus()
+          const drive = await api.driveStatus(controller.signal)
           setDriveAuth(drive.auth_state)
           if (drive.auth_state === 'CONNECTED') { setDriveMessage('Google Drive 연결이 완료되었습니다.'); return }
           if (drive.auth_state === 'REAUTH_REQUIRED' || drive.auth_state === 'REFRESH_FAILED') {
             setDriveMessage('Google Drive 연결에 실패했습니다. 다시 시도해 주세요.'); return
           }
-        } catch { /* transient backend hiccup during polling; keep trying */ }
+        } catch (cause) {
+          if (isRequestAbort(cause)) return
+          /* transient backend hiccup during polling; keep trying */
+        }
       }
       setDriveMessage('Google Drive 인증 대기 시간이 초과되었습니다. 다시 시도해 주세요.')
     } finally {
+      if (drivePollController.current === controller) drivePollController.current = null
       drivePolling.current = false
     }
   }

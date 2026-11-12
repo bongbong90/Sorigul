@@ -1,6 +1,8 @@
 import os
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from src.services.normalizer import CONTROL_CHARS_PATTERN, FORBIDDEN_CHARS_PATTERN
 
@@ -34,10 +36,32 @@ def validate_safe_stem(stem: str, field_label: str) -> str:
     return stem
 
 
+class RenameStatus(str, Enum):
+    SUCCESS = "SUCCESS"
+    RENAME_CONFLICT = "RENAME_CONFLICT"
+    RENAME_NOTHING_TO_DO = "RENAME_NOTHING_TO_DO"
+    RENAME_APPLY_FAILED_ROLLED_BACK = "RENAME_APPLY_FAILED_ROLLED_BACK"
+    RENAME_ROLLBACK_FAILED = "RENAME_ROLLBACK_FAILED"
+
+
+@dataclass(frozen=True)
+class RenameResult:
+    status: RenameStatus
+    apply_error: Optional[str] = None
+    rollback_error: Optional[str] = None
+
+    def __bool__(self) -> bool:
+        """Keep legacy truth checks meaningful while exposing full outcome."""
+        return self.status == RenameStatus.SUCCESS
+
+
 class BundleRenamer:
     EXTENSIONS = [".mp3", ".txt", ".json", ".srt"]
 
-    def apply_rename(self, folder_path: str, old_stem: str, new_stem: str) -> bool:
+    def __init__(self, rename_path: Optional[Callable[[Path, Path], None]] = None):
+        self._rename_path = rename_path or (lambda source, target: source.rename(target))
+
+    def apply_rename(self, folder_path: str, old_stem: str, new_stem: str) -> RenameResult:
         folder = Path(folder_path)
 
         # 1. Preflight check
@@ -49,24 +73,34 @@ class BundleRenamer:
             if old_file.exists():
                 if new_file.exists():
                     # Conflict! Cannot rename safely without overwrite.
-                    return False
+                    return RenameResult(RenameStatus.RENAME_CONFLICT)
                 moves.append((old_file, new_file))
 
         if not moves:
-            return False # Nothing to rename
+            return RenameResult(RenameStatus.RENAME_NOTHING_TO_DO)
 
         # 2. Apply rename
         completed_moves: List[Tuple[Path, Path]] = []
         try:
             for old_file, new_file in moves:
-                old_file.rename(new_file)
+                self._rename_path(old_file, new_file)
                 completed_moves.append((old_file, new_file))
-            return True
-        except Exception:
+            return RenameResult(RenameStatus.SUCCESS)
+        except Exception as apply_error:
             # 3. Rollback on failure
+            rollback_error: Optional[Exception] = None
             for old_file, new_file in reversed(completed_moves):
                 try:
-                    new_file.rename(old_file)
-                except Exception:
-                    pass # Best effort rollback
-            return False
+                    self._rename_path(new_file, old_file)
+                except Exception as exc:
+                    rollback_error = rollback_error or exc
+            if rollback_error is not None:
+                return RenameResult(
+                    RenameStatus.RENAME_ROLLBACK_FAILED,
+                    apply_error=str(apply_error),
+                    rollback_error=str(rollback_error),
+                )
+            return RenameResult(
+                RenameStatus.RENAME_APPLY_FAILED_ROLLED_BACK,
+                apply_error=str(apply_error),
+            )
