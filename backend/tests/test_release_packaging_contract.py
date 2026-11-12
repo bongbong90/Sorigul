@@ -319,6 +319,7 @@ def test_manifest_contains_release_identity_without_personal_data_fields():
         "source_head",
         "generated_at_utc",
         "tracked_tree_clean",
+        "core_sidecar_size_limit_mib",
         "sidecar_size",
         "sidecar_sha256",
         "ffmpeg_size",
@@ -347,12 +348,18 @@ def test_local_manifest_requirement_is_a_scalar_string_and_round_trip_validated(
 def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
     installer = (REPO_ROOT / "scripts/build_windows_installer.ps1").read_text(encoding="utf-8")
 
-    validation = installer.index("BUILD_MANIFEST_SOURCE_HEAD_MISMATCH")
+    validation = installer.index("BUILD_MANIFEST_CORE_SIZE_POLICY_INVALID")
     frontend = installer.index('Write-Step "Building frontend production bundle"')
     tauri = installer.index('Write-Step "Building Windows MSI')
 
     assert validation < frontend < tauri
-    assert "$CoreMsiSizeLimitBytes = 250MB" in installer
+    assert "$Manifest.core_sidecar_size_limit_mib -is [int]" in installer
+    assert "$Manifest.core_sidecar_size_limit_mib -le 0" in installer
+    assert (
+        "$CoreMsiSizeLimitBytes = [long]$Manifest.core_sidecar_size_limit_mib * 1MB"
+        in installer
+    )
+    assert "BUILD_MANIFEST_CORE_SIZE_POLICY_INVALID" in installer
     assert "CORE_MSI_SIZE_REGRESSION" in installer
     assert "$CurrentSourceHeadOutput = @(& git rev-parse HEAD)" in installer
     assert "$CurrentSourceHeadOutput.Count -ne 1" in installer
