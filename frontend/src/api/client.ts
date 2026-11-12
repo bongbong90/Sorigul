@@ -139,6 +139,7 @@ export interface RuntimeSettings {
   transcription_folder: string | null
   last_course: string | null
   last_subject: string | null
+  last_engine: 'local_whisper' | 'direct_colab'
   // Drive auto-upload is intentionally NOT part of this shape -- it is a
   // per-run CreateJobRequest field, never a persisted setting (D23A).
   subject_stage_overrides: Record<string, '1차' | '2차'>
@@ -150,6 +151,12 @@ export interface ShutdownState {
   job_id: string | null
   deadline: string | null
   remaining_seconds: number | null
+}
+
+export interface RendezvousState {
+  state: 'WAITING' | 'FOUND' | 'CONNECTED' | 'FAILED' | 'EXPIRED' | 'AUTH_REQUIRED'
+  base_url?: string | null
+  request_id?: string | null
 }
 
 export interface ApiErrorShape {
@@ -285,6 +292,9 @@ export const api = {
   saveSettings: (settings: RuntimeSettings) => request<RuntimeSettings>('/settings', {
     method: 'PUT', body: JSON.stringify(settings),
   }),
+  startColabRendezvous: () => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST' }),
+  pollColabRendezvous: (requestId: string) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId)),
+  verifyColabUrl: (url: string) => request<RendezvousState>('/colab/verify', { method: 'POST', body: JSON.stringify({ url }) }),
   shutdown: () => request<ShutdownState>('/desktop/shutdown'),
   cancelShutdown: () => request<ShutdownState>('/desktop/shutdown/cancel', { method: 'POST' }),
 }
