@@ -234,6 +234,47 @@ def open_job_folder_intent(job_id: str):
         raise HTTPException(status_code=400, detail="폴더 열기 요청을 만들 수 없습니다.")
 
 
+class CloseGuard(BaseModel):
+    """Whether a window close must not terminate the app right now. Carries
+    no folder path, token, or remote id -- only what a notice needs."""
+
+    protect_exit: bool
+    activity: Literal["idle", "transcription", "drive"]
+    job_id: Optional[str] = None
+    current_file: Optional[str] = None
+    progress: Optional[float] = None
+
+
+@router.get("/desktop/close-guard", response_model=CloseGuard)
+def get_close_guard():
+    """Read-only snapshot of critical work (#128), each service checked under
+    its own lock. Transcription is read first: a run submits its automatic
+    Drive uploads before its Future finishes, so a run seen as done has
+    already registered any Drive work the next checks will see."""
+    try:
+        active_id = execution_service.active_job_id()
+    except ExecutionInvariantError:
+        return CloseGuard(protect_exit=True, activity="transcription")
+    if active_id is not None:
+        job = job_manager.get_job(active_id)
+        return CloseGuard(
+            protect_exit=True,
+            activity="transcription",
+            job_id=active_id,
+            current_file=job.current_file if job else None,
+            progress=job.current_progress if job else None,
+        )
+    upload = drive_service.active_upload()
+    if upload is not None:
+        job_id, file_id = upload
+        return CloseGuard(
+            protect_exit=True, activity="drive", job_id=job_id, current_file=f"{file_id}.mp3"
+        )
+    if drive_execution_service.has_pending_work():
+        return CloseGuard(protect_exit=True, activity="drive")
+    return CloseGuard(protect_exit=False, activity="idle")
+
+
 @router.get("/drive/status")
 def get_drive_status():
     return {"auth_state": drive_auth.state, "scope": DRIVE_SCOPE}
