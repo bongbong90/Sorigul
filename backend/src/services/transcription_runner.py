@@ -22,7 +22,10 @@ from src.engines.colab import (
     DirectColabHttpClient,
     FFmpegAudioSplitter,
 )
-from src.engines.local_whisper import LocalWhisperEngine
+from src.engines.local_whisper import (
+    LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
+    LocalWhisperEngine,
+)
 from src.services.job_manager import JobManager
 from src.services.colab_security import PairingRegistry, pairing_registry
 from src.services.output_bundle import OutputBundleWriter
@@ -275,7 +278,10 @@ class TranscriptionRunner:
                 break
             except EngineError as exc:
                 self._file_failed(job_id, file_id, item.filename, exc)
-                if exc.code == FFMPEG_PROCESS_CLEANUP_FAILED:
+                if exc.code in {
+                    FFMPEG_PROCESS_CLEANUP_FAILED,
+                    LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
+                }:
                     process_cleanup_failed = True
                 if exc.fatal:
                     fatal_error = True
