@@ -80,6 +80,7 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - Colab CUDA preferred, CUDA compute type `float16`
 - CPU fallback compute type `int8`
 - Korean transcription과 segment timestamp를 TXT/JSON/SRT로 merge
+- "Colab 열기" convenience를 현재 Sorigul bootstrap/rendezvous flow 기준으로 제공한다. Legacy notebook/clipboard/Flask 경로의 복구가 아니다. (#127 A1)
 
 현재 Sorigul의 Colab OpenAI Whisper `medium` 구현은 **CURRENT IMPLEMENTATION DEFECT**이며 현재 계약이 아니다. #106이 Local/Colab engine parity를 복구한다.
 
@@ -91,9 +92,26 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - file/job completion notification을 제공한다.
 - notification에서 result folder를 open/reveal할 수 있어야 한다.
 - Tray, close-to-tray/exit behavior를 유지한다.
+- Tray tooltip은 현재 전사 상태를 honest하게 표시한다: 실제 current progress, current file, terminal state만 사용하며 fabricated progress/ETA는 금지한다. (#127 A2)
+- Folders 목록은 사용자 조작으로 오름차순/내림차순 정렬한다. Legacy ACTIVE와 동일하게 **파일명/유형만 sortable**이며 상태/수정일은 non-sortable이다. (#127 A3)
+- TXT preview/full view는 **display only** bounded encoding fallback을 사용한다: `utf-8-sig → utf-8 → cp949 → euc-kr → utf-8 errors=replace`. Sorigul이 생성하는 TXT는 계속 UTF-8이며 source TXT를 rewrite/transcode하지 않는다. (#127 A5)
 - completed-job shutdown은 immediate/15 sec/30 sec, countdown과 cancel을 지원한다.
 - backend/process tree를 정리하고 orphan을 남기지 않는다.
 - Windows와 Unicode/Korean path를 지원한다.
+
+### #127 parity decision lock
+
+#127 final decision은 5F (#123) inventory의 AMBIGUOUS 5건을 default parity rule(§3)로 판정했다. 아래 결정은 현재 locked 계약이며 #123 regression은 이 분류를 사용한다. #127 이력은 수정하거나 삭제하지 않는다.
+
+| ID | Legacy ACTIVE affordance | Decision | #123 classification | Implementation | Current authority |
+|---|---|---|---|---|---|
+| A1 | Colab 열기 | RESTORE | PRESERVED | #130 | §4 Colab |
+| A2 | Tray progress tooltip | RESTORE | PRESERVED | #131 | §4 Folders and Desktop |
+| A3 | Folders column sorting (파일명/유형) | RESTORE | PRESERVED | #132 | §4 Folders and Desktop |
+| A4 | Queue clear buttons | APPROVED REMOVAL | APPROVED_INTENTIONAL_CHANGE | 없음 (removal) | §5N |
+| A5 | TXT encoding fallback | RESTORE FOR DISPLAY ONLY | PRESERVED | #133 | §4 Folders and Desktop |
+
+#127 기준 AMBIGUOUS 잔여: **0**.
 
 ## 5. Approved Intentional Changes
 
@@ -152,6 +170,12 @@ automatic rendezvous가 primary다. manual URL은 fallback이다.
 ### M. Security hardening
 
 signed requests, pairing, replay protection, fail-closed behavior, private OAuth/token boundary와 strict local/runtime permission boundary를 유지한다.
+
+### N. Queue clear
+
+Legacy의 display-only queue clear 버튼은 복구하지 않는다. (#127 A4, APPROVED REMOVAL)
+
+현재 queue는 selected folder filesystem truth의 live projection이다. MP3 import/move가 제거되었으므로(§5D) Legacy처럼 imported/moved row를 화면에서만 지우는 "clear row"는 현재 product model과 구조적으로 충돌한다. 이 결정은 실제 파일 삭제 기능을 의미하지 않으며 도입하지도 않는다. 구현 작업은 없다.
 
 ## 6. Explicit exclusions
 
@@ -219,6 +243,8 @@ Public release는 project goal이 아니다. 일정, acceptance와 final workflo
 | Audio duration | ffprobe/placeholder history | mutagen metadata, FFmpeg split | Approved Intentional Change | §5L | read failure는 honest unknown |
 | Progress/ETA | fixed or fabricated display 가능 | real duration/honest progress/ETA only | Approved Intentional Change | §5L | chunk count 비노출 |
 | Drive auto-upload | persistent/global setting proposal | per-run, launch마다 OFF, not persisted | Approved Intentional Change | §5I | Job request only |
+| Queue clear rows | Legacy display-only clear | Removed | Approved Intentional Change | #127 A4 / §5N | filesystem-truth consequence; 파일 삭제 아님 |
+| Minor UX affordances | Colab 열기, tray progress tooltip, Folders 파일명/유형 sort, TXT encoding fallback | Restored under current constraints | Preserved Legacy parity | #127 A1/A2/A3/A5 / §4 | #130 #131 #132 #133 |
 | Security | Legacy connection boundaries | signed, paired, replay-protected, fail closed | Approved hardening | §5M | capability를 축소하지 않음 |
 | Local runtime packaging | monolithic heavyweight possibility | separate versioned Local Runtime | Current constraint | §7 | Core payload NONE |
 | Zero-cost | external path cost가 명시적이지 않음 | paid/billing/credit/fallback 금지 | Current constraint | §8 | 불명확하면 PENDING |
