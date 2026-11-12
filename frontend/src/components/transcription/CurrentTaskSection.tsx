@@ -4,7 +4,10 @@ import { Progress } from '../ui/Progress'
 
 export type CurrentTaskStatus =
   | 'IDLE'
+  | 'WAITING'
+  | 'PREPARING'
   | 'TRANSCRIBING'
+  | 'SAVING'
   | 'VERIFYING'
   | 'DONE'
   | 'FAILED'
@@ -16,18 +19,21 @@ export type CurrentTaskStatus =
 
 interface CurrentTaskSectionProps {
   filename?: string
-  progress: number
+  progress: number | null
   status: CurrentTaskStatus
 }
 
 const statusPresentation = {
   IDLE: { label: '준비', tone: 'waiting' as const, detail: '전사 대기' },
+  WAITING: { label: '대기', tone: 'waiting' as const, detail: '작업 시작 대기' },
+  PREPARING: { label: '준비 중', tone: 'preparing' as const, detail: '엔진 준비 중' },
   TRANSCRIBING: {
     label: '전사 중',
     tone: 'transcribing' as const,
     detail: '예상 남은 시간 12분',
   },
   VERIFYING: { label: '검증 중', tone: 'verifying' as const, detail: '결과 파일 확인 중' },
+  SAVING: { label: '저장 중', tone: 'preparing' as const, detail: '결과 파일 저장 중' },
   DONE: { label: '완료', tone: 'done' as const, detail: '선택한 파일 완료' },
   FAILED: { label: '실패', tone: 'failed' as const, detail: '오류 원인을 확인해 주세요' },
   STOPPED: { label: '중지됨', tone: 'stopped' as const, detail: '다시 시도하면 처음부터 처리' },
@@ -44,6 +50,9 @@ const statusPresentation = {
 export function CurrentTaskSection({ filename, progress, status }: CurrentTaskSectionProps) {
   const presentation = statusPresentation[status]
   const displayFilename = filename ?? '현재 작업 없음'
+  const progressValue = ['PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING', 'RETRYING'].includes(status)
+    ? progress
+    : (progress ?? 0)
 
   return (
     <Card className="current-task-section">
@@ -65,12 +74,12 @@ export function CurrentTaskSection({ filename, progress, status }: CurrentTaskSe
         </div>
 
         <div className="current-task-progress">
-          <strong className="progress-value text-numeric">{progress}%</strong>
+          <strong className="progress-value text-numeric">{progress === null ? '—' : `${progress}%`}</strong>
           <span className="text-caption text-numeric">{presentation.detail}</span>
         </div>
       </div>
 
-      <Progress value={progress} label="현재 파일 전사 진행률" />
+      <Progress value={progressValue} label="현재 파일 전사 진행률" />
     </Card>
   )
 }
