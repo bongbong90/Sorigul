@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ExternalLink, FileText, FolderOpen, Maximize2, RefreshCw, X } from 'lucide-react'
-import { api, getSavedFolder, getUserMessage, saveFolder, type FolderFilter, type FolderItem } from '../api/client'
+import { api, getSavedFolder, getUserMessage, isRequestAbort, saveFolder, type FolderFilter, type FolderItem } from '../api/client'
+import { useFolderRevision } from '../hooks/useFolderRevision'
 import { isTauri, openInExplorer, pickFolder } from '../lib/native'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
@@ -19,48 +20,91 @@ function statusTone(status: FolderItem['status']): BadgeTone {
   return status === 'COMPLETE' ? 'done' : status === 'INCOMPLETE' ? 'waiting' : 'preparing'
 }
 
+const PREVIEW_PLACEHOLDER = 'TXT 결과 파일을 선택하면 약 500자 미리보기를 표시합니다.'
+
 export function FoldersPage() {
   const [folder, setFolder] = useState(getSavedFolder)
   const [filter, setFilter] = useState<FolderFilter>('all')
   const [scanId, setScanId] = useState('')
   const [files, setFiles] = useState<FolderItem[]>([])
   const [selectedId, setSelectedId] = useState<string>()
-  const [preview, setPreview] = useState('TXT 결과 파일을 선택하면 약 500자 미리보기를 표시합니다.')
+  const [preview, setPreview] = useState(PREVIEW_PLACEHOLDER)
   const [fullText, setFullText] = useState<string>()
   const [message, setMessage] = useState(folder ? '실제 디스크 상태를 기준으로 표시합니다.' : '전사 폴더를 선택해 주세요.')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
+  // Latest-wins guards: a slower, older folder/preview response (e.g. from
+  // the previous folder or an earlier auto-refresh) never overwrites newer UI.
+  const refreshSeq = useRef(0)
+  const previewSeq = useRef(0)
 
-  const refresh = useCallback(async (nextFilter = filter) => {
-    if (!folder) return
-    setLoading(true); setError(undefined)
+  const refresh = useCallback(async (nextFilter = filter, options: { signal?: AbortSignal; live?: boolean } = {}) => {
+    if (!folder) return undefined
+    const seq = ++refreshSeq.current
+    setLoading(true)
     try {
-      const result = await api.folders(folder, nextFilter)
-      setScanId(result.scan_id); setFiles(result.items)
-      setSelectedId((current) => result.items.some((item) => item.id === current) ? current : undefined)
-      setMessage(`새로고침 완료 · ${result.items.length}개 표시`)
+      const result = await api.folders(folder, nextFilter, options.signal)
+      if (seq !== refreshSeq.current) return undefined
+      setScanId(result.scan_id); setFiles(result.items); setError(undefined)
+      setMessage(`${options.live ? '폴더 변경 자동 반영' : '새로고침 완료'} · ${result.items.length}개 표시`)
+      return result
     } catch (cause) {
+      if (seq !== refreshSeq.current || isRequestAbort(cause)) return undefined
       setFiles([]); setError(getUserMessage(cause))
-    } finally { setLoading(false) }
+      return undefined
+    } finally { if (seq === refreshSeq.current) setLoading(false) }
   }, [filter, folder])
 
   useEffect(() => { void refresh() }, [refresh])
 
+  // A selection whose file no longer exists (deleted, or outside the current
+  // filter) is cleared together with its preview/full view: no stale text.
+  useEffect(() => {
+    if (!selectedId || files.some((file) => file.id === selectedId)) return
+    previewSeq.current += 1
+    setSelectedId(undefined); setPreview(PREVIEW_PLACEHOLDER); setFullText(undefined)
+  }, [files, selectedId])
+
   async function selectItem(file: FolderItem) {
+    const seq = ++previewSeq.current
     setSelectedId(file.id); setFullText(undefined)
     if (file.kind !== 'TXT' || !scanId) {
-      setPreview('TXT 결과 파일을 선택하면 약 500자 미리보기를 표시합니다.'); return
+      setPreview(PREVIEW_PLACEHOLDER); return
     }
     try {
       const result = await api.textPreview(scanId, file.id)
-      setPreview(result.text || 'TXT 파일이 비어 있습니다.')
-    } catch (cause) { setPreview(getUserMessage(cause)) }
+      if (seq === previewSeq.current) setPreview(result.text || 'TXT 파일이 비어 있습니다.')
+    } catch (cause) { if (seq === previewSeq.current) setPreview(getUserMessage(cause)) }
   }
+
+  // #111 live folder change: re-read disk truth with the *current* filter,
+  // then re-fetch the still-selected TXT preview (and the open full view) so
+  // an externally edited TXT is not shown stale. Runs inside the watcher's
+  // single in-flight slot, so these fetches never pile up.
+  const liveRefresh = async (signal: AbortSignal) => {
+    const result = await refresh(filter, { signal, live: true })
+    if (!result || signal.aborted) return
+    const selected = result.items.find((item) => item.id === selectedId)
+    if (!selected || selected.kind !== 'TXT') return
+    const seq = ++previewSeq.current
+    try {
+      const nextPreview = await api.textPreview(result.scan_id, selected.id, signal)
+      if (seq === previewSeq.current) setPreview(nextPreview.text || 'TXT 파일이 비어 있습니다.')
+      if (fullText !== undefined) {
+        const nextFull = await api.fullText(result.scan_id, selected.id, signal)
+        if (seq === previewSeq.current) setFullText(nextFull.text)
+      }
+    } catch {
+      // The file vanished/changed mid-read; the next revision poll reconciles.
+    }
+  }
+  useFolderRevision(folder, liveRefresh)
 
   async function changeFolder() {
     const value = await pickFolder(folder)
     if (!value) return
-    saveFolder(value); setFolder(value); setSelectedId(undefined)
+    previewSeq.current += 1
+    saveFolder(value); setFolder(value); setSelectedId(undefined); setPreview(PREVIEW_PLACEHOLDER); setFullText(undefined)
   }
 
   async function showFullText() {
