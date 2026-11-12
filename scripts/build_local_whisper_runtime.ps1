@@ -15,6 +15,22 @@ $ProtocolVersion = 1
 $ExpectedTorch = "torch==2.13.0+cu130"
 $ExpectedCuda = "13.0"
 
+function Resolve-TrustedTaskkill {
+    # Resolve from the OS-backed system directory only; never PATH or env vars.
+    $SystemDirectory = [System.Environment]::SystemDirectory
+    if ([string]::IsNullOrWhiteSpace($SystemDirectory) -or
+        -not [System.IO.Path]::IsPathRooted($SystemDirectory) -or
+        -not (Test-Path -LiteralPath $SystemDirectory -PathType Container)) {
+        throw "TRUSTED_SYSTEM_DIRECTORY_UNAVAILABLE"
+    }
+    $TaskkillPath = Join-Path $SystemDirectory "taskkill.exe"
+    if (-not [System.IO.Path]::IsPathRooted($TaskkillPath) -or
+        -not (Test-Path -LiteralPath $TaskkillPath -PathType Leaf)) {
+        throw "TRUSTED_TASKKILL_UNAVAILABLE"
+    }
+    return $TaskkillPath
+}
+
 function Write-Step($Message) {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
@@ -168,6 +184,7 @@ if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
 
     $SelfTestStdout = Join-Path $CandidateDir "selftest.stdout"
     $SelfTestStderr = Join-Path $CandidateDir "selftest.stderr"
+    $TaskkillPath = Resolve-TrustedTaskkill
     Write-Step "Running bounded Local Runtime CUDA self-test"
     $SelfTestProcess = Start-Process `
         -FilePath $CandidateExe `
@@ -183,7 +200,7 @@ if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         $SelfTestProcess.Refresh()
     }
     if (-not $SelfTestProcess.HasExited) {
-        & taskkill.exe /PID $SelfTestProcess.Id /T /F | Out-Host
+        & $TaskkillPath /PID $SelfTestProcess.Id /T /F | Out-Host
         if ($LASTEXITCODE -ne 0 -or -not $SelfTestProcess.WaitForExit(10000)) {
             throw "LOCAL_RUNTIME_SELFTEST_TIMEOUT_CLEANUP_FAILED"
         }
