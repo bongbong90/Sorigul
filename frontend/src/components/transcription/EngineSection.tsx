@@ -3,6 +3,8 @@ import { api, getUserMessage, isRequestAbort, isRequestTimeout } from '../../api
 import type { RendezvousState } from '../../api/client'
 import { AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
 import { Button } from '../ui/Button'
+import { COLAB_BOOTSTRAP_COMMANDS, COLAB_NEW_NOTEBOOK_URL } from '../../lib/colabSetup'
+import { openInBrowser } from '../../lib/native'
 
 interface EngineSectionProps {
   engine: 'local_whisper' | 'direct_colab'
@@ -108,6 +110,14 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       controller?.abort()
     }
   }, [engine, requestId, manualModeActive, connectionUncertain, startingRendezvous, onBaseUrlChange])
+
+  const handleOpenColab = async () => {
+    try {
+      await openInBrowser(COLAB_NEW_NOTEBOOK_URL)
+    } catch {
+      setErrorMsg('Colab을 열지 못했습니다. 브라우저 설정을 확인해 주세요.')
+    }
+  }
 
   const handleStartRendezvous = async () => {
     const controller = new AbortController()
@@ -249,6 +259,20 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
 
       {engine === 'direct_colab' && (
         <div className="engine-colab-panel">
+          <div className="engine-colab-setup">
+            <div className="engine-colab-setup-row">
+              <ol className="engine-colab-steps">
+                <li>Colab 열기</li>
+                <li>Colab에서 GPU 런타임을 직접 선택한 뒤 아래 준비 명령 실행</li>
+                <li>준비가 끝나면 Sorigul에서 Colab 연결</li>
+              </ol>
+              <Button variant="secondary" onClick={handleOpenColab} disabled={disabled}>
+                Colab 열기
+              </Button>
+            </div>
+            <pre className="engine-colab-commands"><code>{COLAB_BOOTSTRAP_COMMANDS}</code></pre>
+          </div>
+
           <div className="engine-status-row">
             <div className="engine-status-copy">
               <span className="engine-status-label">Colab 연결 상태:</span>
