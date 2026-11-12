@@ -13,8 +13,27 @@ side effects, of really starting the server or touching a network/model.
 """
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
+from typing import Callable, Iterable
+
+
+BUNDLED_FFMPEG_TIMEOUT_SECONDS = 15
+REQUIRED_SELF_TEST_CHECKS = (
+    "fastapi_app_import",
+    "uvicorn_import",
+    "google_drive_runtime_import",
+    "whisper_import",
+    "torch_import",
+    "torch_cuda_build",
+    "torch_cuda_available",
+    "torch_cuda_compute",
+    "bundled_ffmpeg_execution",
+    "audio_metadata_service_import",
+    "runtime_path_initialization",
+)
 
 
 def _cuda_build_detail(torch_module) -> str:
@@ -38,15 +57,87 @@ def _cuda_available_detail(torch_module) -> str:
     return f"torch={torch_module.__version__}, cuda={torch_module.version.cuda}, device={device_name}"
 
 
-def _self_test() -> int:
-    results: list[tuple[str, bool, str]] = []
+def _cuda_compute_detail(torch_module) -> str:
+    """Run a tiny real CUDA kernel and verify its result on the host."""
+    left = torch_module.tensor(
+        [[1.0, 2.0], [3.0, 4.0]], device="cuda", dtype=torch_module.float32
+    )
+    right = torch_module.tensor(
+        [[5.0, 6.0], [7.0, 8.0]], device="cuda", dtype=torch_module.float32
+    )
+    result = torch_module.matmul(left, right)
+    torch_module.cuda.synchronize()
+    actual = result.cpu().tolist()
+    expected = [[19.0, 22.0], [43.0, 50.0]]
+    if actual != expected:
+        raise RuntimeError(f"unexpected CUDA matrix product: {actual!r}")
+    return "2x2 CUDA matrix multiply verified"
 
-    def check(name: str, fn) -> None:
+
+def _bundled_ffmpeg_detail(
+    executable: Path | None = None,
+    run: Callable = subprocess.run,
+) -> str:
+    """Execute the exact ffmpeg sibling shipped beside the frozen sidecar."""
+    sidecar_executable = Path(executable or sys.executable)
+    ffmpeg_path = sidecar_executable.parent / "ffmpeg.exe"
+    if not ffmpeg_path.is_file():
+        raise RuntimeError(f"bundled ffmpeg sibling missing: {ffmpeg_path.name}")
+
+    completed = run(
+        [str(ffmpeg_path), "-version"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=BUNDLED_FFMPEG_TIMEOUT_SECONDS,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        check=False,
+    )
+    output = f"{completed.stdout or ''}\n{completed.stderr or ''}".lower()
+    if completed.returncode != 0:
+        raise RuntimeError(f"bundled ffmpeg exited with code {completed.returncode}")
+    if "ffmpeg version" not in output:
+        raise RuntimeError("bundled ffmpeg output did not identify ffmpeg")
+    return f"{ffmpeg_path.name} -version"
+
+
+class _SelfTestProgress:
+    """Emit self-test transitions and durably append them for frozen builds."""
+
+    def __init__(self, log_path: Path | None = None):
+        self.log_path = log_path
+        if self.log_path is not None:
+            self.log_path.write_text("", encoding="utf-8")
+
+    def emit(self, line: str) -> None:
+        if sys.stdout is not None:
+            print(line, flush=True)
+        if self.log_path is None:
+            return
+        with self.log_path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(line + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _run_self_test_checks(
+    checks: Iterable[tuple[str, Callable[[], object]]],
+    progress: _SelfTestProgress,
+) -> bool:
+    ok = True
+    for name, check in checks:
+        progress.emit(f"[self-test] {name}: START")
         try:
-            fn()
-            results.append((name, True, ""))
-        except Exception as exc:  # noqa: BLE001 - a check failure is a result, not a crash
-            results.append((name, False, str(exc)))
+            check()
+        except Exception as exc:  # noqa: BLE001 - each failure is release evidence
+            progress.emit(f"[self-test] {name}: FAIL ({exc})")
+            ok = False
+        else:
+            progress.emit(f"[self-test] {name}: PASS")
+    return ok
+
+
+def _self_test() -> int:
 
     def check_fastapi_app() -> None:
         from src.main import app
@@ -77,12 +168,13 @@ def _self_test() -> int:
 
         _cuda_available_detail(torch)
 
-    def check_ffmpeg() -> None:
-        from src.utils.ffmpeg_runtime import resolve_ffmpeg_path
+    def check_torch_cuda_compute() -> None:
+        import torch
 
-        path = resolve_ffmpeg_path()
-        if not path:
-            raise RuntimeError("ffmpeg executable not resolvable (PATH or bundled sibling)")
+        _cuda_compute_detail(torch)
+
+    def check_bundled_ffmpeg() -> None:
+        _bundled_ffmpeg_detail()
 
     def check_audio_metadata() -> None:
         import mutagen  # noqa: F401
@@ -94,37 +186,34 @@ def _self_test() -> int:
 
         get_app_data_dir()
 
-    check("fastapi_app_import", check_fastapi_app)
-    check("uvicorn_import", check_uvicorn)
-    check("google_drive_runtime_import", check_google_drive_runtime)
-    check("whisper_import", check_whisper)
-    check("torch_import", check_torch)
-    check("torch_cuda_build", check_torch_cuda_build)
-    check("torch_cuda_available", check_torch_cuda_available)
-    check("ffmpeg_availability", check_ffmpeg)
-    check("audio_metadata_service_import", check_audio_metadata)
-    check("runtime_path_initialization", check_runtime_paths)
+    checks = (
+        ("fastapi_app_import", check_fastapi_app),
+        ("uvicorn_import", check_uvicorn),
+        ("google_drive_runtime_import", check_google_drive_runtime),
+        ("whisper_import", check_whisper),
+        ("torch_import", check_torch),
+        ("torch_cuda_build", check_torch_cuda_build),
+        ("torch_cuda_available", check_torch_cuda_available),
+        ("torch_cuda_compute", check_torch_cuda_compute),
+        ("bundled_ffmpeg_execution", check_bundled_ffmpeg),
+        ("audio_metadata_service_import", check_audio_metadata),
+        ("runtime_path_initialization", check_runtime_paths),
+    )
+    assert tuple(name for name, _ in checks) == REQUIRED_SELF_TEST_CHECKS
 
-    lines = []
-    ok = True
-    for name, passed, detail in results:
-        status = "PASS" if passed else "FAIL"
-        line = f"[self-test] {name}: {status}" + (f" ({detail})" if detail else "")
-        lines.append(line)
-        ok = ok and passed
-
-    output = "\n".join(lines)
-    print(output)
-
-    # A frozen, windowed (console=False) build has no attached stdio, so
-    # PyInstaller silently discards prints. Always leave a log file next to
-    # the executable so a build script can confirm results either way.
+    # The windowed frozen build has no useful console. Creating and appending
+    # this file is part of the release gate, so an I/O failure must fail the
+    # self-test instead of being silently ignored.
+    log_path = None
     if getattr(sys, "frozen", False):
         log_path = Path(sys.executable).parent / "sorigul-backend-selftest.log"
-        try:
-            log_path.write_text(output + "\n", encoding="utf-8")
-        except OSError:
-            pass
+    try:
+        progress = _SelfTestProgress(log_path)
+        ok = _run_self_test_checks(checks, progress)
+    except OSError as exc:
+        if sys.stderr is not None:
+            print(f"[self-test] progress_log: FAIL ({exc})", file=sys.stderr, flush=True)
+        return 1
 
     return 0 if ok else 1
 
