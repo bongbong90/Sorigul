@@ -354,6 +354,7 @@ def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
 
     assert validation < frontend < tauri
     assert "$Manifest.core_sidecar_size_limit_mib -is [int]" in installer
+    assert "$Manifest.core_sidecar_size_limit_mib -is [long]" in installer
     assert "$Manifest.core_sidecar_size_limit_mib -le 0" in installer
     assert (
         "$CoreMsiSizeLimitBytes = [long]$Manifest.core_sidecar_size_limit_mib * 1MB"
@@ -366,6 +367,15 @@ def test_installer_rejects_malformed_or_stale_manifest_before_frontend_build():
     assert "$Manifest.source_head -cne $CurrentSourceHead" in installer
     assert "BUILD_MANIFEST_SOURCE_HEAD_MISMATCH" in installer
     assert "$Manifest.tracked_tree_clean -is [bool]" in installer
+
+
+def test_manifest_integer_round_trip_accepts_windows_and_core_powershell_types():
+    sidecar = (REPO_ROOT / "scripts/build_backend_sidecar.ps1").read_text(encoding="utf-8")
+    installer = (REPO_ROOT / "scripts/build_windows_installer.ps1").read_text(encoding="utf-8")
+
+    for script in (sidecar, installer):
+        assert "core_sidecar_size_limit_mib -is [int]" in script
+        assert "core_sidecar_size_limit_mib -is [long]" in script
 
 
 def test_windows_powershell_manifest_requirement_serializes_as_scalar_string(tmp_path):

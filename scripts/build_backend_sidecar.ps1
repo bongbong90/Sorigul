@@ -370,7 +370,10 @@ result_path.write_text(imageio_ffmpeg.get_ffmpeg_exe(), encoding="utf-8")
         throw "BUILD_MANIFEST_SERIALIZATION_INVALID"
     }
     if (
-        -not ($RoundTrippedManifest.core_sidecar_size_limit_mib -is [int]) -or
+        -not (
+            $RoundTrippedManifest.core_sidecar_size_limit_mib -is [int] -or
+            $RoundTrippedManifest.core_sidecar_size_limit_mib -is [long]
+        ) -or
         $RoundTrippedManifest.core_sidecar_size_limit_mib -ne $CoreArtifactSizeLimitMiB -or
         -not ($RoundTrippedManifest.source_head -is [string]) -or
         $RoundTrippedManifest.source_head -cne $SourceHead
