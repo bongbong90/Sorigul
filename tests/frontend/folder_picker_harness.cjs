@@ -29,7 +29,7 @@ function job(folder, status = 'DONE', id = folder) {
     drive: {}, events: [], total_files: 4, done_files: 2, failed_files: 0 }
 }
 function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
-  const slots = [], effects = [], timers = new Map(), cache = new Map()
+  const slots = [], effects = [], timers = new Map(), cache = new Map(), namedSlots = new Map()
   let cursor = 0, dirty = true, tree, timerId = 0, picked, savedFolder = initialFolder
   let pickerImpl = async () => picked
   const scans = [], settingsWrites = []
@@ -38,29 +38,38 @@ function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
   let settingsImpl = async () => ({ transcription_folder: initialFolder,
     last_course: '정규', last_subject: '민법', subject_stage_overrides: {} })
   let revision = 'baseline', normalizeImpl = async () => []
-  const created = []
+  const created = [], started = [], normalized = [], renamed = [], transitions = []
+  let activeJob = null
+  let renameImpl = async (_, oldStem, newStem) => ({ old_file_id: oldStem, new_file_id: newStem })
   const api = {
     settings: (...args) => settingsImpl(...args), health: (...args) => healthImpl(...args),
     saveSettings: (value) => { settingsWrites.push(value); return saveImpl(value) },
     scan: (folder, signal) => { scans.push({ folder, signal }); return scanImpl(folder, signal) },
     jobs: async () => jobs, driveStatus: async () => ({ auth_state: 'CONNECTED' }),
-    activeJob: async () => null, folderRevision: async () => ({ revision }),
-    normalizeBatch: (...args) => normalizeImpl(...args),
+    activeJob: async () => activeJob, folderRevision: async () => ({ revision }),
+    normalizeBatch: (...args) => { normalized.push(args); return normalizeImpl(...args) },
+    rename: (...args) => { renamed.push(args); return renameImpl(...args) },
     createJob: async (value) => { created.push(value); return job(value.folder) },
-    startJob: async () => job(savedFolder),
+    startJob: async (id) => { started.push(id); return job(savedFolder) },
   }
   const changed = (a, b) => !a || !b || a.length !== b.length || a.some((v, i) => !Object.is(v, b[i]))
   const react = {
-    useState: (initial) => {
+    useState: (initial, name) => {
       const index = cursor++
       if (!slots[index]) slots[index] = { value: typeof initial === 'function' ? initial() : initial }
+      if (name) namedSlots.set(name, slots[index])
       const set = (next) => {
         const value = typeof next === 'function' ? next(slots[index].value) : next
         if (!Object.is(value, slots[index].value)) { slots[index].value = value; dirty = true }
+        if (name) transitions.push({ name, value })
       }
       return [slots[index].value, set]
     },
-    useRef: (initial) => { const i = cursor++; return (slots[i] ??= { current: initial }) },
+    useRef: (initial, name) => {
+      const i = cursor++, slot = (slots[i] ??= { current: initial })
+      if (name) namedSlots.set(name, slot)
+      return slot
+    },
     useMemo: (fn, deps) => {
       const i = cursor++
       if (!slots[i] || changed(slots[i].deps, deps)) slots[i] = { value: fn(), deps }
@@ -92,7 +101,21 @@ function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
     const source = filename === pagePath && process.argv[2] ? fs.readFileSync(process.argv[2], 'utf8') : fs.readFileSync(filename, 'utf8')
     const code = ts.transpileModule(source, { compilerOptions: {
       target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX,
-    } }).outputText
+    }, transformers: { before: [(ctx) => {
+      // Tag state/ref declarations for behavioral assertions without editing
+      // production source or depending on hook slot numbers.
+      const visit = (node) => {
+        if (ts.isVariableDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer)
+          && ['useState', 'useRef'].includes(node.initializer.expression.getText())) {
+          const name = ts.isArrayBindingPattern(node.name) ? node.name.elements[0].name.getText() : node.name.getText()
+          return ts.factory.updateVariableDeclaration(node, node.name, node.exclamationToken, node.type,
+            ts.factory.updateCallExpression(node.initializer, node.initializer.expression, node.initializer.typeArguments,
+              [...(node.initializer.arguments.length ? node.initializer.arguments : [ts.factory.createIdentifier('undefined')]), ts.factory.createStringLiteral(name)]))
+        }
+        return ts.visitEachChild(node, visit, ctx)
+      }
+      return (node) => ts.visitNode(node, visit)
+    }] } }).outputText
     const module = { exports: {} }
     cache.set(filename, module.exports)
     const requireLocal = (name) => {
@@ -140,7 +163,15 @@ function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
   }
   render()
   return {
-    settle, scans, settingsWrites, created, component,
+    settle, scans, settingsWrites, created, started, normalized, renamed, transitions, component,
+    state: (name) => namedSlots.get(name)?.value,
+    ref: (name) => namedSlots.get(name)?.current,
+    nodes: () => nodes(tree),
+    review: () => {
+      const node = nodes(tree).find((n) => n.type?.name === 'FilenameReview')
+      return node.type(node.props)
+    },
+    buttons: (node) => nodes(node).filter((n) => n.type?.name === 'Button'),
     rows: () => component('QueueTable').rows,
     dialog: () => nodes(tree).find((n) => n.props?.role === 'dialog'),
     text, saved: () => savedFolder,
@@ -153,6 +184,7 @@ function host(initialFolder = 'A', { ignoreAbort = false } = {}) {
     scan: (fn) => { scanImpl = fn }, jobs: (value) => { jobs = value },
     save: (fn) => { saveImpl = fn }, health: (fn) => { healthImpl = fn },
     settings: (fn) => { settingsImpl = fn }, normalize: (fn) => { normalizeImpl = fn },
+    rename: (fn) => { renameImpl = fn }, active: (value) => { activeJob = value },
     revision: (value) => { revision = value },
     hasTimer: (ms) => [...timers.values()].some((value) => value.ms === ms),
     tick: async (ms) => {
@@ -328,7 +360,8 @@ cases.unmount_abort = async () => {
   h.unmount(); assert.equal(h.scans[0].signal.aborted, true)
   pending.resolve(files('A')); await Promise.resolve()
 }
-;(async () => {
+module.exports = { host, deferred, files, job }
+if (require.main === module) (async () => {
   const results = {}
   for (const [name, run] of Object.entries(cases)) {
     try { await run(); results[name] = 'PASS' }
