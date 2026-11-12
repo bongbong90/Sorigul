@@ -20,6 +20,13 @@ export type DriveStatus =
   | 'DONE'
   | 'FAILED'
 
+export type DriveAuthState =
+  | 'UNAUTHENTICATED'
+  | 'AUTHORIZING'
+  | 'CONNECTED'
+  | 'REFRESH_FAILED'
+  | 'REAUTH_REQUIRED'
+
 export interface DriveFileState {
   status: DriveStatus
   error: string | null
@@ -225,7 +232,13 @@ export const api = {
       `/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(fileId)}/drive${retry ? '/retry' : ''}`,
       { method: 'POST' },
     ),
-  driveStatus: () => request<{ auth_state: string; scope: string }>('/drive/status'),
+  driveStatus: () => request<{ auth_state: DriveAuthState; scope: string }>('/drive/status'),
+  startDriveAuth: () => request<{ state: string; authorization_url: string; scope: string }>('/drive/auth/start', {
+    method: 'POST',
+  }),
+  completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
+    method: 'POST', body: JSON.stringify({ code }),
+  }),
   folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
     method: 'POST', body: JSON.stringify({ folder, filter }),
   }),
