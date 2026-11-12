@@ -30,7 +30,7 @@ def main():
     repo = Path(__file__).resolve().parents[1]
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     build_package(args.output, commit, lambda name: subprocess.check_output(["git", "show", f"{commit}:{name}"], cwd=repo))
-    print("NOTEBOOK_SOURCE_PACKAGE_CREATED — exact committed source; no credentials or user data")
+    print("NOTEBOOK_SOURCE_PACKAGE_CREATED - exact committed source; no credentials or user data")
 
 
 if __name__ == "__main__":
