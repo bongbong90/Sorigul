@@ -26,6 +26,8 @@ from src.services.colab_security import EMPTY_SHA256, PairingSession
 
 
 CHUNK_SECONDS = 300
+COLAB_RUNTIME_ENGINE = "faster-whisper"
+COLAB_RUNTIME_MODEL = "large-v3"
 FATAL_TRANSCRIBE_HTTP_STATUSES = frozenset({401, 403, 404, 405})
 # Hard ceiling for a single ffmpeg invocation while preparing Colab audio.
 FFMPEG_SPLIT_TIMEOUT_SECONDS = 300
@@ -366,7 +368,10 @@ class DirectColabHttpClient:
             )
         self.auth_context = auth_context
         self.timeout_seconds = timeout_seconds
-        self.signature = f"direct-colab:{self.base_url}:{auth_context.fingerprint}:v2"
+        self.signature = (
+            f"direct-colab:{COLAB_RUNTIME_ENGINE}:{COLAB_RUNTIME_MODEL}:"
+            f"{self.base_url}:{auth_context.fingerprint}:v3"
+        )
 
     def check_health(self):
         request = urllib.request.Request(
@@ -378,6 +383,7 @@ class DirectColabHttpClient:
             with urllib.request.urlopen(request, timeout=30) as response:
                 if not 200 <= response.status < 300:
                     raise OSError(f"HTTP {response.status}")
+                body = response.read()
         except Exception as exc:
             raise EngineError(
                 "COLAB_UNAVAILABLE",
@@ -387,6 +393,31 @@ class DirectColabHttpClient:
                 retryable=False,
                 fatal=True,
             ) from exc
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EngineError(
+                "COLAB_RUNTIME_INCOMPATIBLE",
+                ErrorCategory.CONFIGURATION,
+                "호환되는 Sorigul Colab 런타임이 아닙니다.",
+                technical_detail=f"invalid health response: {exc}",
+                retryable=False,
+                fatal=True,
+            ) from exc
+        expected = {
+            "status": "ok",
+            "engine": COLAB_RUNTIME_ENGINE,
+            "model": COLAB_RUNTIME_MODEL,
+        }
+        if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
+            raise EngineError(
+                "COLAB_RUNTIME_INCOMPATIBLE",
+                ErrorCategory.CONFIGURATION,
+                "호환되는 Sorigul Colab 런타임이 아닙니다.",
+                technical_detail=f"expected {expected!r}, received {payload!r}",
+                retryable=False,
+                fatal=True,
+            )
 
     def transcribe(self, chunk_path: Path) -> TranscriptionResult:
         boundary = f"----Sorigul{uuid.uuid4().hex}"

@@ -1,5 +1,6 @@
 import hashlib
 import asyncio
+import hashlib
 import io
 import sys
 import tempfile
@@ -16,8 +17,10 @@ from colab.sorigul_colab_bootstrap import (  # noqa: E402
     CLOUDFLARED_ASSET_URL,
     CLOUDFLARED_SHA256,
     CLOUDFLARED_VERSION,
+    RuntimeIdentity,
     create_app,
     ensure_cloudflared,
+    select_runtime_identity,
     start_tunnel,
     stop_owned_tunnel,
     build_ready_metadata,
@@ -27,11 +30,44 @@ from src.services.colab_security import EMPTY_SHA256, PairingRegistry, parse_req
 
 class FakeModel:
     def __init__(self):
-        self.calls = 0
+        self.calls = []
 
-    def transcribe(self, _path, **_kwargs):
-        self.calls += 1
-        return {"text": "ok", "segments": []}
+    def transcribe(self, path, **kwargs):
+        self.calls.append((path, kwargs))
+        return iter(
+            (
+                FakeSegment(0, 1.25, " 첫 번째 "),
+                FakeSegment(1.25, 2.5, "두 번째"),
+            )
+        ), FakeInfo("ko")
+
+
+class FakeSegment:
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class FakeInfo:
+    def __init__(self, language):
+        self.language = language
+
+
+@pytest.mark.parametrize(
+    "available,device,compute_type",
+    ((True, "cuda", "float16"), (False, "cpu", "int8")),
+)
+def test_runtime_identity_selects_canonical_device_and_compute(available, device, compute_type):
+    torch_module = type(
+        "FakeTorch",
+        (),
+        {"cuda": type("FakeCuda", (), {"is_available": staticmethod(lambda: available)})()},
+    )()
+
+    identity = select_runtime_identity(torch_module)
+
+    assert identity == RuntimeIdentity("faster-whisper", "large-v3", device, compute_type)
 
 
 def paired():
@@ -68,10 +104,19 @@ class FakeRequest:
 
 def test_signed_health_passes_and_unsigned_health_is_rejected():
     session, pairing = paired()
-    client = TestClient(create_app(FakeModel(), "local-only", pairing))
+    identity = RuntimeIdentity("faster-whisper", "large-v3", "cuda", "float16")
+    client = TestClient(create_app(FakeModel(), "local-only", pairing, identity))
     assert client.get("/health").status_code == 401
     headers = session.signed_headers("GET", "/health", EMPTY_SHA256)
-    assert client.get("/health", headers=headers).status_code == 200
+    response = client.get("/health", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "engine": "faster-whisper",
+        "model": "large-v3",
+        "device": "cuda",
+        "compute_type": "float16",
+    }
 
 
 def test_local_bootstrap_secret_is_required_for_unsigned_readiness():
@@ -94,15 +139,27 @@ def test_signed_transcribe_passes_and_unsigned_never_calls_model(tmp_path, monke
     unsigned = FakeRequest({}, audio)
     assert asyncio.run(endpoint(unsigned)).status_code == 401
     assert unsigned.form_calls == 0
-    assert model.calls == 0
+    assert model.calls == []
     headers = session.signed_headers(
         "POST", "/transcribe", hashlib.sha256(audio).hexdigest()
     )
     signed = FakeRequest(headers, audio)
     result = asyncio.run(endpoint(signed))
-    assert result["text"] == "ok"
+    assert result == {
+        "text": "첫 번째 두 번째",
+        "segments": [
+            {"start": 0.0, "end": 1.25, "text": "첫 번째"},
+            {"start": 1.25, "end": 2.5, "text": "두 번째"},
+        ],
+        "language": "ko",
+    }
     assert signed.form_calls == 1
-    assert model.calls == 1
+    assert len(model.calls) == 1
+    temp_path, kwargs = model.calls[0]
+    assert not Path(temp_path).exists(), "segments must be consumed before temporary audio cleanup"
+    assert kwargs == {"language": "ko", "beam_size": 5, "word_timestamps": False}
+    for local_only in ("fp16", "best_of", "patience", "condition_on_previous_text"):
+        assert local_only not in kwargs
 
 
 def test_wrong_content_hash_rejected_before_model_call():
@@ -112,7 +169,7 @@ def test_wrong_content_hash_rejected_before_model_call():
     headers = session.signed_headers("POST", "/transcribe", "0" * 64)
     response = asyncio.run(endpoint(FakeRequest(headers, b"different")))
     assert response.status_code == 400
-    assert model.calls == 0
+    assert model.calls == []
 
 
 def test_verifier_rejects_wrong_id_malformed_id_tampering_and_time_bounds():

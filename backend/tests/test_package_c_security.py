@@ -97,10 +97,16 @@ def test_direct_client_signs_health_and_audio_hash(tmp_path, monkeypatch):
 
     def urlopen(request, **_kwargs):
         captured.append(request)
+        if request.full_url.endswith("/health"):
+            return FakeResponse(
+                b'{"status":"ok","engine":"faster-whisper","model":"large-v3",'
+                b'"device":"cpu","compute_type":"int8"}'
+            )
         return FakeResponse()
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
     client = DirectColabHttpClient("https://example.test", session)
+    assert client.signature.startswith("direct-colab:faster-whisper:large-v3:")
     client.check_health()
     audio = tmp_path / "chunk.mp3"
     audio.write_bytes(b"test-owned-audio")

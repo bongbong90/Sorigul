@@ -33,6 +33,9 @@ REPLAY_NONCE_TTL_SECONDS = 300
 REPLAY_NONCE_LIMIT = 4096
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 
+COLAB_ENGINE = "faster-whisper"
+COLAB_MODEL = "large-v3"
+
 CLOUDFLARED_VERSION = "2026.9.3"
 CLOUDFLARED_ASSET_URL = (
     "https://github.com/cloudflare/cloudflared/releases/download/"
@@ -166,6 +169,33 @@ class ActivePairing:
 active_pairing = ActivePairing()
 
 
+@dataclass(frozen=True)
+class RuntimeIdentity:
+    engine: str
+    model: str
+    device: str
+    compute_type: str
+
+    def health_payload(self) -> dict:
+        return {
+            "status": "ok",
+            "engine": self.engine,
+            "model": self.model,
+            "device": self.device,
+            "compute_type": self.compute_type,
+        }
+
+
+def select_runtime_identity(torch_module) -> RuntimeIdentity:
+    device = "cuda" if torch_module.cuda.is_available() else "cpu"
+    return RuntimeIdentity(
+        engine=COLAB_ENGINE,
+        model=COLAB_MODEL,
+        device=device,
+        compute_type="float16" if device == "cuda" else "int8",
+    )
+
+
 def build_ready_metadata(request_payload: dict, base_url: str, now: Optional[datetime] = None) -> Optional[dict]:
     if not isinstance(request_payload, dict):
         return None
@@ -249,11 +279,18 @@ def rendezvous_loop(base_url: str, pairing: ActivePairing = active_pairing):
         time.sleep(3)
 
 
-def create_app(model, bootstrap_secret: str, pairing: ActivePairing = active_pairing):
+def create_app(
+    model,
+    bootstrap_secret: str,
+    pairing: ActivePairing = active_pairing,
+    runtime_identity: Optional[RuntimeIdentity] = None,
+):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
     import torch
 
+    if runtime_identity is None:
+        runtime_identity = select_runtime_identity(torch)
     app = FastAPI()
 
     def unauthorized():
@@ -274,7 +311,7 @@ def create_app(model, bootstrap_secret: str, pairing: ActivePairing = active_pai
             return unauthorized()
         if model is None:
             return JSONResponse(status_code=503, content={"error": "Model not loaded"})
-        return {"status": "ok"}
+        return runtime_identity.health_payload()
 
     @app.post("/transcribe")
     async def transcribe(request: Request):
@@ -297,24 +334,26 @@ def create_app(model, bootstrap_secret: str, pairing: ActivePairing = active_pai
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
                 temp_audio.write(content)
                 temp_audio_path = temp_audio.name
-            result = model.transcribe(
+            segments, info = model.transcribe(
                 temp_audio_path,
                 language="ko",
-                task="transcribe",
-                temperature=0.0,
                 beam_size=5,
-                best_of=5,
-                patience=1,
-                condition_on_previous_text=False,
-                fp16=torch.cuda.is_available(),
+                word_timestamps=False,
             )
+            normalized_segments = [
+                {
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": str(segment.text).strip(),
+                }
+                for segment in segments
+            ]
             return {
-                "text": result["text"],
-                "segments": [
-                    {"start": item["start"], "end": item["end"], "text": item["text"]}
-                    for item in result["segments"]
-                ],
-                "language": "ko",
+                "text": " ".join(
+                    segment["text"] for segment in normalized_segments if segment["text"]
+                ),
+                "segments": normalized_segments,
+                "language": info.language,
             }
         except Exception:
             return JSONResponse(status_code=500, content={"error": "Transcription failed"})
@@ -421,12 +460,22 @@ def main():
     except ImportError:
         print("Not running in Google Colab. Drive mount skipped.")
         return
-    print("Loading Whisper Medium model...")
-    import whisper
-    model = whisper.load_model("medium")
-    print("Model loaded.")
+    import torch
+    from faster_whisper import WhisperModel
+
+    runtime_identity = select_runtime_identity(torch)
+    print(
+        "Loading faster-whisper large-v3 model "
+        f"(device={runtime_identity.device}, compute_type={runtime_identity.compute_type})..."
+    )
+    model = WhisperModel(
+        runtime_identity.model,
+        device=runtime_identity.device,
+        compute_type=runtime_identity.compute_type,
+    )
+    print("faster-whisper large-v3 model loaded.")
     bootstrap_secret = secrets.token_urlsafe(32)
-    app = create_app(model, bootstrap_secret)
+    app = create_app(model, bootstrap_secret, runtime_identity=runtime_identity)
     threading.Thread(target=run_uvicorn, args=(app,), daemon=True).start()
     health_ok = False
     for _ in range(10):
