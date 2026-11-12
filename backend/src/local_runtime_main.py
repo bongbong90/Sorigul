@@ -187,6 +187,14 @@ def _failure(exc: Exception) -> dict:
     }
 
 
+def _write_response(response: dict) -> None:
+    # This is a byte protocol, not console text. Bypass the locale-dependent
+    # TextIOWrapper even for frozen Windows workers and inherited code pages.
+    payload = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sorigul-local-whisper")
     parser.add_argument("--request", type=Path)
@@ -202,12 +210,10 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     request = json.load(sys.stdin)
                 response = _transcribe(_validate_request(request))
-        sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        _write_response(response)
         return 0 if response["ok"] else 1
     except Exception as exc:  # noqa: BLE001 - stable protocol boundary, no traceback
-        sys.stdout.write(json.dumps(_failure(exc), ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+        _write_response(_failure(exc))
         return 1
 
 
