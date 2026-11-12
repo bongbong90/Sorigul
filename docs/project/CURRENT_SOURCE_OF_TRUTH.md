@@ -24,9 +24,19 @@ ambiguous authority.
 - Python release tooling requires the Python 3.13 line. Runtime dependencies are exact-pinned from
   the verified local environment, except `python-multipart==0.0.32`, whose pin comes from official
   read-only PyPI metadata and is used only by the Colab artifact.
-- A packaged Local release requires `torch==2.13.0+cu130`, `torch.version.cuda == 13.0`, an available
-  CUDA device, and a successful real CUDA tensor computation. CPU fallback behavior in development
-  or historical artifacts is not acceptable release evidence.
+- A packaged Local release requires exact scalar strings `torch_requirement = "torch==2.13.0+cu130"`
+  and `expected_cuda = "13.0"` in the **Local Runtime manifest**, with JSON round-trip type/value
+  validation. Runtime discovery consumes these Local-only fields fail-closed, together with
+  runtime/protocol identity, artifact hashes, tracked clean provenance and Local/Core `source_head`
+  equality. Installed validation must prove `torch.version.cuda == 13.0`, an available CUDA device,
+  and a successful real CUDA tensor computation. CPU fallback behavior in development or historical
+  artifacts is not acceptable release evidence.
+- The **Core build manifest owns Core provenance only**; `torch_requirement` and `expected_cuda`
+  must be absent. The Windows installer consumes Core provenance/size/hash policy and must not
+  require or consume these Local-only fields or install Local Runtime. Historical pre-split Core
+  torch metadata acceptance (including #45) is superseded by Current Product Contract §7 and cannot
+  override this source routing. Fresh #113 must confirm Local scalar identity, Core field absence
+  and installed Core/Local provenance pairing before #45 can close.
 - `scripts/run_core_workflow_regression.ps1` is the canonical local, offline-capable, no-build source
   regression. It never installs dependencies or creates placeholder release artifacts.
 
