@@ -128,11 +128,15 @@ export function TranscriptionPage() {
     if (runState === 'CANCEL_REQUESTED' && currentId) {
       const cancelTimer = window.setTimeout(() => {
         setRows((currentRows) =>
-          currentRows.map((row) =>
-            row.id === currentId
-              ? { ...row, status: 'CANCELLED', detail: '작업이 취소됨 · 다시 시도 가능' }
-              : row,
-          ),
+          currentRows.map((row) => {
+            if (row.id === currentId) {
+              return { ...row, status: 'CANCELLED', detail: '작업이 취소됨 · 다시 시도 가능' }
+            }
+            if (activeQueue.includes(row.id) && row.status === 'WAITING') {
+              return { ...row, status: 'CANCELLED', detail: '대기 작업이 취소됨 · 다시 시도 가능' }
+            }
+            return row
+          }),
         )
         setRunState('CANCELLED')
       }, 600)
