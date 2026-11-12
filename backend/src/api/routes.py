@@ -635,7 +635,7 @@ def job_action(job_id: str, req: JobActionRequest):
         updated = job_manager.get_job(job_id)
 
     elif req.action == "retry":
-        # Reset failed/stopped/cancelled/crashed to waiting, checking filesystem truth
+        # Reset terminal failures, honoring forced replacement intent.
         current = job_manager.get_job(job_id)
         if not current:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -665,19 +665,24 @@ def job_action(job_id: str, req: JobActionRequest):
             retried_any = False
             for fid, fstatus in job.files.items():
                 if fstatus in {FileStatus.FAILED, FileStatus.STOPPED, FileStatus.CANCELLED, FileStatus.CRASHED}:
-                    if scanned_files.get(fid) == BundleStatus.DONE:
+                    # A forced replacement's old bundle is protected previous
+                    # output, not evidence that the replacement succeeded.
+                    if not job.force_retranscribe and scanned_files.get(fid) == BundleStatus.DONE:
                         job.files[fid] = FileStatus.DONE
                     else:
                         job.files[fid] = FileStatus.WAITING
                         retried_any = True
+            TranscriptionRunner._update_counts(job)
             if not retried_any:
                 if all(state == FileStatus.DONE for state in job.files.values()):
                     job.status = FileStatus.DONE
+                    job.error = None
                     job.events.append(JobEvent(level="info", category="Retry", message="재시도할 미완료 파일 없음"))
                     return
                 raise HTTPException(status_code=400, detail="No eligible files to retry.")
             job.status = FileStatus.WAITING
             job.error = None
+            job.batch_completed = False
             job.events.append(JobEvent(level="info", category="Retry", message="재시도 시작"))
 
         updated = job_manager.mutate_job(job_id, retry_mutation)
