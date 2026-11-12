@@ -20,8 +20,9 @@
        the self-test also exercises the bundled ffmpeg it will actually run
        against) and fails the build on a non-zero exit code.
 
-    Only ever deletes directories it created itself this run
-    (backend/packaging/build, backend/packaging/dist) -- never an
+    Only ever deletes the unique temp build/dist root it created itself
+    this run (under $env:TEMP\Sorigul_PyInstaller_<guid>) -- never
+    backend/packaging/build, backend/packaging/dist, or any other
     unrelated/pre-existing directory.
 
 .EXAMPLE
@@ -55,11 +56,12 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $VenvPython -m pip install --no-cache-dir -r "tools\requirements-packaging.txt"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$BuildDir = Join-Path $RepoRoot "backend\packaging\build"
-$DistDir = Join-Path $RepoRoot "backend\packaging\dist"
-# Only clean directories this script itself owns and is about to regenerate.
-if (Test-Path $BuildDir) { Remove-Item -Recurse -Force $BuildDir }
-if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
+$Uid = [guid]::NewGuid().ToString().Substring(0,8)
+$TempRoot = Join-Path $env:TEMP "Sorigul_PyInstaller_$Uid"
+$BuildDir = Join-Path $TempRoot "build"
+$DistDir = Join-Path $TempRoot "dist"
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 Write-Step "Running PyInstaller (backend/packaging/sorigul_backend.spec)"
 & $VenvPython -m PyInstaller --clean --noconfirm `
@@ -130,3 +132,5 @@ if ($SelfTestExit -ne 0) {
 
 Write-Host ""
 Write-Host "Sidecar build + self-test PASSED." -ForegroundColor Green
+
+if (Test-Path $TempRoot) { Remove-Item -Recurse -Force $TempRoot }
