@@ -121,8 +121,14 @@ class LocalWhisperEngine:
                 else:
                     raise self._transcription_error(exc) from exc
 
-        # OpenAI Whisper does not expose a safe mid-call cancellation callback.
-        # A request observed here prevents any output from being committed.
+        # OpenAI Whisper does not expose a safe mid-call cancellation callback,
+        # and this engine deliberately never kills/interrupts the thread or
+        # the CUDA work. A Stop/Cancel requested during model.transcribe()
+        # stays pending (the Job keeps its active state) until the call
+        # returns; it is acknowledged here, and the runner's pre-promotion
+        # gate guarantees the requested run never commits output. A call that
+        # truly hangs is recovered only at process level: owned-backend
+        # cleanup / app exit via the desktop shell's kill-on-close Job Object.
         token.raise_if_requested()
         try:
             return TranscriptionResult.from_engine_payload(payload)

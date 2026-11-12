@@ -1,12 +1,16 @@
 import http.server
 import json
+import logging
 import re
 import secrets
+import socket
 import threading
+import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Protocol
+from typing import Callable, Dict, Optional, Protocol, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from src.domain.models import (
@@ -22,8 +26,22 @@ from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.scanner import FileScanner
 
 
+logger = logging.getLogger(__name__)
+
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 OAUTH_CALLBACK_TIMEOUT_SECONDS = 300.0
+# Per-HTTP-request socket timeout for every Google Drive API call (list,
+# create, update, media upload/download chunks), applied through the
+# transport the API client is built with -- never process-wide.
+DRIVE_HTTP_TIMEOUT_SECONDS = 60.0
+# Overall deadline for a small media download (e.g. the Colab rendezvous
+# metadata file). Checked between chunks, each of which is itself bounded
+# by DRIVE_HTTP_TIMEOUT_SECONDS.
+DRIVE_MEDIA_DOWNLOAD_DEADLINE_SECONDS = 120.0
+DRIVE_NETWORK_FAILURE_MESSAGE = (
+    "Google Drive 작업 시간이 초과되었거나 네트워크 작업을 완료하지 못했습니다."
+)
+DRIVE_NETWORK_ERRORS: Tuple[type, ...] = (TimeoutError, socket.timeout, ConnectionError)
 DRIVE_ROOT_HIERARCHY = ("2026 제37회 공인중개사 자격시험", "전사자료")
 COURSES = {"개념완성", "기본이론", "기초이론", "핵심이론"}
 SUBJECT_ALIASES = {
@@ -145,9 +163,40 @@ class DriveAuth(Protocol):
     def complete(self, code: str) -> DriveAuthState: ...
 
 
+def build_authorized_http(credentials, timeout_seconds: float = DRIVE_HTTP_TIMEOUT_SECONDS):
+    """The google-api-python-client transport with an explicit per-request
+    socket timeout, so no Drive call relies on an OS/default indefinite wait."""
+    import google_auth_httplib2
+    import httplib2
+
+    return google_auth_httplib2.AuthorizedHttp(
+        credentials, http=httplib2.Http(timeout=timeout_seconds)
+    )
+
+
+def _is_network_failure(exc: BaseException) -> bool:
+    if isinstance(exc, DriveError):
+        return exc.code == "DRIVE_TIMEOUT"
+    if isinstance(exc, DRIVE_NETWORK_ERRORS):
+        return True
+    try:
+        import httplib2
+
+        return isinstance(exc, httplib2.HttpLib2Error)
+    except ImportError:
+        return False
+
+
 class GoogleDriveClient:
-    def __init__(self, service):
+    def __init__(
+        self,
+        service,
+        download_deadline_seconds: float = DRIVE_MEDIA_DOWNLOAD_DEADLINE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ):
         self.service = service
+        self.download_deadline_seconds = download_deadline_seconds
+        self._clock = clock
 
     @staticmethod
     def _escape(value: str) -> str:
@@ -230,9 +279,12 @@ class GoogleDriveClient:
         request = self.service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
+        deadline = self._clock() + self.download_deadline_seconds
         done = False
-        while done is False:
-            status, done = downloader.next_chunk()
+        while not done:
+            if self._clock() >= deadline:
+                raise DriveError("DRIVE_TIMEOUT", DRIVE_NETWORK_FAILURE_MESSAGE)
+            _status, done = downloader.next_chunk()
         return fh.getvalue().decode("utf-8")
 
 
@@ -406,7 +458,14 @@ class GoogleOAuthService:
                 self._state = DriveAuthState.REAUTH_REQUIRED
                 raise DriveError("DRIVE_REAUTH_REQUIRED", "Google Drive를 다시 연결해 주세요.")
             self._state = DriveAuthState.CONNECTED
-            return GoogleDriveClient(build("drive", "v3", credentials=credentials, cache_discovery=False))
+            return GoogleDriveClient(
+                build(
+                    "drive",
+                    "v3",
+                    http=build_authorized_http(credentials),
+                    cache_discovery=False,
+                )
+            )
         except DriveError:
             raise
         except ImportError as exc:
@@ -501,8 +560,30 @@ class DriveUploadService:
         self.classifier = classifier or DriveClassifier()
         self.validator = validator or OutputBundleValidator()
         self.event_callback = event_callback
+        self._in_flight: set[Tuple[str, str]] = set()
+        self._in_flight_lock = threading.Lock()
 
     def upload(self, job_id: str, file_id: str) -> DriveFileState:
+        key = (job_id, file_id)
+        with self._in_flight_lock:
+            if key in self._in_flight:
+                raise DriveError(
+                    "DRIVE_UPLOAD_IN_PROGRESS", "이 파일의 Google Drive 업로드가 이미 진행 중입니다."
+                )
+            self._in_flight.add(key)
+        try:
+            return self._upload(job_id, file_id)
+        finally:
+            with self._in_flight_lock:
+                self._in_flight.discard(key)
+
+    def mark_failed(self, job_id: str, file_id: str, message: str):
+        """Best-effort Drive FAILED marker for an upload that ended with an
+        unexpected error. Never touches the Local transcription state."""
+        self._set_state(job_id, file_id, DriveStatus.FAILED, message)
+        self._event(job_id, "error", "Drive", "Drive upload 실패", file_id)
+
+    def _upload(self, job_id: str, file_id: str) -> DriveFileState:
         job = self.jobs.get_job(job_id)
         if job is None:
             raise KeyError("JOB_NOT_FOUND")
@@ -546,8 +627,13 @@ class DriveUploadService:
             self._set_state(job_id, file_id, DriveStatus.FAILED, exc.user_message)
             self._event(job_id, "error", "Drive", "Drive preflight 실패", file_id)
             return self._current(job_id, file_id)
-        except Exception:
-            self._set_state(job_id, file_id, DriveStatus.FAILED, "Google Drive preflight를 완료하지 못했습니다.")
+        except Exception as exc:
+            message = (
+                DRIVE_NETWORK_FAILURE_MESSAGE
+                if _is_network_failure(exc)
+                else "Google Drive preflight를 완료하지 못했습니다."
+            )
+            self._set_state(job_id, file_id, DriveStatus.FAILED, message)
             self._event(job_id, "error", "Drive", "Drive preflight 실패", file_id)
             return self._current(job_id, file_id)
 
@@ -563,12 +649,14 @@ class DriveUploadService:
                     remote_id = client.create_file(parent_id, path.name, path)
                 remote_ids[path.name] = remote_id
                 self._event(job_id, "info", "Drive", f"Drive 파일 upload 완료: {path.name}", file_id)
-        except Exception:
+        except Exception as exc:
             self._set_state(
                 job_id,
                 file_id,
                 DriveStatus.FAILED,
-                "Google Drive 파일 업로드에 실패했습니다.",
+                DRIVE_NETWORK_FAILURE_MESSAGE
+                if _is_network_failure(exc)
+                else "Google Drive 파일 업로드에 실패했습니다.",
                 remote_ids,
             )
             self._event(job_id, "error", "Drive", "Drive upload 실패", file_id)
@@ -615,3 +703,75 @@ class DriveUploadService:
         if job is None:
             raise KeyError("JOB_NOT_FOUND")
         return job.drive[file_id]
+
+
+class DriveExecutionService:
+    """Runs automatic Drive uploads on their own worker, outside the
+    transcription runner, so Drive network I/O can never hold a
+    transcription completion. One task per (job, file) at a time; every
+    task's failure is contained here and only ever recorded as Drive state.
+    A single worker keeps tasks FIFO, which `after_pending_uploads` relies on.
+    """
+
+    def __init__(self, upload_service: DriveUploadService, max_workers: int = 1):
+        self.upload_service = upload_service
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="sorigul-drive")
+        self._futures: Dict[Tuple[str, str], Future] = {}
+        self._lock = threading.Lock()
+
+    def submit(self, job_id: str, file_id: str) -> bool:
+        key = (job_id, file_id)
+        with self._lock:
+            existing = self._futures.get(key)
+            if existing is not None and not existing.done():
+                return False
+            future = self._executor.submit(self._run, job_id, file_id)
+            self._futures[key] = future
+        future.add_done_callback(lambda done: self._forget(key, done))
+        return True
+
+    def in_flight(self, job_id: str, file_id: str) -> bool:
+        with self._lock:
+            future = self._futures.get((job_id, file_id))
+            return future is not None and not future.done()
+
+    def after_pending_uploads(self, job_id: str, callback: Callable[[], None]):
+        """Runs ``callback`` once every upload already scheduled for this Job
+        has finished (inline when there is none)."""
+        with self._lock:
+            pending = any(
+                key[0] == job_id and not future.done() for key, future in self._futures.items()
+            )
+            if pending:
+                self._executor.submit(self._contain, callback)
+                return
+        self._contain(callback)
+
+    def _run(self, job_id: str, file_id: str):
+        try:
+            self.upload_service.upload(job_id, file_id)
+        except Exception as exc:
+            logger.exception("Automatic Drive upload failed for %s/%s", job_id, file_id)
+            if isinstance(exc, DriveError) and exc.code == "DRIVE_UPLOAD_IN_PROGRESS":
+                return
+            message = (
+                DRIVE_NETWORK_FAILURE_MESSAGE
+                if _is_network_failure(exc)
+                else "Google Drive 업로드를 완료하지 못했습니다."
+            )
+            try:
+                self.upload_service.mark_failed(job_id, file_id, message)
+            except Exception:
+                logger.exception("Could not record Drive failure for %s/%s", job_id, file_id)
+
+    @staticmethod
+    def _contain(callback: Callable[[], None]):
+        try:
+            callback()
+        except Exception:
+            logger.exception("Post-upload callback failed")
+
+    def _forget(self, key: Tuple[str, str], future: Future):
+        with self._lock:
+            if self._futures.get(key) is future:
+                del self._futures[key]

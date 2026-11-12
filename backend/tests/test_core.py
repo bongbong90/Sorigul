@@ -364,19 +364,26 @@ def test_job_retry_all_done(tmp_path, test_dir):
     assert updated_job.files["done"] == FileStatus.DONE
     assert updated_job.status == FileStatus.DONE
 
-def test_stop_cancel_consistency(tmp_path):
+def test_stop_cancel_consistency(tmp_path, monkeypatch):
     jm = JobManager(str(tmp_path / "jobs.json"))
     job = jm.create_job("folder", ["f1", "f2", "f3", "f4"])
 
     import src.api.routes
-    src.api.routes.job_manager = jm
+    from src.services.transcription_runner import BackgroundExecutionService, TranscriptionRunner
+    monkeypatch.setattr(src.api.routes, "job_manager", jm)
+    monkeypatch.setattr(
+        src.api.routes,
+        "execution_service",
+        BackgroundExecutionService(TranscriptionRunner(jm, lambda _job: None)),
+    )
     from src.api.routes import JobActionRequest, job_action
     from fastapi import HTTPException
     import pytest
 
-    # Test Stop on WAITING -> rejected
+    # Stop on WAITING (never started) -> rejected, nothing mutated
     with pytest.raises(HTTPException):
         job_action(job.job_id, JobActionRequest(action="stop"))
+    assert jm.get_job(job.job_id).status == FileStatus.WAITING
 
     job.status = FileStatus.TRANSCRIBING
     job.files["f1"] = FileStatus.DONE
@@ -384,28 +391,25 @@ def test_stop_cancel_consistency(tmp_path):
     job.files["f3"] = FileStatus.WAITING
     job.files["f4"] = FileStatus.WAITING
     jm.update_job(job)
+    before = jm.get_job(job.job_id)
 
-    # Test Stop
-    job_action(job.job_id, JobActionRequest(action="stop"))
-    assert job.status == FileStatus.STOPPED
-    assert job.files["f1"] == FileStatus.DONE
-    assert job.files["f2"] == FileStatus.STOPPED # Active becomes STOPPED
-    assert job.files["f3"] == FileStatus.WAITING # WAITING stays WAITING
+    # Active-looking Job without an execution token: the request cannot be
+    # acknowledged, so neither Stop nor Cancel may fake a state change.
+    for action in ("stop", "cancel"):
+        with pytest.raises(HTTPException) as caught:
+            job_action(job.job_id, JobActionRequest(action=action))
+        assert caught.value.status_code == 409
+        after = jm.get_job(job.job_id)
+        assert after.status == FileStatus.TRANSCRIBING
+        assert after.files == before.files
+        assert len(after.events) == len(before.events)
 
-    # Reset for Cancel test
-    job.status = FileStatus.TRANSCRIBING
-    job.files["f2"] = FileStatus.TRANSCRIBING
-    job.files["f3"] = FileStatus.WAITING
-    job.files["f4"] = FileStatus.WAITING
-    jm.update_job(job)
-
-    # Test Cancel
-    job_action(job.job_id, JobActionRequest(action="cancel"))
-    assert job.status == FileStatus.CANCEL_REQUESTED
-    assert job.files["f1"] == FileStatus.DONE
-    assert job.files["f2"] == FileStatus.CANCEL_REQUESTED
-    assert job.files["f3"] == FileStatus.CANCELLED
-    assert job.files["f4"] == FileStatus.CANCELLED
+    # Cancel of a WAITING Job whose execution never started is immediate.
+    waiting = jm.create_job("folder", ["w1", "w2"])
+    cancelled = job_action(waiting.job_id, JobActionRequest(action="cancel"))
+    assert cancelled.status == FileStatus.CANCELLED
+    assert cancelled.files == {"w1": FileStatus.CANCELLED, "w2": FileStatus.CANCELLED}
+    assert cancelled.events[-1].message == "Job 취소됨"
 
 def test_runtime_settings_default_last_engine():
     from src.services.settings import RuntimeSettings

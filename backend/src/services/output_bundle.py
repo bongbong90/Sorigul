@@ -93,7 +93,17 @@ class OutputBundleWriter:
         source_path: Path,
         result: TranscriptionResult,
         verification_callback: Optional[Callable[[], None]] = None,
+        before_promotion: Optional[Callable[[], None]] = None,
     ) -> BundlePaths:
+        """Write, validate, then promote a TXT/JSON/SRT bundle.
+
+        Order: write staged -> verification_callback -> validate staged ->
+        before_promotion -> promote. ``before_promotion`` is the last point
+        at which a Stop/Cancel can prevent the commit; raising from it
+        discards the staged files and leaves any existing bundle untouched.
+        Once promotion starts it is a short non-interruptible transaction
+        that either completes or rolls back -- never a half-installed bundle.
+        """
         final_paths = BundlePaths.final_for(source_path)
         token = uuid.uuid4().hex
         staged_paths = BundlePaths(
@@ -112,6 +122,8 @@ class OutputBundleWriter:
             if verification_callback is not None:
                 verification_callback()
             self.validator.validate(staged_paths)
+            if before_promotion is not None:
+                before_promotion()
             self._replace_bundle(staged_paths, final_paths, backup_paths)
             self._remove_paths(backup_paths)
             return final_paths

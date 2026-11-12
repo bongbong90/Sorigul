@@ -221,10 +221,10 @@ def test_runner_excludes_failed_file_from_speed_observations(tmp_path, monkeypat
     output_writer = OutputBundleWriter()
 
     class FailOnBWriter:
-        def commit(self, source_path, result, verification_callback=None):
+        def commit(self, source_path, result, **kwargs):
             if source_path.stem == "B":
                 raise RuntimeError("output failed")
-            return output_writer.commit(source_path, result, verification_callback)
+            return output_writer.commit(source_path, result, **kwargs)
 
     TranscriptionRunner(
         manager,
@@ -468,8 +468,8 @@ def test_state_transitions_are_persisted_before_done(tmp_path):
     observed = []
     original_mutate = manager.mutate_job
 
-    def recording_mutate(job_id, mutation):
-        result = original_mutate(job_id, mutation)
+    def recording_mutate(job_id, mutation, **kwargs):
+        result = original_mutate(job_id, mutation, **kwargs)
         if result:
             observed.append(result.files["A"])
         return result
