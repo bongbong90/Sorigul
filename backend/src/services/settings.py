@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -36,12 +36,23 @@ class NotificationSettings(BaseModel):
     job_complete: bool = True
 
 
+# Subject-scoped 1차/2차 stage picked by the user for a subject not in the
+# known-subject table (CORE_WORKFLOW_REFINEMENT_PLAN.md D16), keyed by the
+# exact trimmed subject string. Never write drive_auto_upload here -- Drive
+# auto-upload stays a per-run CreateJobRequest field (D23A), not a setting.
+StageOverrides = Dict[str, Literal["1차", "2차"]]
+
+
 class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     close_behavior: CloseBehavior = CloseBehavior.TRAY
     shutdown: ShutdownMode = ShutdownMode.DISABLED
+    transcription_folder: Optional[str] = None
+    last_course: Optional[str] = None
+    last_subject: Optional[str] = None
+    subject_stage_overrides: StageOverrides = Field(default_factory=dict)
 
 
 class SettingsPatch(BaseModel):
@@ -50,6 +61,10 @@ class SettingsPatch(BaseModel):
     notifications: Optional[NotificationSettings] = None
     close_behavior: Optional[CloseBehavior] = None
     shutdown: Optional[ShutdownMode] = None
+    transcription_folder: Optional[str] = None
+    last_course: Optional[str] = None
+    last_subject: Optional[str] = None
+    subject_stage_overrides: Optional[StageOverrides] = None
 
 
 class SettingsManager:

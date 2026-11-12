@@ -152,7 +152,7 @@ Because course and subject feed directly into the generated filename (`{course}_
 - Windows forbidden filename characters are rejected: `< > : " / \ | ? *`
 - a trailing dot or trailing space (both invalid at the end of a Windows filename component) is rejected
 
-Ordinary Korean/English/digit/space/underscore input is accepted. On rejection, Sorigul asks the user to correct the input — it never silently substitutes, strips, or replaces invalid characters on the user's behalf. This mirrors the "user confirms, never silent substitution" principle already locked for filename normalization uncertainty in `MIGRATION_CONTRACT.md` §10.2.
+Ordinary Korean/English/digit/space input is accepted. Underscore (`_`) is additionally rejected — it is the reserved structural delimiter in the generated filename (`{course}_{subject}_{N주차}_{M강}`), so allowing it inside course/subject would make the course/subject boundary unrecoverable when a standard-form filename is re-parsed. On rejection, Sorigul asks the user to correct the input — it never silently substitutes, strips, or replaces invalid characters on the user's behalf. This mirrors the "user confirms, never silent substitution" principle already locked for filename normalization uncertainty in `MIGRATION_CONTRACT.md` §10.2.
 
 ### D24 — Standard-name / typed course-subject mismatch: warn, never silently reroute
 

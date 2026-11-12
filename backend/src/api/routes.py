@@ -1,9 +1,18 @@
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from src.services.scanner import FileScanner
-from src.services.normalizer import FilenameNormalizer, NormalizationPreview
-from src.services.renamer import BundleRenamer
+from src.services.classification import StageRequiredError, resolve_stage
+from src.services.normalizer import (
+    ClassificationValidationError,
+    FilenameNormalizer,
+    NormalizationPreview,
+    collect_existing_stems,
+    validate_classification_text,
+)
+from src.services.renamer import BundleRenamer, UnsafeStemError, validate_safe_stem
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import (
     BackgroundExecutionService,
@@ -13,6 +22,7 @@ from src.services.transcription_runner import (
 from src.domain.models import (
     BundleStatus,
     DriveFileState,
+    FileMetadata,
     FileStatus,
     JobEvent,
     JobModel,
@@ -199,25 +209,68 @@ def complete_drive_auth(req: DriveAuthCompleteRequest):
 class NormalizeRequest(BaseModel):
     folder: str
     filename: str
-    existing_basenames: List[str]
+    course: str
+    subject: str
 
 @router.post("/normalize/preview", response_model=NormalizationPreview)
 def preview_normalization(req: NormalizeRequest):
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     normalizer = FilenameNormalizer()
-    return normalizer.normalize(req.filename, set(req.existing_basenames))
+    existing_stems = collect_existing_stems(
+        Path(req.folder), exclude_stem=Path(req.filename).stem
+    )
+    return normalizer.normalize(req.filename, course, subject, existing_stems)
+
+
+class NormalizeBatchRequest(BaseModel):
+    folder: str
+    filenames: List[str]
+    course: str
+    subject: str
+
+
+@router.post("/normalize/batch", response_model=List[NormalizationPreview])
+def preview_normalization_batch(req: NormalizeBatchRequest):
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    normalizer = FilenameNormalizer()
+    # Existing on-disk stems are the collision truth, except a batch member's
+    # own current stem -- it's a rename candidate, not a foreign collision.
+    existing_stems = collect_existing_stems(Path(req.folder))
+    batch_stems = {Path(name).stem for name in req.filenames}
+    existing_stems -= batch_stems
+    return normalizer.normalize_batch(req.filenames, course, subject, existing_stems)
+
 
 class RenameRequest(BaseModel):
     folder: str
     old_stem: str
     new_stem: str
 
-@router.post("/rename")
+class RenameResponse(BaseModel):
+    status: str
+    old_file_id: str
+    new_file_id: str
+
+@router.post("/rename", response_model=RenameResponse)
 def apply_rename(req: RenameRequest):
+    try:
+        old_stem = validate_safe_stem(req.old_stem, "기존 파일명")
+        new_stem = validate_safe_stem(req.new_stem, "새 파일명")
+    except UnsafeStemError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     renamer = BundleRenamer()
-    success = renamer.apply_rename(req.folder, req.old_stem, req.new_stem)
+    success = renamer.apply_rename(req.folder, old_stem, new_stem)
     if not success:
         raise HTTPException(status_code=400, detail="Rename failed due to conflict or error.")
-    return {"status": "success"}
+    return RenameResponse(status="success", old_file_id=old_stem, new_file_id=new_stem)
 
 class CreateJobRequest(BaseModel):
     folder: str
@@ -227,6 +280,17 @@ class CreateJobRequest(BaseModel):
     engine: str = "local_whisper"
     colab_url: Optional[str] = None
     upload_to_drive: bool = False
+    course: str
+    subject: str
+    stage: Optional[Literal["1차", "2차"]] = None
+    # Explicit per-file acknowledgement that the caller chose to proceed
+    # under the file's original (unresolved) name -- the only resolution
+    # that still leaves normalization/classification unresolved. Any target
+    # whose fresh normalize() result is MISMATCH/INVALID_TARGET/CONFLICT
+    # must appear here with "CONTINUE_ORIGINAL", or Job creation is
+    # rejected; this is the server-side backstop for "never create a Job
+    # with an unresolved file" (CORE_WORKFLOW_REFINEMENT_PLAN.md Section 12).
+    file_resolutions: Dict[str, Literal["CONTINUE_ORIGINAL"]] = Field(default_factory=dict)
 
 @router.post("/jobs", response_model=JobModel)
 def create_job(req: CreateJobRequest):
@@ -234,8 +298,25 @@ def create_job(req: CreateJobRequest):
         raise HTTPException(status_code=400, detail="Unsupported transcription engine.")
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")
+
+    try:
+        course = validate_classification_text(req.course, "과정명")
+        subject = validate_classification_text(req.subject, "과목명")
+    except ClassificationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    current_settings = settings_manager.get()
+    try:
+        stage = resolve_stage(subject, req.stage, current_settings.subject_stage_overrides)
+    except StageRequiredError:
+        raise HTTPException(
+            status_code=400,
+            detail="알 수 없는 과목입니다. 1차/2차를 선택해 주세요.",
+        )
+
     scanner = FileScanner(req.folder)
     files = scanner.scan()
+    files_by_id = {f.id: f for f in files}
 
     # Filter files
     target_ids = []
@@ -252,6 +333,39 @@ def create_job(req: CreateJobRequest):
     if not target_ids:
         raise HTTPException(status_code=400, detail="No eligible files to transcribe.")
 
+    file_metadata: Dict[str, FileMetadata] = {}
+    normalizer = FilenameNormalizer()
+    folder_path = Path(req.folder)
+    for fid in target_ids:
+        scanned = files_by_id.get(fid)
+        if scanned is None:
+            continue
+        existing_stems = collect_existing_stems(folder_path, exclude_stem=fid)
+        preview = normalizer.normalize(scanned.filename, course, subject, existing_stems)
+        if preview.result_type == "NORMALIZED":
+            raise HTTPException(
+                status_code=400,
+                detail="파일명 정규화를 먼저 적용해 주세요.",
+            )
+        if (
+            preview.result_type in {"MISMATCH", "INVALID_TARGET", "CONFLICT"}
+            and req.file_resolutions.get(fid) != "CONTINUE_ORIGINAL"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{scanned.filename}' 파일의 이름 정규화가 해결되지 않았습니다.",
+            )
+        normalized_name = (
+            Path(preview.suggested_name).stem
+            if preview.result_type == "UNCHANGED" and preview.suggested_name
+            else None
+        )
+        file_metadata[fid] = FileMetadata(
+            week=preview.detected_week,
+            lesson=preview.detected_lesson,
+            normalized_name=normalized_name,
+        )
+
     engine_config = {"base_url": req.colab_url} if req.colab_url else {}
     job = job_manager.create_job(
         req.folder,
@@ -260,6 +374,10 @@ def create_job(req: CreateJobRequest):
         engine_config=engine_config,
         force_retranscribe=req.force_retranscribe,
         upload_to_drive=req.upload_to_drive,
+        course=course,
+        subject=subject,
+        stage=stage,
+        file_metadata=file_metadata,
     )
     return job
 
