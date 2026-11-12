@@ -22,6 +22,13 @@
 - **준비 중 (PREPARING)**: `#536C7D` / `#E5EDF1`
 - **전사 중 (TRANSCRIBING)**: `#3E6874` / `#DCE9E9`
 - **저장 중 (SAVING)**: `#625A77` / `#ECE8F0`
+- **검증 중 (VERIFYING)**: `#625A77` / `#ECE8F0`
 - **완료 (DONE)**: `#466850` / `#E3EEE6`
 - **실패 (FAILED)**: `#8F504B` / `#F3E5E3`
-- **중지됨 (CANCELLED)**: `#7D603B` / `#F1E9DD`
+- **중지됨 (STOPPED)**: `#7D603B` / `#F1E9DD`
+- **취소됨 (CANCELLED)**: `#7D603B` / `#F1E9DD`
+- **복구 필요 (CRASHED)**: `#8F504B` / `#F3E5E3`
+- **재시도 중 (RETRYING)**: `#536C7D` / `#E5EDF1`
+- **취소 요청 중 (CANCEL_REQUESTED)**: `#7D603B` / `#F1E9DD`
+
+상태가 같은 palette를 공유하더라도 상태명과 설명을 함께 표시해 의미를 구분한다. 전체 상태 범위는 `UI_STATE_MATRIX.md`를 따른다.

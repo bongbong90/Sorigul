@@ -2,6 +2,8 @@
 
 **Status: PARTIAL**
 
+> **Contract alignment:** 아래의 선택 필요 Start와 Stop→`CANCELLED` 동작은 당시 mock 구현 기록이며 현재 제품 계약이 아니다. `MIGRATION_CONTRACT.md`에 따라 no-selection Start는 전체 범위 확인으로 이어지고, 실행 중 Stop은 `STOPPED`, 대기·작업 Cancel은 `CANCELLED`로 구분한다. 이 작업에서는 mock component를 변경하지 않으며 UI Feature Gap Closure에서 정렬한다.
+
 ## 1. 목적
 
 승인된 전사 화면의 정적 구조를 유지하면서 Frontend 내부 mock state로 선택, 시작, 진행,
@@ -12,11 +14,12 @@
 - `docs/design/TRANSCRIPTION_SCREEN_SPEC.md`
 - `docs/design/UI_STATE_MATRIX.md`
 - `docs/design/UI_FREEZE_CHECKLIST.md`
+- `docs/project/MIGRATION_CONTRACT.md`
 - `docs/design/TRANSCRIPTION_SCREEN_IMPLEMENTATION.md`
 - 공통 Design System, App Shell, Project 문서
 
-상태명과 사용자 표시 문구는 `UI_STATE_MATRIX.md`, Action 규칙과 화면 구조는
-`TRANSCRIPTION_SCREEN_SPEC.md`를 우선했다.
+제품 행동은 `MIGRATION_CONTRACT.md`, 상태명과 사용자 표시 문구는 `UI_STATE_MATRIX.md`,
+Action 규칙과 화면 구조는 `TRANSCRIPTION_SCREEN_SPEC.md`를 우선한다.
 
 ## 3. Mock State 구조
 
@@ -25,7 +28,7 @@
 - 현재 mock 폴더 index
 - 4개 `MOCK_FILES`의 최소 UI 정보와 상태
 - 선택된 row id 목록
-- 화면 실행 상태: `IDLE`, `TRANSCRIBING`, `DONE`, `CANCELLED`
+- 당시 mock 화면 실행 상태: `IDLE`, `TRANSCRIBING`, `DONE`, `CANCELLED`
 - Start 시점의 mock 처리 대상 id 목록과 현재 index
 - 현재 파일 mock progress
 
@@ -39,19 +42,19 @@ Backend job type은 정의하지 않았다.
 - 선택 수와 `DONE / 전체 대상` 완료 수 표시
 - Start/Stop disabled 상태와 click interaction
 - 선택한 row의 순차 상태/현재 작업/progress 변경
-- Stop 후 `CANCELLED → 중지됨`, 완료 후 `DONE → 완료` 표시
+- 당시 mock은 Stop 후 `CANCELLED → 중지됨`, 완료 후 `DONE → 완료` 표시 (현재 Contract gap)
 
 ## 5. Start 흐름
 
-선택 파일이 있고 실행 중이 아닐 때만 Start가 활성화된다. Start 시 선택 목록을 화면 전용
+당시 mock은 선택 파일이 있고 실행 중이 아닐 때만 Start가 활성화된다. Start 시 선택 목록을 화면 전용
 처리 순서로 복사하고 첫 row를 `TRANSCRIBING`으로 바꾼다. Start는 비활성, Stop은 활성으로
 전환되며 Current Task에 현재 파일과 고정 mock ETA 문구를 표시한다.
 
 ## 6. Stop 흐름
 
-Stop은 실행 중에만 활성화된다. 클릭 시 현재 row를 `CANCELLED`로 바꾸고 progress를 현재
+당시 mock의 Stop은 실행 중에만 활성화된다. 클릭 시 현재 row를 `CANCELLED`로 바꾸고 progress를 현재
 값에서 멈춘다. 대기 timer는 effect cleanup으로 제거된다. 선택이 남아 있으면 Start를 다시
-사용할 수 있다. 이는 명시되지 않은 실제 재시작 정책이 아니라 Preview용 mock 동작이다.
+사용할 수 있다. 이는 현재 제품 계약이 아니라 UI Feature Gap Closure에서 교정할 Preview 동작이다.
 
 ## 7. Complete 흐름
 
@@ -97,11 +100,14 @@ File System 접근은 없다.
 - 1024×768: page overflow/Sidebar 침범 없음, 긴 filename ellipsis PASS
 - 금지 source/API, 직접 SVG path, 추가 dependency 없음
 
-## 13. Unresolved
+## 13. Contract gaps for UI Feature Gap Closure
 
-실제 제품의 `CANCELLED`/전체 `DONE` 이후 재시작 정책은 기준 문서에 정의되어 있지 않다.
-현재 선택 유지와 재시작 가능 동작은 Mock Interaction 검증 전용이며 실제 기능 계약으로
-확정하지 않는다.
+- no-selection Start는 비활성화하지 않고 완료 bundle을 제외한 전체 범위를 확인한다.
+- Stop은 `STOPPED`, Cancel은 `CANCELLED`로 구분한다.
+- `FAILED`, `STOPPED`, `CANCELLED`, `CRASHED`는 완료 bundle을 보존한 채 미완료 파일만 Retry한다.
+- 일반 Start와 Retry는 `DONE`을 skip하며, 완료 파일은 보조 `다시 전사`로만 다시 처리한다.
+
+3–12절의 기존 mock 동작과 검증 결과는 구현 증거로 보존한다. 위 gap은 제품 정책의 미정 사항이 아니라 후속 UI 변경 대상이다.
 
 ## 14. 다음 Phase
 
