@@ -5,6 +5,8 @@ Status: `LOCKED` (Phase 0 — documentation only, no implementation)
 Branch: `feature/core-workflow-refinement`
 Base: `validation/full-feature-parity-release` @ `47aa500b5453e42f186292b41d9b8054f96bc638`
 
+> **Current routing notice (2026-09-29):** 이 문서는 D11+ 결정 provenance와 당시 implementation plan을 보존한다. 현재 제품 행동의 entry point와 전체 supersession map은 [`../project/CURRENT_PRODUCT_CONTRACT.md`](../project/CURRENT_PRODUCT_CONTRACT.md)다.
+
 > **Correction pass (2026-08-29, Phase 0.1):** before Phase 1 started, this plan's own first draft was reviewed and corrected in place — over-engineered scope was cut, one internal contract inconsistency was fixed, and several gaps were closed. Corrected/added: D21 no longer exposes Colab chunk counts in the UI (was inconsistent with the already-locked D08 chunk-invisibility contract); D22/D23A drop the planned persistent `drive_auto_upload` setting in favor of a per-run, never-persisted checkbox; D16 gains the `subject_stage_overrides` persistence needed to actually satisfy its own "ask once" contract; Section 5.3's planned global stable-file-ID redesign is replaced by a narrower rename-transaction id remap (D23B, D24, D25, D26 add input validation, mismatch-warning, legacy-Job-compatibility, and Colab-side-artifact/URL-normalization requirements that the first draft omitted). Superseded/replaced text is marked inline rather than deleted; nothing here changes D11, D12, D15, or any decision in `MIGRATION_CONTRACT_REVIEW.md`.
 
 ## 1. Background

@@ -1,5 +1,7 @@
 # Sorigul Legacy Feature Parity Audit
 
+> **Current routing notice (2026-09-29):** 이 문서는 Legacy baseline audit evidence를 그대로 보존한다. 현재 제품 행동의 entry point와 전체 supersession map은 [`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md)다.
+
 > Audit date: 2026-08-26
 >
 > Sorigul baseline: `audit/legacy-feature-parity` / `154e550e6aefd4dfecd5e0140d0ff1f69bf17f5c`
