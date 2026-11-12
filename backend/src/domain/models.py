@@ -46,6 +46,7 @@ class ScannedFile(BaseModel):
     size: int
     modified_at: datetime
     completion_status: BundleStatus
+    duration_seconds: Optional[float] = None
     # True if rename is needed, False if unchanged, None if error in normalize
     needs_rename: Optional[bool] = None
 

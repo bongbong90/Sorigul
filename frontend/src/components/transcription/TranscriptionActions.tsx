@@ -2,9 +2,9 @@ import { Play, RotateCcw, Square, X } from 'lucide-react'
 import { Button } from '../ui/Button'
 
 interface TranscriptionActionsProps {
-  completedCount: number
+  progressDoneCount: number | null
+  progressTotalCount: number | null
   selectedCount: number
-  totalCount: number
   canStart: boolean
   canStop: boolean
   canCancel: boolean
@@ -16,9 +16,9 @@ interface TranscriptionActionsProps {
 }
 
 export function TranscriptionActions({
-  completedCount,
+  progressDoneCount,
+  progressTotalCount,
   selectedCount,
-  totalCount,
   canStart,
   canStop,
   canCancel,
@@ -54,7 +54,7 @@ export function TranscriptionActions({
       <div className="overall-progress" aria-label="전체 진행률" aria-live="polite">
         <span className="text-caption">전체 진행률 · {selectedCount}개 선택</span>
         <strong className="text-section-heading text-numeric">
-          {completedCount} / {totalCount} 완료
+          {progressDoneCount !== null && progressTotalCount !== null ? `${progressDoneCount} / ${progressTotalCount} 완료` : '—'}
         </strong>
       </div>
     </div>

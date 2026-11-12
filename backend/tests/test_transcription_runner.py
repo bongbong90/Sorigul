@@ -1,6 +1,8 @@
 import threading
 from pathlib import Path
 
+import pytest
+
 from src.domain.models import FileStatus
 from src.domain.transcription import (
     CancellationToken,
@@ -9,6 +11,7 @@ from src.domain.transcription import (
     TranscriptionResult,
 )
 from src.services.job_manager import JobManager
+from src.services.output_bundle import OutputBundleWriter
 from src.services.transcription_runner import BackgroundExecutionService, TranscriptionRunner
 
 
@@ -39,6 +42,79 @@ class PerFileEngine:
                 "파일 전사 실패",
             )
         return successful_result(source_path.stem)
+
+
+class MonotonicClock:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    def monotonic(self):
+        return next(self.values)
+
+
+class EtaInspectingEngine(PerFileEngine):
+    def __init__(self, manager, job_id, expected_eta):
+        super().__init__()
+        self.manager = manager
+        self.job_id = job_id
+        self.expected_eta = expected_eta
+
+    def transcribe(self, source_path, token, event_callback, progress_callback):
+        if source_path.stem in self.expected_eta:
+            actual = self.manager.get_job(self.job_id).eta_seconds
+            expected = self.expected_eta[source_path.stem]
+            if expected is None:
+                assert actual is None
+            else:
+                assert actual == pytest.approx(expected)
+        return super().transcribe(source_path, token, event_callback, progress_callback)
+
+
+class ColabProgressInspectingEngine:
+    def __init__(
+        self,
+        manager,
+        job_id,
+        before_eta=None,
+        progress_expectations=None,
+        cached_files=None,
+    ):
+        self.manager = manager
+        self.job_id = job_id
+        self.before_eta = before_eta or {}
+        self.progress_expectations = progress_expectations or {}
+        self.cached_files = cached_files or set()
+        self.calls = []
+
+    @staticmethod
+    def _assert_eta(actual, expected):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual == pytest.approx(expected)
+
+    def transcribe(self, source_path, token, event_callback, progress_callback):
+        stem = source_path.stem
+        self.calls.append(stem)
+        if stem in self.before_eta:
+            self._assert_eta(self.manager.get_job(self.job_id).eta_seconds, self.before_eta[stem])
+
+        for progress, expected_eta in self.progress_expectations.get(stem, []):
+            progress_callback(progress)
+            current = self.manager.get_job(self.job_id)
+            assert current.current_progress == pytest.approx(progress * 100)
+            self._assert_eta(current.eta_seconds, expected_eta)
+
+        result = successful_result(stem)
+        result.metadata["colab_recovery_cache_used"] = stem in self.cached_files
+        return result
+
+
+def patch_audio_durations(monkeypatch, durations):
+    monkeypatch.setattr(
+        "src.services.audio_metadata.AudioMetadataService.duration_seconds",
+        lambda self, path: durations[path.stem],
+    )
 
 
 def make_sources(tmp_path, names):
@@ -84,6 +160,166 @@ def test_runner_full_success_marks_batch_completed_true(tmp_path):
     finished = manager.get_job(job.job_id)
     assert finished.status == FileStatus.DONE
     assert finished.batch_completed is True
+    assert finished.eta_seconds is None
+
+
+def test_runner_clears_stale_eta_before_first_local_transcribe(tmp_path):
+    folder = make_sources(tmp_path, ["A"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A"])
+    job.eta_seconds = 999
+    manager.update_job(job)
+    engine = EtaInspectingEngine(manager, job.job_id, {"A": None})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_uses_observed_local_speed_for_next_file_eta(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"A": None, "B": 100.0})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_omits_eta_when_remaining_duration_is_unknown(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": None})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"B": None})
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_excludes_failed_file_from_speed_observations(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B", "C"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B", "C"])
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 100.0, "C": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 160.0, 170.0, 180.0]),
+    )
+    engine = EtaInspectingEngine(manager, job.job_id, {"B": 150.0, "C": 100.0})
+    output_writer = OutputBundleWriter()
+
+    class FailOnBWriter:
+        def commit(self, source_path, result, verification_callback=None):
+            if source_path.stem == "B":
+                raise RuntimeError("output failed")
+            return output_writer.commit(source_path, result, verification_callback)
+
+    TranscriptionRunner(
+        manager,
+        lambda _job: engine,
+        output_writer=FailOnBWriter(),
+    ).run(job.job_id, CancellationToken())
+
+    finished = manager.get_job(job.job_id)
+    assert finished.files["B"] == FileStatus.FAILED
+    assert finished.eta_seconds is None
+
+
+def test_runner_first_colab_file_reports_progress_without_eta(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A"], engine="direct_colab")
+    patch_audio_durations(monkeypatch, {"A": 100.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0]),
+    )
+    engine = ColabProgressInspectingEngine(
+        manager,
+        job.job_id,
+        before_eta={"A": None},
+        progress_expectations={"A": [(0.5, None)]},
+    )
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_uses_clean_colab_observation_for_progress_aware_eta(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"], engine="direct_colab")
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = ColabProgressInspectingEngine(
+        manager,
+        job.job_id,
+        before_eta={"A": None, "B": 100.0},
+        progress_expectations={"A": [(0.5, None)], "B": [(0.5, 50.0)]},
+    )
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_excludes_recovery_cached_colab_file_from_observations(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"], engine="direct_colab")
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": 200.0})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 1.0, 2.0, 3.0]),
+    )
+    engine = ColabProgressInspectingEngine(
+        manager,
+        job.job_id,
+        before_eta={"B": None},
+        progress_expectations={"B": [(0.5, None)]},
+        cached_files={"A"},
+    )
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
+
+
+def test_runner_colab_progress_keeps_eta_none_for_unknown_duration(tmp_path, monkeypatch):
+    folder = make_sources(tmp_path, ["A", "B"])
+    manager = JobManager(str(tmp_path / "runtime" / "jobs.json"))
+    job = manager.create_job(str(folder), ["A", "B"], engine="direct_colab")
+    patch_audio_durations(monkeypatch, {"A": 100.0, "B": None})
+    monkeypatch.setattr(
+        "src.services.transcription_runner.time",
+        MonotonicClock([0.0, 50.0, 60.0, 70.0]),
+    )
+    engine = ColabProgressInspectingEngine(
+        manager,
+        job.job_id,
+        before_eta={"B": None},
+        progress_expectations={"B": [(0.5, None)]},
+    )
+
+    TranscriptionRunner(manager, lambda _job: engine).run(job.job_id, CancellationToken())
+
+    assert manager.get_job(job.job_id).eta_seconds is None
 
 
 def test_runner_fatal_error_mid_batch_stops_early_and_marks_batch_incomplete(tmp_path):
@@ -161,6 +397,7 @@ def test_runner_stop_does_not_commit_result_or_start_next_file(tmp_path):
     assert finished.files["B"] == FileStatus.WAITING
     assert finished.status == FileStatus.STOPPED
     assert finished.batch_completed is False
+    assert finished.eta_seconds is None
     assert not (folder / "A.txt").exists()
 
 
@@ -179,6 +416,7 @@ def test_runner_cancel_acknowledges_cancelled_not_failed(tmp_path):
     assert finished.files["B"] == FileStatus.CANCELLED
     assert FileStatus.FAILED not in finished.files.values()
     assert finished.batch_completed is False
+    assert finished.eta_seconds is None
     assert not (folder / "A.txt").exists()
 
 

@@ -2,12 +2,19 @@ import os
 import json
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 from src.domain.models import ScannedFile, BundleStatus
 from src.domain.transcription import TranscriptionResult
+from src.services.audio_metadata import AudioMetadataService
 
 class FileScanner:
-    def __init__(self, folder_path: str):
+    def __init__(
+        self,
+        folder_path: str,
+        audio_metadata_service: Optional[AudioMetadataService] = None,
+    ):
         self.folder_path = Path(folder_path)
+        self.audio_metadata_service = audio_metadata_service or AudioMetadataService()
 
     def scan(self) -> list[ScannedFile]:
         if not self.folder_path.exists() or not self.folder_path.is_dir():
@@ -28,7 +35,8 @@ class FileScanner:
                     source_path=str(file_path.absolute()),
                     size=stat.st_size,
                     modified_at=datetime.fromtimestamp(stat.st_mtime),
-                    completion_status=status
+                    completion_status=status,
+                    duration_seconds=self.audio_metadata_service.duration_seconds(file_path),
                 )
                 results.append(scanned_file)
 

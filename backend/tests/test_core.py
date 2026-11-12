@@ -73,6 +73,36 @@ def test_file_scan_rejects_invalid_segment(tmp_path):
     scanned = FileScanner(str(tmp_path)).scan()
     assert scanned[0].completion_status == BundleStatus.INVALID_RESULT
 
+
+def test_scan_response_includes_audio_duration(tmp_path, monkeypatch):
+    source = tmp_path / "sample.mp3"
+    source.touch()
+    monkeypatch.setattr(
+        "src.services.audio_metadata.AudioMetadataService.duration_seconds",
+        lambda self, path: 125.4,
+    )
+    from src.api.routes import ScanRequest, scan_folder
+
+    scanned = scan_folder(ScanRequest(folder=str(tmp_path)))
+
+    assert scanned[0].duration_seconds == 125.4
+    assert scanned[0].model_dump()["duration_seconds"] == 125.4
+
+
+def test_scan_succeeds_when_audio_duration_is_unknown(tmp_path, monkeypatch):
+    source = tmp_path / "sample.mp3"
+    source.touch()
+    monkeypatch.setattr(
+        "src.services.audio_metadata.AudioMetadataService.duration_seconds",
+        lambda self, path: None,
+    )
+    from src.api.routes import ScanRequest, scan_folder
+
+    scanned = scan_folder(ScanRequest(folder=str(tmp_path)))
+
+    assert len(scanned) == 1
+    assert scanned[0].duration_seconds is None
+
 # ---------------------------------------------------------------------------
 # course/subject input validation (D23B) -- these feed directly into the
 # generated filename, so they get the same safety net filenames require.
