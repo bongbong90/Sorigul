@@ -46,6 +46,22 @@ export function validateClassificationText(raw: string, fieldLabel: string): Cla
   return { value: trimmed }
 }
 
+export interface WeekValidation {
+  value?: number
+  error?: string
+}
+
+// #180 manual week: digits only ("1", not "1주차"), a positive safe integer.
+// Mirrors backend validate_manual_week, which re-validates independently.
+export function validateWeekInput(raw: string): WeekValidation {
+  const trimmed = raw.trim()
+  if (!trimmed) return { error: '주차를 입력해 주세요.' }
+  if (!/^[0-9]+$/.test(trimmed)) return { error: '주차는 숫자만 입력해 주세요. (예: 1)' }
+  const value = Number(trimmed)
+  if (!Number.isSafeInteger(value) || value < 1) return { error: '주차는 1 이상의 정수로 입력해 주세요.' }
+  return { value }
+}
+
 export function knownStageFor(subject: string): Stage | undefined {
   return KNOWN_SUBJECT_STAGE[subject.trim()]
 }
