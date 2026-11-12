@@ -5,26 +5,25 @@ interface ProgressProps {
 }
 
 export function Progress({ value, max = 100, label }: ProgressProps) {
+  const normalizedMax = Number.isFinite(max) && max > 0 ? max : 100
+
   if (value === null) {
     return (
-      <div className="progress progress-indeterminate" role="progressbar" aria-label={label}>
-        <div className="progress-fill" />
-      </div>
+      <progress
+        className="progress progress-indeterminate"
+        max={normalizedMax}
+        aria-label={label}
+      />
     )
   }
-  const clamped = Math.min(Math.max(value, 0), max)
-  const percent = (clamped / max) * 100
+  const clamped = Math.min(Math.max(value, 0), normalizedMax)
 
   return (
-    <div
+    <progress
       className="progress"
-      role="progressbar"
-      aria-valuenow={clamped}
-      aria-valuemin={0}
-      aria-valuemax={max}
+      value={clamped}
+      max={normalizedMax}
       aria-label={label}
-    >
-      <div className="progress-fill" style={{ width: `${percent}%` }} />
-    </div>
+    />
   )
 }

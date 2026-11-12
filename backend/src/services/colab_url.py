@@ -1,3 +1,4 @@
+import ipaddress
 from urllib.parse import urlparse
 
 class ColabUrlError(ValueError):
@@ -28,7 +29,17 @@ def normalize_colab_base_url(value: str) -> str:
     if path != "":
         raise ColabUrlError("Unsupported path")
 
-    netloc = parsed.hostname
+    hostname = parsed.hostname.lower()
+    if parsed.scheme == "http":
+        is_loopback = hostname == "localhost"
+        try:
+            is_loopback = is_loopback or ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            pass
+        if not is_loopback:
+            raise ColabUrlError("Remote HTTP is not allowed")
+
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
     try:
         port = parsed.port
     except ValueError:
