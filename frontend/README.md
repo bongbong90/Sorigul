@@ -3,7 +3,8 @@
 React + TypeScript + Vite 기반 개발 환경.
 
 자세한 내용은 [docs/project/FRONTEND_FOUNDATION.md](../docs/project/FRONTEND_FOUNDATION.md),
-[docs/design/DESIGN_SYSTEM_FOUNDATION.md](../docs/design/DESIGN_SYSTEM_FOUNDATION.md) 참고.
+[docs/design/DESIGN_SYSTEM_FOUNDATION.md](../docs/design/DESIGN_SYSTEM_FOUNDATION.md),
+[docs/design/APP_SHELL_IMPLEMENTATION.md](../docs/design/APP_SHELL_IMPLEMENTATION.md) 참고.
 
 ## 실행
 

@@ -11,7 +11,7 @@ Greenfield 프로젝트이며
 
 현재 Phase:
 
-Project Foundation / Design System v1
+App Shell
 
 관련 공식 문서:
 
@@ -28,7 +28,8 @@ docs/design/
 
 현재 상태:
 - Frontend Foundation 완료
-- Design System Foundation 진행
+- Design System Foundation 완료
+- App Shell 완료
 - 실제 transcription 기능 없음
 - UI/UX First 진행 중
 
