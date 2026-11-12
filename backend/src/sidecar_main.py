@@ -53,6 +53,11 @@ def _self_test() -> int:
         if not path:
             raise RuntimeError("ffmpeg executable not resolvable (PATH or bundled sibling)")
 
+    def check_audio_metadata() -> None:
+        import mutagen  # noqa: F401
+        from mutagen.mp3 import MP3  # noqa: F401
+        from src.services.audio_metadata import AudioMetadataService  # noqa: F401
+
     def check_runtime_paths() -> None:
         from src.utils.paths import get_app_data_dir
 
@@ -64,6 +69,7 @@ def _self_test() -> int:
     check("whisper_import", check_whisper)
     check("torch_import", check_torch)
     check("ffmpeg_availability", check_ffmpeg)
+    check("audio_metadata_service_import", check_audio_metadata)
     check("runtime_path_initialization", check_runtime_paths)
 
     lines = []
