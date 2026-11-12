@@ -697,6 +697,13 @@ class BackgroundExecutionService:
         with self._lock:
             return self._unfinished_job_id_locked()
 
+    def run_when_idle(self, callback):
+        """Serialize a short local Import against every transcription start."""
+        with self._lock:
+            if self._unfinished_job_id_locked() is not None:
+                raise ExecutionInvariantError("전사 중에는 결과를 가져올 수 없습니다.")
+            return callback()
+
     def start(self, job_id: str) -> bool:
         # Same-Job cleanup wait happens outside the lock; the global check
         # below re-verifies under the lock, so waiting here cannot admit an

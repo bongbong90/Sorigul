@@ -1,7 +1,10 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request as FormRequest
+import zipfile
 from pydantic import BaseModel, Field
 from typing import Dict, List, Literal, Optional
 from src.services.scanner import FileScanner
@@ -51,6 +54,8 @@ from src.services.results import (
 from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
+from src.services.notebook_bundle import MAX_ARCHIVE_BYTES
+from src.services.notebook_import import NotebookImportService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -103,6 +108,70 @@ transcription_runner = TranscriptionRunner(
     job_finished_callback=handle_job_finished,
 )
 execution_service = BackgroundExecutionService(transcription_runner)
+
+
+@router.post("/results/notebook-import", response_model=JobModel)
+async def import_notebook_result(request: Request):
+    # Bound the complete multipart body before the form parser can spool it.
+    parts = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_ARCHIVE_BYTES + 65536:
+            raise HTTPException(status_code=413, detail="결과 ZIP은 8 MiB 이하여야 합니다.")
+        parts.append(chunk)
+
+    async def receive():
+        return {"type": "http.request", "body": b"".join(parts), "more_body": False}
+
+    bounded = FormRequest(request.scope, receive)
+    try:
+        async with bounded.form(max_files=1, max_fields=2) as form:
+            scan_id, item_id, upload = form.get("scan_id"), form.get("item_id"), form.get("archive")
+            if not isinstance(scan_id, str) or not isinstance(item_id, str) or not hasattr(upload, "read"):
+                raise ValueError("원본 MP3와 Notebook 결과 ZIP을 선택해 주세요.")
+            data = await upload.read(MAX_ARCHIVE_BYTES + 1)
+
+        def apply():
+            if drive_service.has_in_flight() or drive_execution_service.has_pending_work():
+                raise ExecutionInvariantError("Drive 업로드가 끝난 뒤 가져와 주세요.")
+            return execution_service.run_when_idle(lambda: NotebookImportService(job_manager).import_result(
+                results_service.import_source(scan_id, item_id), data))
+
+        return await run_in_threadpool(apply)
+    except (ExecutionInvariantError, FileExistsError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="폴더를 새로고침하고 원본 MP3를 다시 선택해 주세요.")
+    except (ValueError, TypeError, AttributeError, UnicodeError, zipfile.BadZipFile):
+        raise HTTPException(status_code=400, detail="원본 MP3와 ZIP의 형식·체크섬·timestamp를 확인해 주세요.")
+    except OSError:
+        raise HTTPException(status_code=409, detail="파일 접근 또는 저장에 실패했습니다. 기존 결과는 보존됩니다.")
+
+
+@router.post("/jobs/{job_id}/notebook-drive", response_model=JobModel)
+def upload_imported_notebook(job_id: str):
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="가져온 작업을 찾을 수 없습니다.")
+    if job.engine != "notebook_import" or job.status != FileStatus.DONE or len(job.files) != 1:
+        raise HTTPException(status_code=409, detail="가져오기가 완료된 결과만 전송할 수 있습니다.")
+    try:
+        matching = NotebookImportService(job_manager).matching_job(Path(job.folder) / (next(iter(job.files)) + ".mp3"))
+        if matching is None or matching.job_id != job_id:
+            raise ValueError("import identity changed")
+    except (ValueError, OSError):
+        raise HTTPException(status_code=409, detail="원본 또는 가져온 결과가 변경되어 전송하지 않았습니다.")
+    drive_execution_service.submit(job_id, next(iter(job.files)), skip_done=True)
+    return job_manager.get_job(job_id)
+
+
+@router.get("/results/notebook-import", response_model=Optional[JobModel])
+def find_notebook_import(scan_id: str, item_id: str):
+    try:
+        return NotebookImportService(job_manager).matching_job(results_service.import_source(scan_id, item_id))
+    except (KeyError, ValueError, OSError):
+        return None
 
 @router.get("/health")
 def health():

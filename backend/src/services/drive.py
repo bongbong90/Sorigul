@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -798,6 +799,21 @@ class DriveUploadService:
 
     def _upload(self, job_id: str, file_id: str) -> DriveFileState:
         job = self.jobs.get_job(job_id)
+        if job is not None and job.engine == "notebook_import" and job.files.get(file_id) == FileStatus.DONE:
+            # Revalidate at worker execution time, including generic retry
+            # endpoints. Upload only this immutable, verified bundle snapshot.
+            from src.services.notebook_import import NotebookImportService
+            with tempfile.TemporaryDirectory(prefix="sorigul-import-drive-") as temp:
+                try:
+                    NotebookImportService(self.jobs).snapshot_for_drive(job, file_id, Path(temp))
+                except (ValueError, OSError):
+                    self.mark_failed(job_id, file_id, "원본 또는 가져온 결과가 변경되어 전송하지 않았습니다.")
+                    return self._current(job_id, file_id)
+                return self._upload_bundle(job_id, file_id, Path(temp))
+        return self._upload_bundle(job_id, file_id)
+
+    def _upload_bundle(self, job_id: str, file_id: str, snapshot_folder: Optional[Path] = None) -> DriveFileState:
+        job = self.jobs.get_job(job_id)
         if job is None:
             raise KeyError("JOB_NOT_FOUND")
         if job.files.get(file_id) != FileStatus.DONE:
@@ -823,7 +839,7 @@ class DriveUploadService:
         try:
             from src.services.renamer import validate_safe_stem
             safe_stem = validate_safe_stem(file_id, "file_id")
-            dummy_mp3 = Path(job.folder) / f"{safe_stem}.mp3"
+            dummy_mp3 = (snapshot_folder or Path(job.folder)) / f"{safe_stem}.mp3"
             bundle = BundlePaths.final_for(dummy_mp3)
             self.validator.validate(bundle)
             paths = [bundle.txt, bundle.json, bundle.srt]
@@ -932,12 +948,16 @@ class DriveExecutionService:
         self._futures: Dict[Tuple[str, str], Future] = {}
         self._lock = threading.Lock()
 
-    def submit(self, job_id: str, file_id: str) -> bool:
+    def submit(self, job_id: str, file_id: str, *, skip_done: bool = False) -> bool:
         key = (job_id, file_id)
         with self._lock:
             existing = self._futures.get(key)
             if existing is not None and not existing.done():
                 return False
+            if skip_done:
+                job = self.upload_service.jobs.get_job(job_id)
+                if job is not None and job.drive.get(file_id, DriveFileState()).status == DriveStatus.DONE:
+                    return False
             future = self._executor.submit(self._run, job_id, file_id)
             self._futures[key] = future
         future.add_done_callback(lambda done: self._forget(key, done))
