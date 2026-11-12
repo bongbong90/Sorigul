@@ -14,6 +14,7 @@ import {
 } from '../api/client'
 import { pickFolder } from '../lib/native'
 import { useFolderRevision } from '../hooks/useFolderRevision'
+import { useTrayProgress } from '../hooks/useTrayProgress'
 import { knownStageFor, overrideStageFor, validateClassificationText, type Stage } from '../lib/classification'
 import {
   classifyPreview,
@@ -103,6 +104,7 @@ export function TranscriptionPage() {
   // never merged: only `job` feeds rowsFrom.
   const [job, setJob] = useState<JobModel>()
   const [globalActiveJob, setGlobalActiveJob] = useState<JobModel | null>(null)
+  useTrayProgress(globalActiveJob, job)
   const [nowMs, setNowMs] = useState(Date.now)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('STARTING')

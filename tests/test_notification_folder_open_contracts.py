@@ -152,7 +152,8 @@ def test_toast_window_is_declared_once_hidden_non_activating_and_off_taskbar():
     # Never a second toast window, never a second tray icon.
     lib = read_repo("frontend/src-tauri/src/lib.rs")
     assert "WebviewWindowBuilder" not in lib
-    assert lib.count("TrayIconBuilder::new()") == 1
+    assert lib.count("TrayIconBuilder::") == 1
+    assert "TrayIconBuilder::with_id(TRAY_ID)" in lib
 
 
 def test_no_broad_opener_shell_or_filesystem_capability():

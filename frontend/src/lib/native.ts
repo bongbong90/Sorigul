@@ -13,6 +13,26 @@ export interface SidecarStatus {
   message: string | null
 }
 
+export interface TrayProgressPayload {
+  status: string
+  currentFile: string | null
+  currentProgress: number | null
+}
+
+function filenameOnly(value: string | null): string | null {
+  if (!value) return null
+  const filename = value.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.replace(/[\r\n]/g, ' ').trim()
+  return filename || null
+}
+
+/** Updates the one native tray icon; browser development has no tray. */
+export async function setTrayProgress(payload: TrayProgressPayload): Promise<void> {
+  if (!isTauri()) return
+  await invoke('set_tray_progress', {
+    payload: { ...payload, currentFile: filenameOnly(payload.currentFile) },
+  })
+}
+
 /** Subscribe first, then read the latest snapshot so startup events cannot be lost. */
 export async function watchSidecarStatus(
   onStatus: (status: SidecarStatus) => void,
