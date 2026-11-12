@@ -236,7 +236,7 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
     const response = await fetch(`${API_BASE_URL}${path}`, {
       ...fetchInit,
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', ...fetchInit.headers },
+      headers: { ...(fetchInit.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...fetchInit.headers },
     })
     responseReceived = true
     if (!response.ok) {
@@ -348,6 +348,15 @@ export const api = {
   }),
   folders: (folder: string, filter: FolderFilter, signal?: AbortSignal) => request<FolderScanResult>('/folders/scan', {
     method: 'POST', body: JSON.stringify({ folder, filter }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  }),
+  importNotebook: (scanId: string, itemId: string, archive: File) => {
+    const body = new FormData()
+    body.set('scan_id', scanId); body.set('item_id', itemId); body.set('archive', archive)
+    return request<JobModel>('/results/notebook-import', { method: 'POST', body, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL })
+  },
+  notebookImportJob: (scanId: string, itemId: string, signal?: AbortSignal) => request<JobModel | null>(`/results/notebook-import?scan_id=${encodeURIComponent(scanId)}&item_id=${encodeURIComponent(itemId)}`, { signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  uploadNotebookResult: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/notebook-drive`, {
+    method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   // #111 live-change probe: opaque top-level metadata revision of the one
   // selected folder. Read-only; callers refresh via scan/folders on change.

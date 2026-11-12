@@ -111,6 +111,7 @@ Legacy ACTIVE user-visible capability와 functional behavior는 기본적으로 
 - Colab CUDA preferred, CUDA compute type `float16`
 - CPU fallback compute type `int8`
 - Korean transcription과 segment timestamp를 TXT/JSON/SRT로 merge
+- #48 Notebook 직접 실행 경로는 사용자가 승인된 MP3를 브라우저로 업로드하고 결과 ZIP을 직접 다운로드한다. 무료 desktop tunnel LIVE는 #60 조건 확인 전 보류한다. Notebook Import는 원본 fingerprint 및 TXT/JSON/SRT를 검증하고 기존 결과를 덮어쓰지 않는다. Import 완료와 명시적 Drive 전송은 구분하며 자동 업로드 기본 OFF를 유지한다. 이 경로의 Job은 `notebook_import`로 기록하고 원격 자동 전사로 표시하지 않는다.
 - "Colab 열기" convenience를 현재 Sorigul bootstrap/rendezvous flow 기준으로 제공한다. Legacy notebook/clipboard/Flask 경로의 복구가 아니다. (#127 A1)
 
 현재 Sorigul의 Colab OpenAI Whisper `medium` 구현은 **CURRENT IMPLEMENTATION DEFECT**이며 현재 계약이 아니다. #106이 Local/Colab engine parity를 복구한다.

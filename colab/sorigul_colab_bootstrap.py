@@ -196,6 +196,17 @@ def select_runtime_identity(torch_module) -> RuntimeIdentity:
     )
 
 
+def transcribe_model(model, audio_path: str) -> dict:
+    """Canonical large-v3 decode settings shared by the user-run Notebook."""
+    segments, info = model.transcribe(
+        audio_path, language="ko", beam_size=5, word_timestamps=False,
+    )
+    normalized = [{"start": float(segment.start), "end": float(segment.end),
+                   "text": str(segment.text).strip()} for segment in segments]
+    return {"text": " ".join(item["text"] for item in normalized if item["text"]),
+            "segments": normalized, "language": info.language}
+
+
 def build_ready_metadata(request_payload: dict, base_url: str, now: Optional[datetime] = None) -> Optional[dict]:
     if not isinstance(request_payload, dict):
         return None
@@ -334,27 +345,7 @@ def create_app(
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_audio:
                 temp_audio.write(content)
                 temp_audio_path = temp_audio.name
-            segments, info = model.transcribe(
-                temp_audio_path,
-                language="ko",
-                beam_size=5,
-                word_timestamps=False,
-            )
-            normalized_segments = [
-                {
-                    "start": float(segment.start),
-                    "end": float(segment.end),
-                    "text": str(segment.text).strip(),
-                }
-                for segment in segments
-            ]
-            return {
-                "text": " ".join(
-                    segment["text"] for segment in normalized_segments if segment["text"]
-                ),
-                "segments": normalized_segments,
-                "language": info.language,
-            }
+            return transcribe_model(model, temp_audio_path)
         except Exception:
             return JSONResponse(status_code=500, content={"error": "Transcription failed"})
         finally:

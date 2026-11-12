@@ -166,6 +166,9 @@ class ResultsService:
             item_filename = self._resolve_item(scan_id, item_id).name
         return OpenFolderIntent(folder=str(context.root), item_filename=item_filename)
 
+    def import_source(self, scan_id: str, item_id: str) -> Path:
+        return self._resolve_item(scan_id, item_id, expected_suffix=".mp3")
+
     def _resolve_item(self, scan_id: str, item_id: str, expected_suffix: Optional[str] = None) -> Path:
         context = self._contexts.get(scan_id)
         if context is None:

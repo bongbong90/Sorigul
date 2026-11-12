@@ -7,6 +7,7 @@ import { isTauri, openInExplorer, pickFolder } from '../lib/native'
 import { Badge, type BadgeTone } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { NotebookImportPanel } from '../components/transcription/NotebookImportPanel'
 
 const folderFilters: Array<{ id: FolderFilter; label: string }> = [
   { id: 'all', label: '전체' }, { id: 'complete', label: '완료' },
@@ -163,6 +164,7 @@ export function FoldersPage() {
         <Card className="preview-card"><div className="section-heading-row"><div><span className="eyebrow">TXT Preview</span><h2 className="text-section-heading">{selectedFile?.filename ?? '파일을 선택하세요'}</h2></div><FileText aria-hidden="true" /></div><p className="preview-copy">{preview}</p><div className="inline-actions"><Button variant="secondary" disabled={selectedFile?.kind !== 'TXT'} onClick={() => void showFullText()}><Maximize2 aria-hidden="true" /> 전체 보기</Button><Button variant="secondary" disabled={!selectedId} onClick={() => void requestOpenFolder(selectedId)}><ExternalLink aria-hidden="true" /> 폴더 열기</Button></div></Card>
       </div>
       {fullText !== undefined ? <div className="dialog-backdrop" role="presentation"><div className="dialog dialog-wide" role="dialog" aria-modal="true" aria-labelledby="preview-title"><div className="section-heading-row"><h2 className="text-card-title" id="preview-title">TXT 전체 보기</h2><button type="button" className="icon-action" aria-label="전체 보기 닫기" onClick={() => setFullText(undefined)}><X aria-hidden="true" /></button></div><pre className="full-preview-copy">{fullText}</pre></div></div> : null}
+      {selectedFile?.kind === 'MP3' && scanId ? <NotebookImportPanel key={`${folder}:${selectedFile.id}`} scanId={scanId} itemId={selectedFile.id} filename={selectedFile.filename} onImported={() => void refresh()} /> : null}
     </div>
   )
 }
