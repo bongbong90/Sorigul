@@ -12,6 +12,7 @@
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-medium);
   cursor: pointer;
+  white-space: nowrap;
   transition:
     background-color var(--motion-duration-state) var(--motion-easing-standard),
     border-color var(--motion-duration-state) var(--motion-easing-standard),
@@ -155,6 +156,11 @@
   background-color: var(--color-status-saving-bg);
 }
 
+.badge-verifying {
+  color: var(--color-status-verifying-text);
+  background-color: var(--color-status-verifying-bg);
+}
+
 .badge-done {
   color: var(--color-status-done-text);
   background-color: var(--color-status-done-bg);
@@ -168,6 +174,21 @@
 .badge-cancelled {
   color: var(--color-status-cancelled-text);
   background-color: var(--color-status-cancelled-bg);
+}
+
+.badge-stopped {
+  color: var(--color-status-stopped-text);
+  background-color: var(--color-status-stopped-bg);
+}
+
+.badge-crashed {
+  color: var(--color-status-crashed-text);
+  background-color: var(--color-status-crashed-bg);
+}
+
+.badge-retrying {
+  color: var(--color-status-retrying-text);
+  background-color: var(--color-status-retrying-bg);
 }
 
 /* Progress — 시각 표현만 담당하며 실제 job 진행률 계산/polling은 포함하지 않는다. */

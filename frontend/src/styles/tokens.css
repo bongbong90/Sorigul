@@ -23,12 +23,20 @@
   --color-status-transcribing-bg: #DCE9E9;
   --color-status-saving-text: #625A77;
   --color-status-saving-bg: #ECE8F0;
+  --color-status-verifying-text: #625A77;
+  --color-status-verifying-bg: #ECE8F0;
   --color-status-done-text: #466850;
   --color-status-done-bg: #E3EEE6;
   --color-status-failed-text: #8F504B;
   --color-status-failed-bg: #F3E5E3;
   --color-status-cancelled-text: #7D603B;
   --color-status-cancelled-bg: #F1E9DD;
+  --color-status-stopped-text: #7D603B;
+  --color-status-stopped-bg: #F1E9DD;
+  --color-status-crashed-text: #8F504B;
+  --color-status-crashed-bg: #F3E5E3;
+  --color-status-retrying-text: #536C7D;
+  --color-status-retrying-bg: #E5EDF1;
 
   /* Border width — docs/design/app_shell_spec.md #3 (Top Bar 구분선) */
   --border-width: 1px;

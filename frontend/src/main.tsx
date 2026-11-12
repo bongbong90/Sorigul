@@ -6,6 +6,7 @@ import './styles/base.css'
 import './styles/components.css'
 import './styles/app-shell.css'
 import './styles/transcription-screen.css'
+import './styles/feature-pages.css'
 import App from './App.tsx'
 
 createRoot(document.getElementById('root')!).render(

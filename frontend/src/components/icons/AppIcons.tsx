@@ -1,4 +1,4 @@
-import { AudioLines, FileText, LayoutDashboard, Settings } from 'lucide-react'
+import { AudioLines, FolderOpen, ScrollText, Settings } from 'lucide-react'
 import type { LucideProps } from 'lucide-react'
 
 type IconProps = LucideProps
@@ -23,9 +23,9 @@ export function TranscriptionIcon({ className, ...props }: IconProps) {
   )
 }
 
-export function DashboardIcon({ className, ...props }: IconProps) {
+export function LogIcon({ className, ...props }: IconProps) {
   return (
-    <LayoutDashboard
+    <ScrollText
       {...props}
       className={iconClassName(className)}
       size={DEFAULT_ICON_SIZE}
@@ -36,9 +36,9 @@ export function DashboardIcon({ className, ...props }: IconProps) {
   )
 }
 
-export function ResultsIcon({ className, ...props }: IconProps) {
+export function FoldersIcon({ className, ...props }: IconProps) {
   return (
-    <FileText
+    <FolderOpen
       {...props}
       className={iconClassName(className)}
       size={DEFAULT_ICON_SIZE}
