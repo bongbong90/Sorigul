@@ -46,10 +46,14 @@ class JobModel(BaseModel):
     status: FileStatus
     folder: str
     engine: str
+    engine_config: Dict[str, Any] = Field(default_factory=dict)
+    force_retranscribe: bool = False
     total_files: int
     done_files: int
     failed_files: int
     current_file: Optional[str] = None
+    current_progress: Optional[float] = None
+    eta_seconds: Optional[float] = None
     files: Dict[str, FileStatus] = Field(default_factory=dict)
     events: List[JobEvent] = Field(default_factory=list)
     error: Optional[str] = None

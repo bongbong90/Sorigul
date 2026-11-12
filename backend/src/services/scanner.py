@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from src.domain.models import ScannedFile, BundleStatus
+from src.domain.transcription import TranscriptionResult
 
 class FileScanner:
     def __init__(self, folder_path: str):
@@ -60,7 +61,9 @@ class FileScanner:
             if "text" not in data or "segments" not in data:
                 return BundleStatus.INVALID_RESULT
 
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            TranscriptionResult.from_engine_payload(data)
+
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
             return BundleStatus.INVALID_RESULT
 
         return BundleStatus.DONE
