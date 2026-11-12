@@ -1,0 +1,67 @@
+:root {
+  /* Core Palette — docs/design/color_system.md #1 */
+  --color-background: #F3F5F4;
+  --color-surface: #FAFBFA;
+  --color-surface-soft: #EDF2F1;
+  --color-surface-hover: #E7ECEB;
+  --color-border: #D6DEDC;
+  --color-border-strong: #C4CFCC;
+  --color-text-primary: #223035;
+  --color-text-secondary: #667479;
+  --color-text-muted: #899397;
+  --color-primary: #3E6874;
+  --color-primary-hover: #345A64;
+  --color-primary-soft: #DCE9E9;
+  --color-primary-pressed: #2E4D55;
+
+  /* Semantic Status — docs/design/color_system.md #2 */
+  --color-status-waiting-text: #5F6B6F;
+  --color-status-waiting-bg: #ECEFEE;
+  --color-status-preparing-text: #536C7D;
+  --color-status-preparing-bg: #E5EDF1;
+  --color-status-transcribing-text: #3E6874;
+  --color-status-transcribing-bg: #DCE9E9;
+  --color-status-saving-text: #625A77;
+  --color-status-saving-bg: #ECE8F0;
+  --color-status-done-text: #466850;
+  --color-status-done-bg: #E3EEE6;
+  --color-status-failed-text: #8F504B;
+  --color-status-failed-bg: #F3E5E3;
+  --color-status-cancelled-text: #7D603B;
+  --color-status-cancelled-bg: #F1E9DD;
+
+  /* Border width — docs/design/app_shell_spec.md #3 (Top Bar 구분선) */
+  --border-width: 1px;
+
+  /* Spacing — docs/design/design.md #5 */
+  --space-tight: 4px;
+  --space-compact: 8px;
+  --space-control: 12px;
+  --space-component: 16px;
+  --space-section: 24px;
+  --space-page: 32px;
+
+  /* Radius — docs/design/design.md #6 */
+  --radius-control: 4px;
+  --radius-badge: 999px;
+
+  /* Motion — docs/design/design.md #8 */
+  --motion-duration-state: 120ms;
+  --motion-easing-standard: ease-out;
+
+  /* Focus — docs/design/design.md #9 */
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Icon — docs/design/icon_system.md #1, #2 */
+  --icon-size-default: 20px;
+  --icon-size-small: 16px;
+  --icon-stroke-width: 1.75px;
+  --icon-button-size: 40px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration-state: 0ms;
+  }
+}

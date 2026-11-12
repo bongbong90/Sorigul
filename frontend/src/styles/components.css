@@ -1,0 +1,231 @@
+/* Button */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-compact);
+  padding: var(--space-compact) var(--space-component);
+  border-width: var(--border-width);
+  border-style: solid;
+  border-radius: var(--radius-control);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-duration-state) var(--motion-easing-standard),
+    border-color var(--motion-duration-state) var(--motion-easing-standard),
+    color var(--motion-duration-state) var(--motion-easing-standard);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-primary);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  border-color: transparent;
+  color: var(--color-surface);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.btn-primary:active:not(:disabled) {
+  background-color: var(--color-primary-pressed);
+}
+
+.btn-primary:disabled {
+  background-color: var(--color-surface-soft);
+  color: var(--color-text-muted);
+}
+
+.btn-secondary {
+  background-color: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+}
+
+.btn-secondary:active:not(:disabled) {
+  background-color: var(--color-surface-soft);
+}
+
+.btn-secondary:disabled {
+  background-color: var(--color-surface-soft);
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+/* Input */
+
+.input-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-tight);
+}
+
+.input-label {
+  display: block;
+}
+
+.input {
+  padding: var(--space-compact) var(--space-control);
+  border-width: var(--border-width);
+  border-style: solid;
+  border-color: var(--color-border);
+  border-radius: var(--radius-control);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-md);
+  transition:
+    background-color var(--motion-duration-state) var(--motion-easing-standard),
+    border-color var(--motion-duration-state) var(--motion-easing-standard),
+    color var(--motion-duration-state) var(--motion-easing-standard);
+}
+
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.input:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-primary);
+  outline-offset: var(--focus-ring-offset);
+  border-color: var(--color-primary);
+}
+
+.input:disabled {
+  background-color: var(--color-surface-soft);
+  color: var(--color-text-muted);
+}
+
+.input-error {
+  border-color: var(--color-status-failed-text);
+}
+
+.input-helper {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.input-helper-error {
+  color: var(--color-status-failed-text);
+}
+
+/* Badge — 색상은 color_system.md #2 (Semantic Status)를 그대로 매핑한 시각 variant다.
+   UI_STATE_MATRIX.md의 실제 Job 상태 전이 로직과는 무관하다. */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-tight) var(--space-compact);
+  border-radius: var(--radius-badge);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  white-space: nowrap;
+}
+
+.badge-waiting {
+  color: var(--color-status-waiting-text);
+  background-color: var(--color-status-waiting-bg);
+}
+
+.badge-preparing {
+  color: var(--color-status-preparing-text);
+  background-color: var(--color-status-preparing-bg);
+}
+
+.badge-transcribing {
+  color: var(--color-status-transcribing-text);
+  background-color: var(--color-status-transcribing-bg);
+}
+
+.badge-saving {
+  color: var(--color-status-saving-text);
+  background-color: var(--color-status-saving-bg);
+}
+
+.badge-done {
+  color: var(--color-status-done-text);
+  background-color: var(--color-status-done-bg);
+}
+
+.badge-failed {
+  color: var(--color-status-failed-text);
+  background-color: var(--color-status-failed-bg);
+}
+
+.badge-cancelled {
+  color: var(--color-status-cancelled-text);
+  background-color: var(--color-status-cancelled-bg);
+}
+
+/* Progress — 시각 표현만 담당하며 실제 job 진행률 계산/polling은 포함하지 않는다. */
+
+.progress {
+  width: 100%;
+  height: var(--space-compact);
+  border-radius: var(--radius-control);
+  background-color: var(--color-surface-soft);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background-color: var(--color-primary);
+}
+
+/* Card / Surface */
+
+.card {
+  padding: var(--space-section);
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-control);
+}
+
+/* Foundation Preview only — product App Shell layout이 아니다. */
+
+.foundation-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-page);
+  padding: var(--space-page);
+}
+
+.foundation-preview-header,
+.foundation-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-compact);
+}
+
+.foundation-preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-control);
+}
+
+.foundation-preview-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-component);
+}
+
+.foundation-preview-example {
+  max-inline-size: 20rem;
+}
+
+.foundation-preview :is(h1, h2, p) {
+  margin: 0;
+}

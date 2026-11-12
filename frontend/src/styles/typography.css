@@ -1,0 +1,83 @@
+:root {
+  /* docs/design/typography.md #1 */
+  --font-family-base: 'Noto Sans KR', sans-serif;
+
+  /* docs/design/typography.md #2 */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* docs/design/typography.md #3 */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+  --font-size-2xl: 24px;
+
+  /* docs/design/typography.md #5 */
+  --line-height-body: 1.5;
+  --line-height-ui: 1.3;
+}
+
+body {
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-body);
+}
+
+/* 페이지 타이틀 — typography.md #3 (24px / Bold) */
+.text-page-title {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-ui);
+}
+
+/* 카드 타이틀 — typography.md #3 (20px / SemiBold) */
+.text-card-title {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-ui);
+}
+
+/* 섹션 헤딩 — typography.md #3 (16px / SemiBold) */
+.text-section-heading {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-ui);
+}
+
+/* 기본 본문/데이터 필드/파일명 — typography.md #3 (14px / Regular) */
+.text-body {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-body);
+}
+
+/* 네비게이션 라벨/버튼 텍스트 — typography.md #3 (14px / Medium) */
+.text-label {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-ui);
+}
+
+/* 상태 Badge/캡션/2차 정보 — typography.md #3 (13px / Regular) */
+.text-caption {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-ui);
+}
+
+/* 보조 정보/타임스탬프 — typography.md #3 (12px / Regular) */
+.text-timestamp {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-ui);
+}
+
+/* 진행률/시간/수치 데이터 — typography.md #4 */
+.text-numeric {
+  font-variant-numeric: tabular-nums;
+}
