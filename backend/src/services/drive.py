@@ -61,27 +61,69 @@ class DriveClassification:
 class DriveClassifier:
     _standard = re.compile(r"^(?P<course>[^_]+)_(?P<subject>[^_]+)_(?P<week>\d+)주차_(?P<lesson>\d+)강$")
 
-    def classify(self, filename: str) -> DriveClassification:
-        match = self._standard.fullmatch(Path(filename).stem)
+    def classify(self, job: JobModel, file_id: str, exam_root: str) -> DriveClassification:
+        file_metadata = job.file_metadata.get(file_id)
+        has_full_metadata = (
+            job.course is not None and
+            job.subject is not None and
+            job.stage is not None and
+            file_metadata is not None and
+            file_metadata.week is not None and
+            file_metadata.lesson is not None and
+            file_metadata.normalized_name is not None
+        )
+
+        has_partial_metadata = (
+            job.course is not None or
+            job.subject is not None or
+            job.stage is not None or
+            file_metadata is not None
+        )
+
+        if has_full_metadata:
+            course = job.course
+            subject = job.subject
+            stage = job.stage
+            week = int(file_metadata.week)
+            lesson = int(file_metadata.lesson)
+
+            subject_folder = f"[{stage}] {subject}"
+            week_subject = "중개사법" if subject == "공인중개사법" else subject
+            week_folder = f"{course}_{week_subject}_{week}주차"
+
+            return DriveClassification(
+                course=course,
+                subject=subject,
+                week=week,
+                lesson=lesson,
+                folders=(exam_root, "전사자료", course, subject_folder, week_folder),
+            )
+
+        if has_partial_metadata:
+            raise DriveError("DRIVE_CLASSIFICATION_FAILED", "일부 메타데이터만 있는 Job은 Google Drive로 분류할 수 없습니다.")
+
+        match = self._standard.fullmatch(file_id)
         if not match:
             raise DriveError("DRIVE_CLASSIFICATION_FAILED", "표준 파일명에서 Drive 분류를 확인할 수 없습니다.")
         course = match.group("course")
         raw_subject = match.group("subject")
-        subject = SUBJECT_ALIASES.get(raw_subject)
-        if course not in COURSES or subject is None:
+
+        from src.services.classification import KNOWN_SUBJECT_STAGE
+        stage = KNOWN_SUBJECT_STAGE.get(raw_subject)
+
+        if course not in COURSES or not stage:
             raise DriveError("DRIVE_CLASSIFICATION_FAILED", "과정 또는 과목을 Google Drive에서 분류할 수 없습니다.")
         week = int(match.group("week"))
         lesson = int(match.group("lesson"))
-        stage = "1차" if subject in FIRST_STAGE_SUBJECTS else "2차"
-        subject_folder = f"[{stage}] {subject}"
-        week_subject = "중개사법" if subject == "공인중개사법" else subject
+        subject_folder = f"[{stage}] {raw_subject}"
+        week_subject = "중개사법" if raw_subject == "공인중개사법" else raw_subject
         week_folder = f"{course}_{week_subject}_{week}주차"
         return DriveClassification(
             course=course,
-            subject=subject,
+            subject=raw_subject,
             week=week,
             lesson=lesson,
-            folders=(*DRIVE_ROOT_HIERARCHY, course, subject_folder, week_folder),
+            folders=(exam_root, "전사자료", course, subject_folder, week_folder),
         )
 
 
@@ -411,12 +453,14 @@ class DriveUploadService:
         self,
         jobs: JobManager,
         auth: DriveAuth,
+        settings: 'SettingsManager',
         classifier: Optional[DriveClassifier] = None,
         validator: Optional[OutputBundleValidator] = None,
         event_callback: Optional[Callable[[str, str, str], None]] = None,
     ):
         self.jobs = jobs
         self.auth = auth
+        self.settings = settings
         self.classifier = classifier or DriveClassifier()
         self.validator = validator or OutputBundleValidator()
         self.event_callback = event_callback
@@ -427,10 +471,7 @@ class DriveUploadService:
             raise KeyError("JOB_NOT_FOUND")
         if job.files.get(file_id) != FileStatus.DONE:
             raise DriveError("LOCAL_RESULT_NOT_DONE", "로컬 전사가 완료된 파일만 Drive에 업로드할 수 있습니다.")
-        source_item = next((item for item in FileScanner(job.folder).scan() if item.id == file_id), None)
-        if source_item is None:
-            raise DriveError("LOCAL_SOURCE_MISSING", "원본 MP3 파일을 찾을 수 없습니다.")
-        source = Path(source_item.source_path)
+
         self._set_state(job_id, file_id, DriveStatus.PENDING)
 
         try:
@@ -441,16 +482,20 @@ class DriveUploadService:
             return self._current(job_id, file_id)
 
         try:
-            classification = self.classifier.classify(source.name)
+            exam_root = self.settings.get().drive_exam_root
+            classification = self.classifier.classify(job, file_id, exam_root)
         except DriveError as exc:
             self._set_state(job_id, file_id, DriveStatus.CLASSIFICATION_FAILED, exc.user_message)
             self._event(job_id, "error", "Drive", "Drive 분류 실패", file_id)
             return self._current(job_id, file_id)
 
         try:
-            bundle = BundlePaths.final_for(source)
+            from src.services.renamer import validate_safe_stem
+            safe_stem = validate_safe_stem(file_id, "file_id")
+            dummy_mp3 = Path(job.folder) / f"{safe_stem}.mp3"
+            bundle = BundlePaths.final_for(dummy_mp3)
             self.validator.validate(bundle)
-            paths = [source, bundle.txt, bundle.json, bundle.srt]
+            paths = [bundle.txt, bundle.json, bundle.srt]
             for path in paths:
                 if not path.exists() or not path.is_file():
                     raise DriveError("DRIVE_PREFLIGHT_MISSING", f"업로드 파일이 없습니다: {path.name}")

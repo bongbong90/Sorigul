@@ -574,13 +574,46 @@ export function TranscriptionPage() {
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} />
       <section className="service-section" aria-labelledby="service-heading"><div className="section-heading-row"><div><h2 className="text-section-heading" id="service-heading">연결 및 저장 상태</h2><p>전사 결과와 외부 서비스 상태를 분리해 표시합니다.</p></div></div><div className="service-grid">
         <Card className="service-card"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Direct Colab</strong><Badge tone={job?.engine === 'direct_colab' ? 'done' : 'waiting'}>{job?.engine === 'direct_colab' ? '현재 Job 엔진' : '사용 안 함'}</Badge></div><p>실제 Job에 저장된 engine 선택을 표시합니다.</p></Card>
-        <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p><label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>MP3/TXT/JSON/SRT 정확히 4개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label><div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
+        <Card className="service-card service-card-wide"><div className="service-card-heading"><Cloud aria-hidden="true" /><strong>Google Drive</strong><Badge tone={driveAuth === 'CONNECTED' ? 'done' : 'cancelled'}>{driveAuth === 'CONNECTED' ? '연결됨' : '인증 필요'}</Badge></div><p>로컬 완료 상태와 독립적으로 업로드하고 실패한 Drive만 재시도합니다.</p>
+          <label className="setting-row"><span><strong>전사 완료 후 자동 업로드</strong><small>TXT/JSON/SRT 3개</small></span><input type="checkbox" checked={uploadToDrive} disabled={isPreflighting} onChange={(event) => setUploadToDrive(event.target.checked)} /></label>
+          {uploadToDrive ? <DrivePathPreview course={course} subject={subject} settings={settings} /> : null}
+          <div className="drive-status-list">{driveEntries.map(([id, state]) => { const view = drivePresentation[state.status]; return <div className="drive-status-item" key={id}><span>{id}</span><Badge tone={view?.tone ?? 'waiting'}>{view?.label ?? state.status}</Badge></div> })}{driveEntries.length === 0 ? <span>아직 Drive 업로드 기록이 없습니다.</span> : null}</div><div className="inline-actions"><Button variant="secondary" disabled={!driveEntries.some(([, state]) => state.status === 'FAILED') || isPreflighting} onClick={() => void uploadDrive(true)}>Drive 실패 다시 시도</Button></div></Card>
       </div></section>
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
         {dialog === 'start-all' ? <><h2 className="text-card-title" id="dialog-title">전체 파일을 전사할까요?</h2><p className="dialog-summary">전체 <strong>{rows.length}개</strong> 중 완료 <strong>{completedCount}개</strong>를 제외한 <strong>{pendingIds.length}개</strong> 파일을 전사합니다.</p><div className="dialog-actions"><Button variant="secondary" onClick={() => setDialog(null)}>취소</Button><Button onClick={() => void startAttempt(pendingIds, false, 'all_incomplete')}>실행</Button></div></> : null}
         {dialog === 'empty-target' ? <><h2 className="text-card-title" id="dialog-title">처리할 파일이 없습니다</h2><p>선택한 파일이 모두 완료되었거나 실제 전사 대상이 0개입니다.</p><div className="dialog-actions"><Button onClick={() => setDialog(null)}>확인</Button></div></> : null}
         {dialog === 'retranscribe' ? <><h2 className="text-card-title" id="dialog-title">다시 전사</h2><ul className="contract-list"><li>기존 정상 결과를 보존합니다.</li><li>새 결과 검증 성공 후에만 교체합니다.</li></ul><div className="dialog-actions"><Button variant="secondary" onClick={() => setDialog(null)}>취소</Button><Button onClick={() => void startAttempt(pendingIds, true, 'selected')}>다시 전사 시작</Button></div></> : null}
       </div></div> : null}
+    </div>
+  )
+}
+
+function DrivePathPreview({ course, subject, settings }: { course: string; subject: string; settings?: RuntimeSettings }) {
+  if (!settings) return null
+  const driveRoot = settings.drive_exam_root || '2026 제37회 공인중개사 자격시험'
+
+  const trimmedCourse = course.trim()
+  const trimmedSubject = subject.trim()
+
+  if (!trimmedCourse || !trimmedSubject) {
+    return (
+      <div className="setting-note">
+        <span>파일명 확인 후 주차 폴더가 확정됩니다.</span>
+      </div>
+    )
+  }
+
+  const stage = knownStageFor(trimmedSubject) ?? overrideStageFor(trimmedSubject, settings.subject_stage_overrides) ?? '?'
+
+  return (
+    <div className="setting-note">
+      <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+        {driveRoot}
+{'\n/ '}전사자료
+{'\n/ '}{trimmedCourse}
+{'\n/ '}[{stage}] {trimmedSubject}
+{'\n/ '}파일명 확인 후 주차 폴더가 확정됩니다.
+      </div>
     </div>
   )
 }
