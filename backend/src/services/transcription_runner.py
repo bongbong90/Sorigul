@@ -625,8 +625,20 @@ class TranscriptionRunner:
         job.failed_files = sum(state == FileStatus.FAILED for state in job.files.values())
 
 
+class ExecutionInvariantError(RuntimeError):
+    """More than one unfinished transcription Future was observed."""
+
+
 class BackgroundExecutionService:
     """Owns the running execution (token + future) per Job.
+
+    At most ONE unfinished transcription Future exists globally, regardless
+    of folder or engine (Legacy single-worker parity, #126). A run counts as
+    active until its Future is done -- not merely until its token is
+    finished -- so a new run can never overlap a runner that has persisted
+    its terminal state but not yet returned. The global check and the new
+    Future's registration happen in one critical section under ``_lock``.
+    A second start is rejected, never queued.
 
     Lock order is always service lock -> JobManager lock; the runner itself
     only ever takes the JobManager lock. A Stop/Cancel is *acknowledged*
@@ -665,15 +677,37 @@ class BackgroundExecutionService:
             return True
         return True
 
+    def _unfinished_job_id_locked(self) -> Optional[str]:
+        """The Job owning the single unfinished Future, if any. Caller holds
+        ``_lock``. Raises instead of silently picking one if the invariant
+        was ever violated."""
+        unfinished = [job_id for job_id, future in self._futures.items() if not future.done()]
+        if len(unfinished) > 1:
+            logger.error(
+                "Execution invariant violated: %d unfinished transcription runs", len(unfinished)
+            )
+            raise ExecutionInvariantError("more than one unfinished transcription run")
+        return unfinished[0] if unfinished else None
+
+    def active_job_id(self) -> Optional[str]:
+        """The Job whose runner Future has not yet returned, or None."""
+        with self._lock:
+            return self._unfinished_job_id_locked()
+
     def start(self, job_id: str) -> bool:
+        # Same-Job cleanup wait happens outside the lock; the global check
+        # below re-verifies under the lock, so waiting here cannot admit an
+        # overlap.
         if not self.wait_for_quiescence(job_id):
             return False
         with self._lock:
+            try:
+                if self._unfinished_job_id_locked() is not None:
+                    return False
+            except ExecutionInvariantError:
+                return False
             job = self.runner.job_manager.get_job(job_id)
             if job is None or job.status != FileStatus.WAITING:
-                return False
-            existing = self._futures.get(job_id)
-            if existing is not None and not existing.done():
                 return False
             token = CancellationToken()
             self._tokens[job_id] = token
