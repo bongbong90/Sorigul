@@ -92,8 +92,19 @@ Verified with real spawned processes in `sidecar.rs` tests (not mocked): `cleanu
 - The backend already only appends `FILE_COMPLETED` / `JOB_COMPLETED` application events when `notifications.file_complete` / `notifications.job_complete` is enabled (`desktop_state.py`, unchanged) -- so "setting OFF" is enforced at the source and the hook needs no separate settings check.
 - Dedupe: on the very first poll after mount, all currently-present relevant events are recorded as "seen" without notifying (avoids a notification burst from history/a reused backend); every poll after that only notifies for event keys (`intent|job_id|timestamp|message`) not seen before.
 - Notification body is the backend's existing short Korean user message (e.g. "파일 전사 완료: {filename}") -- never a raw traceback, path, or token.
-- Requests the OS notification permission once, lazily, only the first time it actually has something to send.
-- No Python toast library was added; the OS notification call (`@tauri-apps/plugin-notification`'s `sendNotification`) happens entirely in the JS/Tauri layer.
+- No Python toast library was added.
+
+### Completion toast (Issue #110, Legacy `TrayToastWindow` parity)
+
+Each new completion event is shown in the Sorigul-owned completion toast -- the Windows equivalent of Legacy's actionable toast with **폴더 열기** / **확인**. The plugin's notification action types are mobile-only and are not used.
+
+- One reusable window, `completion-toast`, declared hidden in `tauri.conf.json` (borderless, fixed 360x172, always-on-top, `skipTaskbar`, `focusable: false` so showing it never takes focus from the user or forces the main window forward). It is never created per event.
+- The hook invokes `show_completion_toast` with `{desktop_intent, job_id, file_id, message}` only. Rust (`completion_toast.rs` state + `lib.rs` commands) replaces the single payload, places the window bottom-right of the work area of the main window's monitor (else the primary monitor) with a 16px logical margin, shows it, and auto-hides it after 7200ms. Each show gets a new generation, so a newer event replaces the content and resets the timeout; a stale timer cannot hide it.
+- The toast view (`CompletionToast.tsx`, chosen in `main.tsx` by window label) subscribes to `sorigul://completion-toast` and then reads `get_completion_toast`, so the first event cannot be lost before its listener is ready.
+- **폴더 열기** invokes `open_notification_folder(job_id)`. Rust POSTs to the fixed local `POST /api/desktop/jobs/{job_id}/open-folder-intent`; the backend resolves the folder from the stored Job (404 unknown Job, 410 folder no longer a directory), and only a validated intent reaches the fixed `explorer.exe` argv launch shared with `open_folder_by_intent`. The frontend never sees the folder path.
+- **확인** invokes `dismiss_completion_toast`. Closing the toast itself only hides it; when the main window is destroyed (`close_behavior = exit`) the toast is destroyed with it, so the last-window exit and backend cleanup still happen.
+- One surface per event: the plain OS notification (`sendNotification`, title/body only) is used only if the toast could not be shown, with a console warning marking the degraded, folder-action-less path. OS notification permission is requested lazily only for that fallback.
+- Installed validation (placement, tray/minimized display, Explorer launch, Korean paths, multi-monitor, clean exit) is tracked by #56/#63.
 
 ## Tray
 
@@ -143,8 +154,10 @@ No path is parsed, rebuilt, or transcoded across any boundary in this work packa
 
 - `core:default` + `core:window:allow-show` / `allow-hide` / `allow-set-focus` (tray open/close-to-tray)
 - `dialog:allow-open` (folder picker only -- not the broader `dialog:default`, which also covers save/message/confirm dialogs this app never uses)
-- `opener:allow-open-url`, `opener:allow-open-path`, `opener:allow-reveal-item-in-dir` (OAuth browser handoff, folder open, file reveal -- not blanket `opener:default`)
+- `opener:allow-open-url` (OAuth browser handoff only -- not `opener:allow-open-path`, `opener:allow-reveal-item-in-dir` or blanket `opener:default`; folder open/reveal goes through the Rust `open_folder_by_intent` / `open_notification_folder` commands after backend validation)
 - `notification:default` (the plugin's own scope; nothing broader)
+
+`capabilities/completion-toast.json` applies only to the `completion-toast` window and grants exactly `core:event:allow-listen` / `core:event:allow-unlisten`.
 
 No shell/process-execution permission exists in any capability file (the shell plugin isn't even a dependency -- see Tauri version above). No filesystem-scope permission (`fs:*`) is granted at all; the app never reads/writes files through Tauri's FS layer -- all filesystem access stays in the Python backend, exactly as before.
 

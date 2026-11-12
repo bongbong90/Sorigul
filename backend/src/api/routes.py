@@ -37,7 +37,13 @@ from src.services.drive import (
     DriveUploadService,
     GoogleOAuthService,
 )
-from src.services.results import FolderScanResult, OpenFolderIntent, ResultsService, TextContent
+from src.services.results import (
+    FolderScanResult,
+    OpenFolderIntent,
+    ResultsService,
+    TextContent,
+    job_folder_open_intent,
+)
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
 
@@ -193,6 +199,21 @@ def get_shutdown_state():
 @router.post("/desktop/shutdown/cancel")
 def cancel_shutdown():
     return desktop_coordinator.cancel_shutdown()
+
+
+@router.post("/desktop/jobs/{job_id}/open-folder-intent", response_model=OpenFolderIntent)
+def open_job_folder_intent(job_id: str):
+    """Completion-notification "폴더 열기": the caller supplies only the opaque
+    job_id; the folder is taken from the stored Job, never from the request."""
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job을 찾을 수 없습니다.")
+    try:
+        return job_folder_open_intent(job.folder)
+    except (FileNotFoundError, NotADirectoryError):
+        raise HTTPException(status_code=410, detail="전사 폴더를 찾을 수 없습니다.")
+    except (PermissionError, ValueError, OSError):
+        raise HTTPException(status_code=400, detail="폴더 열기 요청을 만들 수 없습니다.")
 
 
 @router.get("/drive/status")
