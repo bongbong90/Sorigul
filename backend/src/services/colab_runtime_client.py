@@ -83,8 +83,9 @@ class OwnedRuntime:
 class ColabRuntimeClient:
     """At most one POST, even after failure/delete or concurrent duplicate calls.
 
-    No session persistence or crash-recovery ownership is claimed. Keep this
-    object until cleanup is confirmed. Only its generated runtimeId is managed;
+    This low-level client doesn't persist itself. RuntimeOwnership supplies
+    durable checkpoints and verified-account recovery. Keep this object until
+    cleanup is confirmed. Only its generated runtimeId is managed;
     arbitrary runtime names and existing account runtimes cannot be deleted.
     If the POST response is lost before an operation name is received, cleanup
     remains unresolved; the caller must surface that state, not create again
@@ -93,7 +94,8 @@ class ColabRuntimeClient:
 
     def __init__(self, access_token: str, *, transport=None, timeout_seconds=10.0,
                  max_polls=30, poll_interval_seconds=1.0,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 account_verifier: Callable[[str], str | None] | None = None):
         if not isinstance(access_token, str) or not access_token.strip() or any(
             ord(char) < 33 or ord(char) > 126 for char in access_token
         ):
@@ -118,6 +120,9 @@ class ColabRuntimeClient:
         self._cleanup_required = False
         self._request_id = str(uuid.uuid4())
         self._candidate_name = f"runtimes/sorigul-{uuid.uuid4().hex}"
+        self._account_verifier = account_verifier
+        self._account_binding = None
+        self._checkpoint = None
 
     @property
     def cleanup_required(self):
@@ -126,6 +131,37 @@ class ColabRuntimeClient:
     @property
     def request_id(self):
         return self._request_id
+
+    @property
+    def candidate_runtime_name(self):
+        return self._candidate_name
+
+    @property
+    def creation_available(self):
+        with self._lock:
+            return not self._attempted
+
+    def verified_account_binding(self):
+        """Trusted adapter must verify issuer/subject for THIS access token and
+        return its SHA256 fingerprint (never email/token). No verifier is
+        supplied by default; a user-entered account label is not verification.
+        This method does not implement an OAuth flow or call Google itself.
+        """
+        binding = None
+        if self._account_verifier is not None:
+            try:
+                binding = self._account_verifier(self._http.headers["Authorization"][7:])
+            except Exception:
+                pass
+        if not isinstance(binding, str) or not re.fullmatch(r"[0-9a-f]{64}", binding):
+            raise RuntimeClientError(RuntimeErrorCode.PRECONDITION_UNVERIFIED,
+                                     cleanup_required=self._cleanup_required)
+        return binding
+
+    def _emit_checkpoint(self, phase):
+        if self._checkpoint is not None:
+            # Strictly identifiers/status only: never pass a raw API response.
+            self._checkpoint(phase, self._operation_name)
 
     def close(self):
         """Close HTTP only. Never claim remote cleanup merely on local close."""
@@ -162,6 +198,9 @@ class ColabRuntimeClient:
 
     def _request(self, method, path, *, body=None, params=None):
         # All call sites use constant API paths or validated operation/owned IDs.
+        if self._account_binding is not None and self.verified_account_binding() != self._account_binding:
+            raise RuntimeClientError(RuntimeErrorCode.NOT_OWNED,
+                                     cleanup_required=self._cleanup_required)
         code = None
         payload = None
         status = None
@@ -214,14 +253,19 @@ class ColabRuntimeClient:
                                      cleanup_required=self._cleanup_required)
         return dict(T4_STANDARD)
 
-    def create_runtime(self):
+    def create_runtime(self, *, checkpoint=None, account_binding=None):
         with self._lock:
             if self._attempted:
                 raise RuntimeClientError(RuntimeErrorCode.DUPLICATE_CREATE,
                                          cleanup_required=self._cleanup_required)
             self._attempted = True
+            if checkpoint is not None:
+                if account_binding is None or self.verified_account_binding() != account_binding:
+                    raise RuntimeClientError(RuntimeErrorCode.NOT_OWNED)
+                self._account_binding, self._checkpoint = account_binding, checkpoint
             self.get_subscription()
             spec = self.check_t4_eligibility()
+            self._emit_checkpoint("CREATE_STARTED")  # Durable before POST.
             # Own only our random, client-specified ID, never a name from a list.
             # Set before POST: a timeout may still have created this resource.
             self._runtime_name = self._candidate_name
@@ -240,6 +284,7 @@ class ColabRuntimeClient:
                     self._pending_operation = False
                     self._cleanup_required = False
                     self._runtime_name = None
+                    self._emit_checkpoint("CREATE_REJECTED")
                     raise RuntimeClientError(exc.code, http_status=exc.http_status) from None
                 raise
             return self._finish_operation(operation)
@@ -252,6 +297,7 @@ class ColabRuntimeClient:
             raise RuntimeClientError(RuntimeErrorCode.STATE_UNCERTAIN, cleanup_required=True)
         self._operation_name = name
         for poll in range(self._max_polls + 1):
+            self._emit_checkpoint("OPERATION_OBSERVED")
             done = operation.get("done", False)
             if type(done) is not bool or (not done and ("error" in operation or "response" in operation)):
                 break
@@ -262,6 +308,7 @@ class ColabRuntimeClient:
                             or operation["error"].get("status") == "ALREADY_EXISTS"):
                         self._runtime_name = None
                         self._cleanup_required = False
+                        self._emit_checkpoint("CREATE_REJECTED")
                         raise RuntimeClientError(RuntimeErrorCode.CREATE_FAILED,
                                                  cause_code=RuntimeErrorCode.NOT_OWNED)
                     # Failure can be ambiguous; keep cleanup obligation until a
@@ -313,7 +360,44 @@ class ColabRuntimeClient:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
             raise RuntimeClientError(RuntimeErrorCode.STATE_UNCERTAIN, cleanup_required=True) from None
+        self._emit_checkpoint("RUNTIME_CONFIRMED")
         return OwnedRuntime(self._runtime_name, ConnectionInfo(url, token, expiry))
+
+    def recover_attempt(self, *, request_id, runtime_name, operation_name,
+                        account_binding, checkpoint):
+        """Reconcile ONE persisted attempt through its Operation, never POST.
+        No operation evidence means no adoption. The coordinator validates
+        durable records and must hold its storage lock for this whole call.
+        """
+        with self._lock:
+            if self._attempted:
+                raise RuntimeClientError(RuntimeErrorCode.DUPLICATE_CREATE)
+            try:
+                valid = (str(uuid.UUID(request_id, version=4)) == request_id
+                         and uuid.UUID(request_id).version == 4
+                         and re.fullmatch(r"runtimes/sorigul-[0-9a-f]{32}", runtime_name)
+                         and re.fullmatch(r"operations/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", operation_name))
+            except (ValueError, TypeError, AttributeError):
+                valid = False
+            if not valid or self.verified_account_binding() != account_binding:
+                raise RuntimeClientError(RuntimeErrorCode.NOT_OWNED, cleanup_required=True)
+            self._attempted = True
+            self._request_id, self._candidate_name = request_id, runtime_name
+            self._runtime_name, self._operation_name = runtime_name, operation_name
+            self._account_binding, self._checkpoint = account_binding, checkpoint
+            self._pending_operation = self._cleanup_required = True
+            try:
+                return self._finish_operation(self._request("GET", "/v1/" + operation_name))
+            except RuntimeClientError as exc:
+                # A matching, completed create Operation was confirmed BEFORE
+                # this exact Runtime GET reported absence. An Operation 404 is
+                # not absence proof and never reaches this branch.
+                if exc.http_status != 404 or self._pending_operation:
+                    raise
+                self._emit_checkpoint("ABSENCE_CONFIRMED")
+                self._cleanup_required = False
+                self._runtime_name = None
+                return None
 
     def delete_owned_runtime(self):
         with self._lock:
@@ -338,3 +422,4 @@ class ColabRuntimeClient:
                                          http_status=failure_status, cleanup_required=True)
             self._cleanup_required = False
             self._runtime_name = None
+            self._emit_checkpoint("DELETED")
