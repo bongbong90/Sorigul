@@ -12,7 +12,7 @@ import pytest
 from src.services.colab_jupyter_client import JupyterClientError, JupyterCode
 from src.services.colab_jupyter_files import (
     MAX_ATTEMPTS_PER_INDEX, REMOTE_ROOT, ColabJupyterFileTransfer, IntegrityLevel,
-    TransferCode as Code, TransferError, TransferStatus as Status, _ChunkSequence,
+    RemoteOwnership as Own, TransferCode as Code, TransferError, TransferStatus as Status, _ChunkSequence,
 )
 from src.services.colab_runtime_client import ConnectionInfo
 
@@ -41,9 +41,16 @@ class FakeContents:
         self.hooks = []          # callables(method, path, body, n) -> response | None
         self.drop_chunk = None   # ignore this chunk marker's append (but reply OK)
 
-    def model(self, path, hashed=False):
+    def model(self, path, hashed=False, listing=False):
         if path in self.dirs:
-            return {"path": path, "type": "directory"}
+            model = {"path": path, "type": "directory"}
+            if listing:
+                model["content"] = [
+                    {"path": f, "type": "file"} for f in self.files
+                    if f.rsplit("/", 1)[0] == path] + [
+                    {"path": d, "type": "directory"} for d in self.dirs
+                    if d.rsplit("/", 1)[0] == path and d != path]
+            return model
         data = bytes(self.files[path])
         model = {"path": path, "type": "file"}
         if self.report_size:
@@ -70,7 +77,8 @@ class FakeContents:
         if method == "GET":
             if not exists:
                 return 404, None
-            return 200, self.model(path, hashed="hash=1" in query)
+            return 200, self.model(path, hashed="hash=1" in query,
+                                   listing="content=1" in query)
         if method == "DELETE":
             if not exists:
                 return 404, None
@@ -706,3 +714,199 @@ def test_no_token_or_url_in_logs_errors_or_reprs(server, tmp_path, caplog):
     for text in texts:
         assert TOKEN not in text and "runtime.example.invalid" not in text
     assert caplog.records == []
+
+
+# #232 first-PUT ownership race ------------------------------------------------
+
+FOREIGN = b"foreign writer content"
+
+
+def deletes(server, path=None):
+    return [c for c in server.calls if c[0] == "DELETE" and (path is None or c[1] == path)]
+
+
+def foreign_wins_race(server, path, overwrite=False):
+    """GET saw 404; another writer creates `path` before our first PUT lands.
+    overwrite=False models a server that answers 200 without our bytes winning."""
+    def race(method, p, body, n):
+        if method == "PUT" and p == path and body.get("chunk") in (None, 1):
+            server.files[path] = bytearray(FOREIGN)
+            server.hooks.remove(race)
+            if not overwrite:
+                return 200, {"path": path, "type": "file", "size": len(FOREIGN)}
+    server.hooks.append(race)
+
+
+def test_232_first_put_200_conflict_never_deleted(server, tmp_path):
+    foreign_wins_race(server, remote(0), overwrite=True)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path))
+    assert server.calls[-2][:2] == ("GET", remote(0))         # preflight saw 404
+    assert record.status is Status.STATE_UNCERTAIN and not record.completed
+    assert record.error_code is Code.REMOTE_EXISTS
+    assert record.ownership is Own.CONFLICT
+    assert record.integrity is IntegrityLevel.NONE
+    report = transfer.cleanup()
+    assert deletes(server, remote(0)) == []
+    assert (remote(0), Code.REMOTE_EXISTS) in report.skipped_paths
+    assert report.cleanup_required and remote(0) not in report.deleted_paths
+    assert not {r.index: r for r in transfer.records()}[0].remote_deleted
+    assert remote(0) in server.files
+
+
+def test_232_foreign_content_preserved_and_no_further_writes(server, tmp_path):
+    foreign_wins_race(server, remote(0))
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.ownership is Own.CONFLICT and record.chunks_acknowledged == 0
+    assert len(server.puts(remote(0))) == 1                     # chunks 2.. never sent
+    transfer.cleanup()
+    transfer.cleanup()                                          # explicit retry, still safe
+    assert bytes(server.files[remote(0)]) == FOREIGN
+    assert deletes(server, remote(0)) == []
+    assert all(c[1] in (REMOTE_ROOT, RUN_DIR, remote(0)) for c in server.calls)
+
+
+def test_232_conflict_protects_run_directory(server, tmp_path):
+    foreign_wins_race(server, remote(0))
+    transfer = make(server)
+    transfer.prepare()
+    transfer.upload(0, audio(tmp_path))
+    report = transfer.cleanup()
+    assert deletes(server) == []
+    assert not report.run_dir_deleted and RUN_DIR in server.dirs
+    assert (RUN_DIR, Code.NOT_OWNED) in report.skipped_paths
+    assert not report.runtime_cleanup_claimed
+
+
+def test_232_first_put_201_owned_file_cleaned(server, tmp_path):
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 2))
+    assert record.ownership is Own.OWNED and record.completed
+    report = transfer.cleanup()
+    assert report.deleted_paths == (remote(0), RUN_DIR)
+    assert report.skipped_paths == () and not report.cleanup_required
+    assert report.run_dir_deleted and remote(0) not in server.files
+    listing = [c for c in server.calls if c[:3] == ("GET", RUN_DIR, "content=1")]
+    assert len(listing) == 1                                     # emptiness proven first
+
+
+@pytest.mark.parametrize("reply", ["timeout", 502, "foreign-model"])
+def test_232_unproven_first_put_never_claims_ownership(server, tmp_path, reply):
+    def first(method, path, body, n):
+        if method == "PUT" and path == remote(0):
+            server.files[path] = bytearray(base64.b64decode(body["content"]))
+            if reply == "timeout":
+                raise timeout_error()
+            if reply == 502:
+                return 502, None
+            return 201, {"path": f"{RUN_DIR}/chunk-00009.mp3", "type": "file"}
+    server.hooks.append(first)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path))
+    assert record.status is Status.STATE_UNCERTAIN and record.ownership is Own.UNCERTAIN
+    assert record.remote_may_exist and not record.retryable
+    server.hooks.clear()
+    report = transfer.cleanup()
+    assert deletes(server) == []
+    assert (remote(0), Code.STATE_UNCERTAIN) in report.skipped_paths
+    assert report.cleanup_required and not report.run_dir_deleted
+    assert remote(0) in server.files
+
+
+def test_232_reconcile_does_not_upgrade_ownership(server, tmp_path):
+    def lose(method, path, body, n):
+        if method == "PUT" and path == remote(0):
+            server.files[path] = bytearray(base64.b64decode(body["content"]))
+            raise timeout_error()
+    server.hooks.append(lose)
+    transfer = make(server)
+    transfer.prepare()
+    transfer.upload(0, audio(tmp_path))
+    server.hooks.clear()
+    promoted = transfer.reconcile(0)
+    assert promoted.status is Status.VERIFIED                   # content matches ours...
+    assert promoted.ownership is Own.UNCERTAIN                  # ...creation still unproven
+    report = transfer.cleanup()
+    assert deletes(server) == [] and report.cleanup_required
+
+
+def test_232_owned_delete_failure_stays_unresolved(server, tmp_path):
+    transfer = make(server)
+    transfer.prepare()
+    transfer.upload(0, audio(tmp_path))
+    server.hooks.append(lambda m, p, b, n: (500, None) if m == "DELETE" else None)
+    report = transfer.cleanup()
+    assert report.failed_paths == ((remote(0), Code.DELETE_FAILED),
+                                   (RUN_DIR, Code.DELETE_FAILED))
+    assert report.deleted_paths == () and report.cleanup_required
+    assert not transfer.records()[0].remote_deleted
+    assert len(deletes(server)) == 1                            # run dir not attempted
+
+
+def test_232_mixed_owned_and_conflict_cleanup(server, tmp_path):
+    foreign_wins_race(server, remote(1))
+    transfer = make(server)
+    transfer.prepare()
+    owned = transfer.upload(0, audio(tmp_path, seed=1))
+    conflict = transfer.upload(1, audio(tmp_path, name="chunk-00001.mp3", seed=2))
+    assert (owned.ownership, conflict.ownership) == (Own.OWNED, Own.CONFLICT)
+    report = transfer.cleanup()
+    assert report.deleted_paths == (remote(0),)
+    assert [c[1] for c in deletes(server)] == [remote(0)]
+    assert dict(report.skipped_paths) == {remote(1): Code.REMOTE_EXISTS,
+                                          RUN_DIR: Code.NOT_OWNED}
+    assert report.failed_paths == () and report.cleanup_required
+    assert report.error_code is Code.REMOTE_EXISTS
+    assert bytes(server.files[remote(1)]) == FOREIGN and RUN_DIR in server.dirs
+
+
+def test_232_non_empty_run_dir_listing_blocks_delete(server, tmp_path):
+    transfer = make(server)
+    transfer.prepare()
+    transfer.upload(0, audio(tmp_path))
+    server.files[f"{RUN_DIR}/unrelated.txt"] = bytearray(b"not ours")
+    report = transfer.cleanup()
+    assert report.deleted_paths == (remote(0),)
+    assert (RUN_DIR, Code.REMOTE_EXISTS) in report.skipped_paths
+    assert deletes(server, RUN_DIR) == [] and RUN_DIR in server.dirs
+    assert bytes(server.files[f"{RUN_DIR}/unrelated.txt"]) == b"not ours"
+
+
+@pytest.mark.parametrize("listing", ["timeout", (500, None), (200, {"type": "directory"})])
+def test_232_unverifiable_run_dir_listing_blocks_delete(server, tmp_path, listing):
+    transfer = make(server)
+
+    def hook(method, path, body, n):
+        if method == "GET" and path == RUN_DIR and transfer._closed:
+            if listing == "timeout":
+                raise timeout_error()
+            return listing
+    server.hooks.append(hook)
+    transfer.prepare()
+    report = transfer.cleanup()
+    assert deletes(server, RUN_DIR) == [] and not report.run_dir_deleted
+    assert report.cleanup_required and report.skipped_paths[0][0] == RUN_DIR
+
+
+def test_232_retry_and_duplicate_bypass_blocked_after_conflict(server, tmp_path):
+    foreign_wins_race(server, remote(0))
+    transfer = make(server)
+    transfer.prepare()
+    source = audio(tmp_path)
+    transfer.upload(0, source)
+    puts = len(server.puts())
+    for index, path in ((0, source), (0, audio(tmp_path, name="chunk-00007.mp3")),
+                        (1, source)):
+        with pytest.raises(TransferError) as exc:
+            transfer.upload(index, path)
+        assert exc.value.code is Code.DUPLICATE_UPLOAD
+    assert len(server.puts()) == puts
+    assert transfer.reconcile(0).ownership is Own.CONFLICT
+    assert transfer._delete_owned(remote(0)) is Code.NOT_OWNED
+    assert transfer._delete_owned(RUN_DIR) is Code.NOT_OWNED
+    assert deletes(server) == []
