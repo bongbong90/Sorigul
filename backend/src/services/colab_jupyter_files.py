@@ -23,9 +23,19 @@ Rules enforced here:
   STATE_UNCERTAIN; nothing is re-sent automatically. Only an attempt that sent
   nothing may be repeated, and only a bounded number of times.
 - 401/403/413/429 halt this transfer object permanently (no retry loops).
-- Local files are only read. Remote deletion is limited to paths this object
-  attempted to create inside its own run directory; the shared root is never
-  deleted. Cleanup failures are reported separately from transfer failures.
+- Local files are only read. The shared root is never deleted. Cleanup
+  failures are reported separately from transfer failures.
+- Ownership (#232): the Contents API documents no atomic create-if-absent
+  (no If-None-Match, POST picks its own name). The preflight GET 404 therefore
+  does NOT prevent a concurrent writer from creating the same path before our
+  first PUT; that race is narrowed, not eliminated. Only a first-PUT 201 with a
+  matching model proves this transfer created the file (OWNED). A first-PUT
+  200 (an existing file was saved) is a CONFLICT, and a lost or 5xx first-PUT
+  reply is UNCERTAIN. Neither is ever DELETEd, retried, moved or promoted to
+  owned. Cleanup reports them as skipped and keeps cleanup_required.
+- The run directory is deleted only when no file in it has unresolved
+  ownership and a fresh listing shows it empty, because the docs leave DELETE
+  of a non-empty directory undefined (it may be recursive or trashed).
 - This module does not manage Runtime or kernel lifetime; a clean file cleanup
   report says nothing about Runtime deletion or kernel recovery.
 - Nothing here logs. Exceptions carry only a code.
@@ -115,6 +125,13 @@ class IntegrityLevel(str, Enum):
     CONTENT_SHA256 = "CONTENT_SHA256"          # remote sha256 == local sha256
 
 
+class RemoteOwnership(str, Enum):
+    NONE = "NONE"            # nothing of ours was written
+    OWNED = "OWNED"          # first PUT answered 201 with a matching model
+    CONFLICT = "CONFLICT"    # first PUT answered 200: an existing file was saved
+    UNCERTAIN = "UNCERTAIN"  # first PUT sent, creation not proven
+
+
 @dataclass(frozen=True)
 class FileTransferRecord:
     index: int
@@ -127,10 +144,11 @@ class FileTransferRecord:
     integrity: IntegrityLevel
     error_code: TransferCode | None
     verification_error: TransferCode | None
-    remote_may_exist: bool   # owned remote file may exist and needs cleanup
+    remote_may_exist: bool   # this transfer may have written the remote path
     all_chunks_sent: bool
     attempts: int
     remote_deleted: bool = False
+    ownership: RemoteOwnership = RemoteOwnership.NONE  # only OWNED is ever deleted
 
     @property
     def completed(self):
@@ -146,12 +164,15 @@ class FileTransferRecord:
 @dataclass(frozen=True)
 class CleanupReport:
     deleted_paths: tuple
-    failed_paths: tuple          # ((remote_path, TransferCode), ...)
+    failed_paths: tuple          # ((remote_path, TransferCode), ...) DELETE failed
     run_dir_deleted: bool
     cleanup_required: bool
     error_code: TransferCode | None
     # Files only. Runtime deletion / kernel recovery is never claimed here.
     runtime_cleanup_claimed: bool = False
+    # ((remote_path, TransferCode), ...) deliberately NOT deleted because
+    # ownership is unproven (CONFLICT/UNCERTAIN) or the run dir is not empty.
+    skipped_paths: tuple = ()
 
 
 class _ChunkSequence:
@@ -421,6 +442,7 @@ class ColabJupyterFileTransfer:
         snapshot = None
         chunks_total = acked = 0
         remote_may_exist = False
+        ownership = RemoteOwnership.NONE
         all_sent = False
         size_confirmed = False
 
@@ -432,7 +454,7 @@ class ColabJupyterFileTransfer:
                 chunks_total=chunks_total, chunks_acknowledged=acked,
                 status=status, integrity=integrity, error_code=error,
                 verification_error=verify_error, remote_may_exist=remote_may_exist,
-                all_chunks_sent=all_sent, attempts=attempts)
+                all_chunks_sent=all_sent, attempts=attempts, ownership=ownership)
 
         try:
             snapshot = self._inspect_local(local)
@@ -471,7 +493,9 @@ class ColabJupyterFileTransfer:
                     if self._info.expire_time <= self._utcnow():
                         raise _Fail(TransferCode.TOKEN_REFRESH_REQUIRED)
                     if number == 1:
-                        remote_may_exist = True   # from here the file is ours to clean
+                        # Sent but not yet proven created: never deletable as-is.
+                        remote_may_exist = True
+                        ownership = RemoteOwnership.UNCERTAIN
                     all_sent = number == chunks_total
                     try:
                         status, payload = self._request("PUT", remote, body)
@@ -481,18 +505,24 @@ class ColabJupyterFileTransfer:
                         del body
                     if status != (201 if number == 1 else 200):
                         if number == 1 and status == 200:
-                            # Appeared between check and create; it was overwritten.
+                            # Another writer created the path after our GET 404 and
+                            # the server saved over it. Not ours: never delete, retry,
+                            # move or promote it.
+                            ownership = RemoteOwnership.CONFLICT
                             raise _Fail(TransferCode.REMOTE_EXISTS, uncertain=True)
                         fatal = _status_code(status)
                         if status is not None and 400 <= status < 500:
                             all_sent = False  # a 4xx reply means this chunk was not applied
                             if number == 1:
                                 remote_may_exist = False
+                                ownership = RemoteOwnership.NONE
                             raise _Fail(fatal or TransferCode.UPLOAD_REJECTED)
                         raise _Fail(TransferCode.STATE_UNCERTAIN, uncertain=True)
                     if not (isinstance(payload, dict) and payload.get("path") == remote
                             and payload.get("type") == "file"):
                         raise _Fail(TransferCode.RESPONSE_INVALID, uncertain=True)
+                    if number == 1:
+                        ownership = RemoteOwnership.OWNED  # 201 + matching model
                     reported = payload.get("size")
                     offset += expected
                     if isinstance(reported, int) and not isinstance(reported, bool):
@@ -578,16 +608,23 @@ class ColabJupyterFileTransfer:
     # ---- cleanup ----------------------------------------------------------
 
     def cleanup(self) -> CleanupReport:
-        """Delete only owned remote files, then the owned run directory.
+        """Delete only OWNED remote files, then the run directory if it is
+        provably empty. Unproven paths are skipped, never DELETEd.
         Closes the transfer. May be called again explicitly to retry."""
         with self._lock:
             self._closed = True
             self._cancel.set()
-            deleted, failed = [], []
+            deleted, failed, skipped = [], [], []
             stop = None
             for index in sorted(self._records):
                 current = self._records[index]
                 if not current.remote_may_exist or current.remote_deleted:
+                    continue
+                if current.ownership is not RemoteOwnership.OWNED:
+                    code = (TransferCode.REMOTE_EXISTS
+                            if current.ownership is RemoteOwnership.CONFLICT
+                            else TransferCode.STATE_UNCERTAIN)
+                    skipped.append((current.remote_path, code))
                     continue
                 if stop is not None:
                     failed.append((current.remote_path, stop))
@@ -604,23 +641,56 @@ class ColabJupyterFileTransfer:
             if self._run_dir_state in ("CREATED", "UNCERTAIN"):
                 if failed:
                     failed.append((self.run_dir, stop or TransferCode.DELETE_FAILED))
+                elif skipped:
+                    # May hold content we do not own: leave it for the owner/caller.
+                    skipped.append((self.run_dir, TransferCode.NOT_OWNED))
                 else:
-                    code = self._delete_owned(self.run_dir)
-                    if code is None:
+                    listing = self._run_dir_listing()
+                    if listing == "EMPTY":
+                        code = self._delete_owned(self.run_dir)
+                        if code is None:
+                            self._run_dir_state = "DELETED"
+                            run_dir_deleted = True
+                            deleted.append(self.run_dir)
+                        else:
+                            failed.append((self.run_dir, code))
+                    elif listing == "ABSENT":
                         self._run_dir_state = "DELETED"
                         run_dir_deleted = True
-                        deleted.append(self.run_dir)
                     else:
-                        failed.append((self.run_dir, code))
+                        skipped.append((self.run_dir, listing))
+            unresolved = failed + skipped
             return CleanupReport(
                 deleted_paths=tuple(deleted), failed_paths=tuple(failed),
-                run_dir_deleted=run_dir_deleted, cleanup_required=bool(failed),
-                error_code=failed[0][1] if failed else None)
+                run_dir_deleted=run_dir_deleted, cleanup_required=bool(unresolved),
+                error_code=unresolved[0][1] if unresolved else None,
+                skipped_paths=tuple(skipped))
+
+    def _run_dir_listing(self):
+        """'EMPTY', 'ABSENT', or a TransferCode meaning: do not DELETE.
+        Listing-then-DELETE is not atomic either; it only narrows the window."""
+        try:
+            status, payload = self._request("GET", self.run_dir, query="?content=1")
+        except TransferError as exc:
+            return exc.code
+        if status == 404:
+            return "ABSENT"
+        if status != 200:
+            return _status_code(status) or TransferCode.RESPONSE_INVALID
+        if not (isinstance(payload, dict) and payload.get("type") == "directory"
+                and payload.get("path") == self.run_dir
+                and isinstance(payload.get("content"), list)):
+            return TransferCode.RESPONSE_INVALID
+        return "EMPTY" if not payload["content"] else TransferCode.REMOTE_EXISTS
 
     def _owned(self, path):
         if path == self.run_dir:
-            return self._run_dir_state in ("CREATED", "UNCERTAIN")
+            return self._run_dir_state in ("CREATED", "UNCERTAIN") and not any(
+                r.remote_may_exist and not r.remote_deleted
+                and r.ownership is not RemoteOwnership.OWNED
+                for r in self._records.values())
         return any(r.remote_path == path and r.remote_may_exist
+                   and r.ownership is RemoteOwnership.OWNED
                    for r in self._records.values())
 
     def _delete_owned(self, path):
