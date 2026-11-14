@@ -152,9 +152,10 @@ class OfficialColabLauncher:
         # Trusted test seams for the preflight's inner network layer only.
         self._preflight_options = dict(preflight_options or {})
 
-    def _load_credentials(self):
+    def _load_credentials(self, *, refresh=False):
         try:
-            credentials = self._credentials()
+            provider = getattr(self._credentials, "for_launch", self._credentials) if refresh else self._credentials
+            credentials = provider()
         except Exception:
             return None
         if (not isinstance(credentials, LaunchCredentials)
@@ -182,7 +183,7 @@ class OfficialColabLauncher:
         if self._authorizer.static_blockers():
             raise _error("LAUNCH_BLOCKED", "실행 조건이 확인되지 않아 공식 Colab 전사를 시작하지 않았습니다.",
                          category=ErrorCategory.CONFIGURATION)
-        credentials = self._load_credentials()
+        credentials = self._load_credentials(refresh=True)
         if credentials is None:
             raise _error("AUTH_REQUIRED", "공식 Colab에 사용할 Google 계정을 연결해 주세요.",
                          category=ErrorCategory.AUTHENTICATION)

@@ -51,6 +51,11 @@ from src.services.results import (
 from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.utils.paths import get_app_data_dir
+from src.api.colab_oauth_routes import account_router
+from src.services.colab_oauth import ColabOAuthService
+from src.services.colab_oauth_store import ColabSecretStore
+from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore
+from src.services.official_colab_launcher import OfficialColabLauncher
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,7 +78,32 @@ drive_auth = GoogleOAuthService(
 )
 drive_service = DriveUploadService(job_manager, drive_auth, settings_manager)
 colab_rendezvous_service = ColabRendezvousService(drive_auth)
-engine_resolver = DefaultEngineResolver()
+colab_ownership_store = OwnershipStore()
+
+
+def _colab_connection_change_blocked():
+    # Active Jobs protect credentials even before Runtime create publishes its receipt.
+    active_id = execution_service.active_job_id()
+    if active_id is not None:
+        job = job_manager.get_job(active_id)
+        if job is None or job.engine == "official_colab":
+            return True
+    return any(record.state is not OwnershipState.CLEANED for record in colab_ownership_store.load())
+
+
+colab_auth = ColabOAuthService(
+    app_data_dir / "auth" / "google_colab_oauth_client.json",
+    ColabSecretStore(app_data_dir / "auth" / "google_colab_credentials.dpapi"),
+    drive_client_path=app_data_dir / "auth" / "google_oauth_client.json",
+    ownership_unresolved=_colab_connection_change_blocked,
+)
+official_colab_launcher = OfficialColabLauncher(
+    credential_provider=colab_auth, ownership_store=colab_ownership_store,
+    cache_root=app_data_dir / "cache" / "colab" / "official-colab",
+)
+engine_resolver = DefaultEngineResolver(
+    official_colab_launcher=official_colab_launcher, official_colab_launcher_enabled=False)
+account_router(colab_auth, router)
 
 
 drive_execution_service = DriveExecutionService(drive_service)
