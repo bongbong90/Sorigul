@@ -214,6 +214,11 @@ class ColabJupyterInference:
                 device, compute = envelope["device"], envelope["compute_type"]
                 gpu_error = InferenceCode(envelope["gpu_error"]) if envelope["gpu_error"] else None
                 silence, state = envelope["silence"], "OK"
+                if silence:
+                    result._set_verified_silence(dict(
+                        version=1, scope="chunk", engine="official_colab", model_revision=MODEL_REVISION,
+                        status="verified", duration_seconds=envelope["duration_seconds"],
+                        index=index, input_sha256=record.sha256))
             except Exception as exc:
                 # No raw exception, traceback, stream or transcript is retained.
                 unknown_kernel = self._client is not None and self._client._unknown_kernel
@@ -421,7 +426,7 @@ class ColabJupyterInference:
                 raise ValueError
             value = _loads(raw.decode("utf-8"))
             keys = {"execution_id", "run_id", "index", "input_sha256", "complete", "error_code",
-                    "device", "compute_type", "gpu_error", "silence", "payload"}
+                    "device", "compute_type", "gpu_error", "silence", "payload", "duration_seconds"}
             if (not isinstance(value, dict) or set(value) != keys or value["complete"] is not True
                     or value["execution_id"] != self.execution_id or value["run_id"] != self._transfer.run_id
                     or type(value["index"]) is not int or value["index"] != record.index
@@ -434,7 +439,10 @@ class ColabJupyterInference:
                     raise ValueError
                 return value
             if ((value["device"], value["compute_type"]) not in (("cuda", "float16"), ("cpu", "int8"))
-                    or value["gpu_error"] not in (None, "GPU_UNAVAILABLE", "CUDA_FAILED")):
+                    or value["gpu_error"] not in (None, "GPU_UNAVAILABLE", "CUDA_FAILED")
+                    or type(value["duration_seconds"]) not in (int, float)
+                    or not math.isfinite(value["duration_seconds"])
+                    or not 0 < value["duration_seconds"] <= 301):
                 raise ValueError
             payload = value["payload"]
             if (not isinstance(payload, dict) or set(payload) != {"text", "language", "segments"}

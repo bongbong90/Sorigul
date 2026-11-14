@@ -1,10 +1,9 @@
-import os
-import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from src.domain.models import ScannedFile, BundleStatus
-from src.domain.transcription import TranscriptionResult
+from src.domain.transcription import EngineError
+from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.audio_metadata import AudioMetadataService
 
 class FileScanner:
@@ -47,8 +46,9 @@ class FileScanner:
         json_path = mp3_path.with_suffix('.json')
         srt_path = mp3_path.with_suffix('.srt')
 
-        # Check TXT
-        if not txt_path.exists() or txt_path.stat().st_size == 0:
+        # Missing members are incomplete. Empty TXT is decided with the JSON
+        # completion contract by the same validator used during atomic writes.
+        if not txt_path.exists():
             return BundleStatus.INCOMPLETE
 
         # Check SRT
@@ -60,18 +60,10 @@ class FileScanner:
             return BundleStatus.INCOMPLETE
 
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            if not isinstance(data, dict):
-                return BundleStatus.INVALID_RESULT
-
-            if "text" not in data or "segments" not in data:
-                return BundleStatus.INVALID_RESULT
-
-            TranscriptionResult.from_engine_payload(data)
-
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+            OutputBundleValidator().validate(BundlePaths.final_for(mp3_path))
+        except EngineError as exc:
+            return BundleStatus.INCOMPLETE if exc.code == "TXT_INVALID" else BundleStatus.INVALID_RESULT
+        except (OSError, TypeError, ValueError):
             return BundleStatus.INVALID_RESULT
 
         return BundleStatus.DONE
