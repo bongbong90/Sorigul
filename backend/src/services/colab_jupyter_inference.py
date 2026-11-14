@@ -1,4 +1,4 @@
-"""Independent, one-shot trusted-worker adapter; no Job/Local/UI integration.
+"""Trusted worker: one-shot default, opt-in file-scoped kernel reuse.
 
 Uses PHASE 03 HTTPS/WSS transports and owned-kernel cleanup unchanged. No
 arbitrary execute API, Runtime create/delete, token logging or automatic retry.
@@ -21,7 +21,9 @@ from enum import Enum
 from urllib.parse import urlencode
 
 from src.domain.transcription import TranscriptionResult
-from src.services.colab_inference_worker import MAX_RESULT_BYTES, build_worker_code
+from src.services.colab_inference_worker import (
+    MAX_RESULT_BYTES, MODEL_REVISION, build_preparation_code, build_worker_code,
+)
 from src.services.colab_jupyter_client import (
     MAX_MESSAGE_BYTES, CleanupResult, ColabJupyterClient, _connect_ws, _http_request,
 )
@@ -34,6 +36,9 @@ class InferenceCode(str, Enum):
     INPUT_MISSING = "INPUT_MISSING"
     INPUT_INTEGRITY_MISMATCH = "INPUT_INTEGRITY_MISMATCH"
     CONNECTION_FAILED = "CONNECTION_FAILED"
+    AUTH_REJECTED = "AUTH_REJECTED"
+    POLICY_REJECTED = "POLICY_REJECTED"
+    RATE_LIMITED = "RATE_LIMITED"
     KERNEL_CREATE_FAILED = "KERNEL_CREATE_FAILED"
     KERNEL_EXECUTION_FAILED = "KERNEL_EXECUTION_FAILED"
     MODEL_INSTALL_REQUIRED = "MODEL_INSTALL_REQUIRED"
@@ -61,6 +66,7 @@ class InferenceCleanup:
     files_deleted: bool
     cleanup_required: bool
     error_code: InferenceCode | None = None
+    kernel_retained: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,13 +118,16 @@ class ColabJupyterInference:
                  ws_connect=_connect_ws, execution_timeout=1800.0,
                  connect_timeout=10.0, cleanup_timeout=10.0,
                  allow_model_download=False, clock=time.monotonic,
-                 utcnow=lambda: datetime.now(timezone.utc)):
+                 utcnow=lambda: datetime.now(timezone.utc), reuse_kernel=False,
+                 cancel_requested=lambda: False):
         for value in (execution_timeout, connect_timeout, cleanup_timeout):
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or not 0 < value <= 3600):
                 raise ValueError("Invalid finite timeout")
         if type(allow_model_download) is not bool:
             raise ValueError("Invalid model download option")
+        if type(reuse_kernel) is not bool:
+            raise ValueError("Invalid kernel reuse option")
         self._runtime, self._transfer = runtime_client, transfer
         self._http_request, self._ws_connect = http_request, ws_connect
         self._execution_timeout = execution_timeout
@@ -129,19 +138,27 @@ class ColabJupyterInference:
         self._client = None
         self.execution_id = uuid.uuid4().hex
         self._output_dir = self._output_path = None
+        self._reuse_kernel, self._cancel_requested = reuse_kernel, cancel_requested
+        self._closed = self._prepared = False
+        self._runtime_name = None
+        self._session_id = uuid.uuid4().hex
 
     def cancel(self):
         self._cancel.set()  # bounded recv polls; only our kernel is deleted
 
     def _check_cancel(self):
-        if self._cancel.is_set():
+        if self._cancel.is_set() or self._cancel_requested():
             raise InferenceError(InferenceCode.CANCELLED)
 
     def run(self, index):
         with self._lock:
-            if self._attempted:
+            if self._closed or (self._attempted and not self._reuse_kernel):
                 raise InferenceError(InferenceCode.DUPLICATE_EXECUTION)
+            if self._attempted:
+                self.execution_id = uuid.uuid4().hex
             self._attempted = True
+            self._sent = False
+            self._reply = self._idle = False
             state, error, reply, idle = "NOT_RUN", None, False, False
             result, device, compute, gpu_error, silence = None, None, None, None, False
             try:
@@ -162,11 +179,15 @@ class ColabJupyterInference:
                 owned = self._runtime.get_owned_runtime()  # read-only, never create
                 if not self._transfer.matches_connection(owned.connection_info):
                     raise InferenceError(InferenceCode.CONNECTION_FAILED)
-                self._client = ColabJupyterClient(
-                    owned.connection_info, http_request=self._http_request,
-                    ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
-                    cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow,
-                )
+                if self._runtime_name is not None and owned.name != self._runtime_name:
+                    raise InferenceError(InferenceCode.CONNECTION_FAILED)
+                if self._client is None:
+                    self._client = ColabJupyterClient(
+                        owned.connection_info, http_request=self._http_request,
+                        ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
+                        cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow,
+                    )
+                    self._runtime_name = owned.name
                 self._check_input(path, record)
                 code = build_worker_code(
                     run_id=self._transfer.run_id, execution_id=self.execution_id,
@@ -182,39 +203,8 @@ class ColabJupyterInference:
                     claimed.add(index)
                 self._check_cancel()
                 client = self._client
-                client._unknown_kernel = True
-                status, model = client._http("POST", "/api/kernels", {"name": "python3"})
-                if status != 201:
-                    if status in (400, 401, 403, 404, 405, 429):
-                        client._unknown_kernel = False
-                    raise InferenceError(InferenceCode.KERNEL_CREATE_FAILED)
-                kernel = model.get("id") if isinstance(model, dict) else None
-                if not isinstance(kernel, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", kernel):
-                    raise InferenceError(InferenceCode.STATE_UNCERTAIN)
-                client._kernel_id, client._unknown_kernel = kernel, False
-                session, msg_id = uuid.uuid4().hex, uuid.uuid4().hex
-                client._fresh()
-                ws_url = ("wss://" + client._base_url[len("https://"):] +
-                          f"/api/kernels/{kernel}/channels?" +
-                          urlencode({"session_id": session, "token": client._info.token}))
-                client._ws = client._ws_connect(
-                    ws_url, {"X-Colab-Runtime-Proxy-Token": client._info.token},
-                    min(self._connect_timeout, self._cleanup_timeout),
-                )
-                self._check_cancel()
-                client._fresh()
-                deadline = self._clock() + self._execution_timeout
-                message = {
-                    "header": {"msg_id": msg_id, "session": session, "username": "sorigul",
-                               "date": self._utcnow().isoformat(), "msg_type": "execute_request", "version": "5.3"},
-                    "parent_header": {}, "metadata": {}, "channel": "shell", "buffers": [],
-                    "content": {"code": code, "silent": True, "store_history": False,
-                                "allow_stdin": False, "stop_on_error": True,
-                                "user_expressions": {"receipt": "__import__('json').dumps(_sorigul_receipt)"}},
-                }
-                self._sent = self._output_uncertain = True  # even send failure may execute
-                client._ws.send(json.dumps(message))
-                reply, idle = self._wait(msg_id, deadline)
+                self._ensure_kernel()
+                reply, idle = self._execute(code)
                 self._check_cancel()
                 envelope = self._download(record)
                 self._check_cancel()
@@ -239,15 +229,97 @@ class ColabJupyterInference:
                     state = "STATE_UNCERTAIN"
                 else:
                     state = "ERROR" if self._sent else "NOT_RUN"
-            cleanup = self.cleanup()
+            if self._reuse_kernel and state == "OK":
+                cleanup = self._cleanup_files(CleanupResult(False, False, True), retained=True)
+                if not cleanup.files_deleted:
+                    cleanup = self.cleanup()
+            else:
+                cleanup = self.cleanup()
             return InferenceReport(state, error, self.execution_id, self._sent, reply, idle,
                                    cleanup, result, device, compute, gpu_error, silence)
+
+    def _ensure_kernel(self):
+        self._check_cancel()
+        client = self._client
+        if client._kernel_id is not None:
+            return
+        client._unknown_kernel = True
+        status, model = client._http("POST", "/api/kernels", {"name": "python3"})
+        if status != 201:
+            if status in (400, 401, 403, 404, 405, 429):
+                client._unknown_kernel = False
+            self._check_http_status(status)
+            raise InferenceError(InferenceCode.KERNEL_CREATE_FAILED)
+        kernel = model.get("id") if isinstance(model, dict) else None
+        if not isinstance(kernel, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", kernel):
+            raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+        client._kernel_id, client._unknown_kernel = kernel, False
+        client._fresh()
+        self._check_cancel()
+        ws_url = ("wss://" + client._base_url[len("https://"):] +
+                  f"/api/kernels/{kernel}/channels?" +
+                  urlencode({"session_id": self._session_id, "token": client._info.token}))
+        client._ws = client._ws_connect(
+            ws_url, {"X-Colab-Runtime-Proxy-Token": client._info.token},
+            min(self._connect_timeout, self._cleanup_timeout))
+
+    def _execute(self, code, *, preparation=False):
+        self._check_cancel()
+        self._client._fresh()
+        msg_id, session = uuid.uuid4().hex, self._session_id
+        deadline = self._clock() + self._execution_timeout
+        message = {
+            "header": {"msg_id": msg_id, "session": session, "username": "sorigul",
+                       "date": self._utcnow().isoformat(), "msg_type": "execute_request", "version": "5.3"},
+            "parent_header": {}, "metadata": {}, "channel": "shell", "buffers": [],
+            "content": {"code": code, "silent": True, "store_history": False,
+                        "allow_stdin": False, "stop_on_error": True,
+                        "user_expressions": {"receipt": "__import__('json').dumps(_sorigul_receipt)"}},
+        }
+        self._sent = True
+        self._output_uncertain = not preparation
+        self._client._ws.send(json.dumps(message))
+        return self._wait(msg_id, deadline, preparation=preparation)
+
+    def prepare(self):
+        """Fixed read-only package/cache/revision/device check on the shared kernel.
+
+        No install, model download or decode. Failures close this session and
+        require explicit caller handling, never retry the command automatically.
+        """
+        with self._lock:
+            if not self._reuse_kernel or self._prepared or self._attempted or self._closed:
+                raise InferenceError(InferenceCode.DUPLICATE_EXECUTION)
+            self._prepared = True
+            try:
+                self._check_cancel()
+                owned = self._runtime.get_owned_runtime()
+                if not self._transfer.matches_connection(owned.connection_info):
+                    raise InferenceError(InferenceCode.CONNECTION_FAILED)
+                self._runtime_name = owned.name
+                self._client = ColabJupyterClient(
+                    owned.connection_info, http_request=self._http_request,
+                    ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
+                    cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow)
+                self._ensure_kernel()
+                self._execute(build_preparation_code(self.execution_id), preparation=True)
+                self._check_cancel()
+                return dict(self._readiness)
+            except Exception as exc:
+                self.cleanup()
+                if isinstance(exc, InferenceError):
+                    raise InferenceError(exc.code) from None
+                raise InferenceError(InferenceCode.STATE_UNCERTAIN if self._sent
+                                     else InferenceCode.CONNECTION_FAILED) from None
+            finally:
+                self.execution_id = uuid.uuid4().hex
 
     def _check_input(self, path, record):
         suffix = "/api/contents/" + path
         status, model = self._client._http("GET", suffix + "?content=0&hash=1")
         if status in (400, 405, 501):  # hash option unsupported; Worker hashes read-only
             status, model = self._client._http("GET", suffix + "?content=0")
+        self._check_http_status(status)
         if status == 404:
             raise InferenceError(InferenceCode.INPUT_MISSING)
         if (status != 200 or not isinstance(model, dict) or model.get("path") != path
@@ -258,7 +330,16 @@ class ColabJupyterInference:
         if model.get("hash_algorithm") == "sha256" and model.get("hash") != record.sha256:
             raise InferenceError(InferenceCode.INPUT_INTEGRITY_MISMATCH)
 
-    def _wait(self, msg_id, deadline):
+    @staticmethod
+    def _check_http_status(status):
+        if status in (401, 403):
+            raise InferenceError(InferenceCode.AUTH_REJECTED)
+        if status == 413:
+            raise InferenceError(InferenceCode.POLICY_REJECTED)
+        if status == 429:
+            raise InferenceError(InferenceCode.RATE_LIMITED)
+
+    def _wait(self, msg_id, deadline, *, preparation=False):
         self._reply = self._idle = False
         reply_status, receipt = None, None
         # Both time and message count bound streams that never become idle.
@@ -298,6 +379,21 @@ class ColabJupyterInference:
             if self._reply and self._idle:
                 if reply_status != "ok":
                     raise InferenceError(InferenceCode.KERNEL_EXECUTION_FAILED)
+                if preparation:
+                    if (not isinstance(receipt, dict) or set(receipt) != {
+                            "execution_id", "ready", "error_code", "device", "compute_type", "revision"}
+                            or receipt["execution_id"] != self.execution_id
+                            or receipt["revision"] != MODEL_REVISION or type(receipt["ready"]) is not bool):
+                        raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                    if not receipt["ready"]:
+                        if receipt["error_code"] not in ("MODEL_INSTALL_REQUIRED", "MODEL_LOAD_FAILED"):
+                            raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                        raise InferenceError(InferenceCode(receipt["error_code"]))
+                    if (receipt["error_code"] is not None or
+                            (receipt["device"], receipt["compute_type"]) not in (("cuda", "float16"), ("cpu", "int8"))):
+                        raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                    self._readiness = receipt
+                    return True, True
                 if (not isinstance(receipt, dict) or set(receipt) != {"execution_id", "owned"}
                         or receipt["execution_id"] != self.execution_id or receipt["owned"] is not True):
                     raise InferenceError(InferenceCode.STATE_UNCERTAIN)
@@ -311,6 +407,7 @@ class ColabJupyterInference:
                 "GET", "/api/contents/" + self._output_path + "?content=1&format=base64")
         except Exception:
             raise InferenceError(InferenceCode.RESULT_DOWNLOAD_FAILED) from None
+        self._check_http_status(status)
         if status != 200:
             raise InferenceError(InferenceCode.RESULT_DOWNLOAD_FAILED)
         try:
@@ -361,28 +458,32 @@ class ColabJupyterInference:
 
     def cleanup(self):
         with self._lock:
+            self._closed = True
             kernel = self._client.cleanup() if self._client else CleanupResult(False, True, False)
-            files_deleted, error = not self._output_uncertain and not self._output_owned, None
-            if self._output_owned:
-                try:
-                    status, _ = self._client._http("DELETE", "/api/contents/" + self._output_path,
+            return self._cleanup_files(kernel)
+
+    def _cleanup_files(self, kernel, *, retained=False):
+        files_deleted, error = not self._output_uncertain and not self._output_owned, None
+        if self._output_owned:
+            try:
+                status, _ = self._client._http("DELETE", "/api/contents/" + self._output_path,
+                                               timeout=self._cleanup_timeout)
+                if status not in (204, 404):
+                    raise ValueError
+                status, model = self._client._http(
+                    "GET", "/api/contents/" + self._output_dir + "?content=1",
+                    timeout=self._cleanup_timeout)
+                if status != 404:
+                    if (status != 200 or not isinstance(model, dict)
+                            or model.get("path") != self._output_dir
+                            or model.get("type") != "directory" or model.get("content") != []):
+                        raise ValueError
+                    status, _ = self._client._http("DELETE", "/api/contents/" + self._output_dir,
                                                    timeout=self._cleanup_timeout)
                     if status not in (204, 404):
                         raise ValueError
-                    status, model = self._client._http(
-                        "GET", "/api/contents/" + self._output_dir + "?content=1",
-                        timeout=self._cleanup_timeout)
-                    if status != 404:
-                        if (status != 200 or not isinstance(model, dict)
-                                or model.get("path") != self._output_dir
-                                or model.get("type") != "directory" or model.get("content") != []):
-                            raise ValueError
-                        status, _ = self._client._http("DELETE", "/api/contents/" + self._output_dir,
-                                                       timeout=self._cleanup_timeout)
-                        if status not in (204, 404):
-                            raise ValueError
-                    self._output_owned, files_deleted = False, True
-                except Exception:
-                    error = InferenceCode.FILE_CLEANUP_FAILED
-            required = kernel.cleanup_required or not files_deleted
-            return InferenceCleanup(kernel, files_deleted, required, error)
+                self._output_owned, files_deleted = False, True
+            except Exception:
+                error = InferenceCode.FILE_CLEANUP_FAILED
+        required = kernel.cleanup_required or not files_deleted
+        return InferenceCleanup(kernel, files_deleted, required, error, retained)

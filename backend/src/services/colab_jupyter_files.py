@@ -239,7 +239,7 @@ class ColabJupyterFileTransfer:
                  refresh_connection: Callable[[], ConnectionInfo] | None = None,
                  http_request=_http_request, chunk_bytes=DEFAULT_CHUNK_BYTES,
                  request_timeout=30.0,
-                 utcnow=lambda: datetime.now(timezone.utc)):
+                 utcnow=lambda: datetime.now(timezone.utc), cancel_requested=lambda: False):
         if (type(chunk_bytes) is not int
                 or not MIN_CHUNK_BYTES <= chunk_bytes <= MAX_CHUNK_BYTES):
             raise ValueError("Invalid chunk size")
@@ -262,6 +262,7 @@ class ColabJupyterFileTransfer:
         self._chunk_bytes = chunk_bytes
         self._timeout = float(request_timeout)
         self._utcnow = utcnow
+        self._cancel_requested = cancel_requested
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._prepared = False
@@ -312,6 +313,8 @@ class ColabJupyterFileTransfer:
         return path
 
     def _request(self, method, path, body=None, query=""):
+        if method == "PUT" and (self._cancel.is_set() or self._cancel_requested()):
+            raise TransferError(TransferCode.CANCELLED)
         path = self._guard(path)
         if self._info.expire_time <= self._utcnow():
             raise TransferError(TransferCode.TOKEN_REFRESH_REQUIRED)
@@ -334,7 +337,7 @@ class ColabJupyterFileTransfer:
             raise TransferError(TransferCode.TRANSFER_CLOSED)
         if self._halt is not None:
             raise TransferError(self._halt)
-        if self._cancel.is_set():
+        if self._cancel.is_set() or self._cancel_requested():
             raise TransferError(TransferCode.CANCELLED)
 
     def _halt_if_fatal(self, code):
@@ -490,7 +493,7 @@ class ColabJupyterFileTransfer:
                         or opened.st_mtime_ns != snapshot.mtime_ns):
                     raise _Fail(TransferCode.LOCAL_FILE_CHANGED)
                 while not sequence.complete:
-                    if self._cancel.is_set():
+                    if self._cancel.is_set() or self._cancel_requested():
                         raise _Fail(TransferCode.CANCELLED)
                     number, marker = sequence.issue()
                     expected = min(self._chunk_bytes, snapshot.size - offset)
@@ -512,7 +515,13 @@ class ColabJupyterFileTransfer:
                     all_sent = number == chunks_total
                     try:
                         status, payload = self._request("PUT", remote, body)
-                    except TransferError:
+                    except TransferError as exc:
+                        if exc.code is TransferCode.CANCELLED:
+                            all_sent = False
+                            if number == 1:
+                                remote_may_exist = False
+                                ownership = RemoteOwnership.NONE
+                            raise _Fail(TransferCode.CANCELLED) from None
                         raise _Fail(TransferCode.STATE_UNCERTAIN, uncertain=True) from None
                     finally:
                         del body

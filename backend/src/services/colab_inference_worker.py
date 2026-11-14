@@ -19,6 +19,49 @@ MAX_RESULT_BYTES = 32 * 1024  # base64 + Contents envelope fits PHASE 03's 64 Ki
 
 
 WORKER_SOURCE = r'''
+def _sorigul_prepare(params):
+    import contextlib
+    import importlib.metadata
+    import logging
+    import pathlib
+    class Discard:
+        def write(self, text):
+            return len(text)
+        def flush(self):
+            pass
+    receipt = dict(execution_id=params["execution_id"], ready=False,
+                   error_code="MODEL_INSTALL_REQUIRED", device=None,
+                   compute_type=None, revision=params["revision"])
+    previous = logging.root.manager.disable
+    try:
+        logging.disable(logging.CRITICAL)
+        with contextlib.redirect_stdout(Discard()), contextlib.redirect_stderr(Discard()):
+            for package, version in params["packages"].items():
+                if importlib.metadata.version(package) != version:
+                    return receipt
+            import ctranslate2
+            import faster_whisper
+            from huggingface_hub import snapshot_download
+            receipt["error_code"] = "MODEL_LOAD_FAILED"
+            cached = pathlib.Path(snapshot_download(
+                params["repository"], revision=params["revision"], local_files_only=True))
+            required = ("model.bin", "config.json", "tokenizer.json", "preprocessor_config.json")
+            if cached.name != params["revision"] or any(
+                    not (cached / name).is_file() or (cached / name).stat().st_size == 0
+                    for name in required):
+                return receipt
+            try:
+                cuda = ctranslate2.get_cuda_device_count() > 0
+            except Exception:
+                cuda = False
+            receipt.update(ready=True, error_code=None, device="cuda" if cuda else "cpu",
+                           compute_type="float16" if cuda else "int8")
+            return receipt
+    except Exception:
+        return receipt
+    finally:
+        logging.disable(previous)
+
 def _sorigul_worker(params):
     # Keep all imports inside: this function's source is sent to the kernel.
     import contextlib
@@ -107,7 +150,7 @@ def _sorigul_worker(params):
                 device = "cuda" if has_cuda else "cpu"
                 compute = "float16" if has_cuda else "int8"
                 # Cache supports reuse if a future separately reviewed controller
-                # keeps this kernel; PHASE 09 always cleans its single-use kernel.
+                # keeps this kernel. File sessions retain it; one-shot runs clean it.
                 cache = globals().setdefault("_sorigul_models_v1", {})
                 key = (params["revision"], device, compute)
                 try:
@@ -186,3 +229,11 @@ def build_worker_code(*, run_id, execution_id, index, size, sha256, allow_model_
                   packages=PACKAGES, repository=MODEL_REPOSITORY, revision=MODEL_REVISION)
     return (WORKER_SOURCE +
             "\n_sorigul_receipt = _sorigul_worker(" + repr(params) + ")\n")
+
+
+def build_preparation_code(execution_id):
+    if not isinstance(execution_id, str) or not re.fullmatch(r"[0-9a-f]{32}", execution_id):
+        raise ValueError("INVALID_INPUT")
+    params = dict(execution_id=execution_id, packages=PACKAGES,
+                  repository=MODEL_REPOSITORY, revision=MODEL_REVISION)
+    return WORKER_SOURCE + "\n_sorigul_receipt = _sorigul_prepare(" + repr(params) + ")\n"
