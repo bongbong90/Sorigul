@@ -518,18 +518,27 @@ class ColabJupyterFileTransfer:
                                 ownership = RemoteOwnership.NONE
                             raise _Fail(fatal or TransferCode.UPLOAD_REJECTED)
                         raise _Fail(TransferCode.STATE_UNCERTAIN, uncertain=True)
-                    if not (isinstance(payload, dict) and payload.get("path") == remote
-                            and payload.get("type") == "file"):
-                        raise _Fail(TransferCode.RESPONSE_INVALID, uncertain=True)
+                    is_final = number == chunks_total
+                    # ContentsManager documents intermediate models as unreliable.
+                    # Only the first PUT's ownership proof and the final saved
+                    # model require path/type; later interim ACKs use HTTP/order.
+                    # An incomplete first 201 remains blocked: a GET (also
+                    # unreliable before final save) cannot prove who created it.
+                    if number == 1 or is_final:
+                        if not (isinstance(payload, dict) and payload.get("path") == remote
+                                and payload.get("type") == "file"):
+                            raise _Fail(TransferCode.RESPONSE_INVALID, uncertain=True)
                     if number == 1:
                         ownership = RemoteOwnership.OWNED  # 201 + matching model
-                    reported = payload.get("size")
                     offset += expected
-                    if isinstance(reported, int) and not isinstance(reported, bool):
-                        if reported != offset:
-                            # A chunk was dropped, duplicated or reordered remotely.
-                            raise _Fail(TransferCode.CHUNK_SEQUENCE_INVALID)
-                        size_confirmed = number == chunks_total
+                    if is_final:
+                        reported = payload.get("size")
+                        if isinstance(reported, int) and not isinstance(reported, bool):
+                            if reported != snapshot.size:
+                                # Only final metadata can detect remote loss or
+                                # duplication; interim sizes prove no byte count.
+                                raise _Fail(TransferCode.INTEGRITY_MISMATCH)
+                            size_confirmed = True
                     sequence.acknowledge(number)
                     acked = number
                 if handle.read(1):

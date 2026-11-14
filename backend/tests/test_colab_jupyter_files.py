@@ -40,6 +40,7 @@ class FakeContents:
         self.report_size = True
         self.hooks = []          # callables(method, path, body, n) -> response | None
         self.drop_chunk = None   # ignore this chunk marker's append (but reply OK)
+        self.intermediate_model = None  # override metadata after applying a chunk
 
     def model(self, path, hashed=False, listing=False):
         if path in self.dirs:
@@ -103,7 +104,10 @@ class FakeContents:
             self.files[path] = bytearray(data)
         else:
             self.files[path] += data
-        return (200 if exists else 201), self.model(path)
+        model = self.model(path)
+        if chunk is not None and chunk != -1 and self.intermediate_model is not None:
+            model = self.intermediate_model(chunk, model)
+        return (200 if exists else 201), model
 
     def puts(self, path=None):
         return [c for c in self.calls if c[0] == "PUT" and (path is None or c[1] == path)]
@@ -255,15 +259,15 @@ def test_chunk_sequence_blocks_gaps_duplicates_and_overrun():
         _ChunkSequence(0)
 
 
-def test_remote_dropped_chunk_detected_by_cumulative_size(server, tmp_path):
+def test_remote_dropped_chunk_detected_by_final_size(server, tmp_path):
     server.drop_chunk = 2
     transfer = make(server)
     transfer.prepare()
     record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
     assert record.status is Status.FAILED and not record.completed
-    assert record.error_code is Code.CHUNK_SEQUENCE_INVALID
-    assert record.chunks_acknowledged == 1 and record.remote_may_exist
-    assert len(server.puts(remote(0))) == 2   # stopped, nothing re-sent
+    assert record.error_code is Code.INTEGRITY_MISMATCH
+    assert record.chunks_acknowledged == 2 and record.remote_may_exist
+    assert len(server.puts(remote(0))) == 3   # final size detects loss, no re-send
 
 
 def test_remote_hash_mismatch_is_not_completion(server, tmp_path):
@@ -714,6 +718,152 @@ def test_no_token_or_url_in_logs_errors_or_reprs(server, tmp_path, caplog):
     for text in texts:
         assert TOKEN not in text and "runtime.example.invalid" not in text
     assert caplog.records == []
+
+
+# #233 unreliable intermediate models ------------------------------------------
+
+@pytest.mark.parametrize("size", [None, 0, CHUNK, -1, True, "stale"])
+def test_233_intermediate_size_is_not_cumulative_proof(server, tmp_path, size):
+    def interim(chunk, model):
+        model.pop("size", None)
+        if size is not None:
+            model["size"] = size
+        return model
+    server.intermediate_model = interim
+    source = audio(tmp_path, size=CHUNK * 3 + 7)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, source)
+    assert record.status is Status.VERIFIED and record.ownership is Own.OWNED
+    assert record.integrity is IntegrityLevel.CONTENT_SHA256
+    assert record.chunks_acknowledged == record.chunks_total == 4
+    assert [c[3]["chunk"] for c in server.puts(remote(0))] == [1, 2, 3, -1]
+    assert bytes(server.files[remote(0)]) == source.read_bytes()
+
+
+@pytest.mark.parametrize("model", [None, {}, {"size": 0}, {"path": "stale", "type": "directory"}])
+def test_233_later_intermediate_model_is_ignored(server, tmp_path, model):
+    server.intermediate_model = lambda chunk, original: original if chunk == 1 else model
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.status is Status.VERIFIED and record.chunks_acknowledged == 3
+    assert record.ownership is Own.OWNED
+    assert transfer.cleanup().deleted_paths == (remote(0), RUN_DIR)
+
+
+@pytest.mark.parametrize("model", [None, {}, {"path": remote(0)}, {"type": "file"},
+                                        {"path": remote(0), "type": "directory"}])
+def test_233_incomplete_first_201_is_blocked_without_ownership(server, tmp_path, model):
+    server.intermediate_model = lambda chunk, original: model
+    transfer = make(server)
+    transfer.prepare()
+    source = audio(tmp_path, size=CHUNK * 3)
+    record = transfer.upload(0, source)
+    assert record.status is Status.STATE_UNCERTAIN
+    assert record.error_code is Code.RESPONSE_INVALID
+    assert record.ownership is Own.UNCERTAIN and not record.retryable
+    assert record.chunks_acknowledged == 0 and not record.all_chunks_sent
+    assert transfer.reconcile(0) == record
+    with pytest.raises(TransferError) as exc:
+        transfer.upload(0, source)
+    assert exc.value.code is Code.DUPLICATE_UPLOAD
+    assert len(server.puts(remote(0))) == 1
+    report = transfer.cleanup()
+    assert deletes(server) == [] and report.cleanup_required
+    assert (remote(0), Code.STATE_UNCERTAIN) in report.skipped_paths
+
+
+def test_233_intermediate_size_never_confirms_final_integrity(server, tmp_path):
+    server.report_size = server.hash_supported = False
+    server.intermediate_model = lambda chunk, model: dict(model, size=CHUNK * chunk)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.status is Status.ACKNOWLEDGED
+    assert record.integrity is IntegrityLevel.RESPONSE_ONLY
+
+
+@pytest.mark.parametrize("fault", ["size", "hash", "duplicate", "unfinished"])
+def test_233_final_content_faults_never_complete(server, tmp_path, fault):
+    def corrupt(method, path, body, n):
+        if path != remote(0):
+            return
+        if method == "PUT" and body.get("chunk") == 2 and fault == "duplicate":
+            server.files[path] += base64.b64decode(body["content"])
+        if method == "PUT" and body.get("chunk") == -1 and fault == "unfinished":
+            return 200, server.model(path)  # HTTP success without committing final bytes
+        if method == "GET" and path in server.files and fault in ("size", "hash"):
+            model = server.model(path, hashed=True)
+            model.update({"size": len(server.files[path]) + 1} if fault == "size"
+                         else {"hash": "0" * 64})
+            return 200, model
+    server.hooks.append(corrupt)
+    transfer = make(server)
+    transfer.prepare()
+    source = audio(tmp_path, size=CHUNK * 3)
+    record = transfer.upload(0, source)
+    assert record.status is Status.FAILED and not record.completed
+    assert record.error_code is Code.INTEGRITY_MISMATCH
+    assert record.integrity is IntegrityLevel.NONE
+    assert len(server.puts(remote(0))) == 3
+    assert transfer.reconcile(0) == record
+
+
+@pytest.mark.parametrize("model", [None, {}, {"path": "stale", "type": "file"}])
+def test_233_final_model_still_requires_validation(server, tmp_path, model):
+    def final(method, path, body, n):
+        if method == "PUT" and body.get("chunk") == -1:
+            server.files[path] += base64.b64decode(body["content"])
+            return 200, model
+    server.hooks.append(final)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.status is Status.STATE_UNCERTAIN and record.all_chunks_sent
+    assert record.chunks_acknowledged == 2 and record.ownership is Own.OWNED
+    before = len(server.calls)
+    assert transfer.reconcile(0).status is Status.VERIFIED
+    assert all(c[0] == "GET" for c in server.calls[before:])
+
+
+@pytest.mark.parametrize("applied", [False, True])
+def test_233_lost_final_response_requires_hash_and_never_resends(server, tmp_path, applied):
+    def lose(method, path, body, n):
+        if method == "PUT" and body.get("chunk") == -1:
+            if applied:
+                server.files[path] += base64.b64decode(body["content"])
+            raise timeout_error()
+    server.hooks.append(lose)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.status is Status.STATE_UNCERTAIN and record.chunks_acknowledged == 2
+    assert record.ownership is Own.OWNED
+    before = len(server.calls)
+    server.hash_supported = False
+    assert transfer.reconcile(0).status is Status.STATE_UNCERTAIN
+    server.hash_supported = True
+    reconciled = transfer.reconcile(0)
+    assert reconciled.status is (Status.VERIFIED if applied else Status.STATE_UNCERTAIN)
+    assert reconciled.ownership is Own.OWNED
+    assert all(c[0] == "GET" for c in server.calls[before:])
+    assert len(server.puts(remote(0))) == 3
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_233_hash_unsupported_never_claims_verified(server, tmp_path, rejected):
+    server.hash_supported = False
+    def reject_hash(method, path, body, n):
+        if rejected and method == "GET" and server.calls[-1][2] == "content=0&hash=1":
+            return 400, None
+    server.hooks.append(reject_hash)
+    transfer = make(server)
+    transfer.prepare()
+    record = transfer.upload(0, audio(tmp_path, size=CHUNK * 3))
+    assert record.status is Status.ACKNOWLEDGED
+    assert record.integrity is IntegrityLevel.SIZE_CONFIRMED
+    assert record.verification_error is (Code.RESPONSE_INVALID if rejected else None)
 
 
 # #232 first-PUT ownership race ------------------------------------------------
