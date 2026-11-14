@@ -123,21 +123,26 @@ def assert_blocked(result):
     assert "POLICY_GATE_NOT_VERIFIED" in result.launch_blocking_reasons
 
 
-# 1, 5, 7, 11: everything technical passes, launch stays BLOCKED.
-def test_same_account_full_scope_free_t4_passes_technical_but_launch_blocked():
+# 1, 5, 7, 11: every readable check passes, launch stays BLOCKED.
+def test_same_account_full_scope_free_t4_passes_reads_but_launch_blocked():
     result, userinfo, colab = run(expected_account_binding=BINDING)
     assert result.identity is CheckStatus.VERIFIED
     assert result.colab_access is CheckStatus.VERIFIED
     assert result.tier is TierStatus.FREE
     assert result.t4 is T4Status.ELIGIBLE
-    assert result.launch_scope is CheckStatus.VERIFIED
-    assert result.ownership_preconditions is CheckStatus.VERIFIED
-    assert result.technical_precheck_passed and result.technical_blocking_reasons == ()
-    assert result.launch_blocking_reasons == ("COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED")
+    assert result.declared_launch_scope is CheckStatus.DECLARED_ONLY
+    assert result.launch_scope is CheckStatus.NOT_VERIFIED
+    assert result.create_preconditions is CheckStatus.NOT_VERIFIED
+    assert result.technical_blocking_reasons == ("LAUNCH_SCOPE_NOT_VERIFIED",)
+    assert result.launch_blocking_reasons == (
+        "LAUNCH_SCOPE_NOT_VERIFIED", "CREATE_PRECONDITIONS_NOT_VERIFIED",
+        "DURABLE_OWNERSHIP_RECORD_NOT_CHECKED", "RUNTIME_OWNERSHIP_NOT_CHECKED",
+        "EXECUTION_LEASE_NOT_CHECKED", "COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED")
     assert result.paid_cu_non_consumption_evidence == "NO_SUPPORTED_API"
     assert_blocked(result)
     assert result.labels == (L.IDENTITY_VERIFIED, L.COLAB_ACCESS_VERIFIED, L.FREE_TIER_VERIFIED,
-                             L.T4_ELIGIBLE, L.COST_GATE_CONDITIONAL, L.POLICY_GATE_NOT_VERIFIED)
+                             L.T4_ELIGIBLE, L.TECHNICAL_PRECHECK_BLOCKED,
+                             L.COST_GATE_CONDITIONAL, L.POLICY_GATE_NOT_VERIFIED)
     assert result.account_binding == BINDING
     assert len(userinfo.calls) == 1
     assert colab.calls == [("GET", "/v1beta/subscription"), ("GET", "/v1beta/runtimespecs")]
@@ -157,17 +162,19 @@ def test_unbound_first_check_verifies_identity_from_google():
 
 
 # 2: scope insufficient, declared and remote.
-@pytest.mark.parametrize("scopes, identity, colab_status, launch", [
-    ([SCOPE_COLAB], CheckStatus.AUTH_SCOPE_REQUIRED, CheckStatus.VERIFIED, CheckStatus.VERIFIED),
-    (["openid"], CheckStatus.VERIFIED, CheckStatus.AUTH_SCOPE_REQUIRED, CheckStatus.AUTH_SCOPE_REQUIRED),
+@pytest.mark.parametrize("scopes, identity, colab_status, declared, launch", [
+    ([SCOPE_COLAB], CheckStatus.AUTH_SCOPE_REQUIRED, CheckStatus.VERIFIED,
+     CheckStatus.DECLARED_ONLY, CheckStatus.NOT_VERIFIED),
+    (["openid"], CheckStatus.VERIFIED, CheckStatus.AUTH_SCOPE_REQUIRED,
+     CheckStatus.AUTH_SCOPE_REQUIRED, CheckStatus.AUTH_SCOPE_REQUIRED),
     # readonly suffices for the preflight GETs but never for a later create.
     ("openid " + SCOPE_COLAB_READONLY, CheckStatus.VERIFIED, CheckStatus.VERIFIED,
-     CheckStatus.AUTH_SCOPE_REQUIRED),
+     CheckStatus.AUTH_SCOPE_REQUIRED, CheckStatus.AUTH_SCOPE_REQUIRED),
 ])
-def test_declared_scope_gaps_downgrade_only(scopes, identity, colab_status, launch):
+def test_declared_scope_gaps_downgrade_only(scopes, identity, colab_status, declared, launch):
     result, userinfo, colab = run(granted_scopes=scopes)
     assert result.identity is identity and result.colab_access is colab_status
-    assert result.launch_scope is launch
+    assert result.declared_launch_scope is declared and result.launch_scope is launch
     assert L.AUTH_SCOPE_REQUIRED in result.labels
     assert L.TECHNICAL_PRECHECK_BLOCKED in result.labels
     assert len(userinfo.calls) == (0 if identity is CheckStatus.AUTH_SCOPE_REQUIRED else 1)
@@ -177,6 +184,7 @@ def test_declared_scope_gaps_downgrade_only(scopes, identity, colab_status, laun
 
 def test_unknown_declared_scopes_never_upgrade_launch_scope():
     result, _, _ = run(granted_scopes=None)
+    assert result.declared_launch_scope is CheckStatus.NOT_VERIFIED
     assert result.launch_scope is CheckStatus.NOT_VERIFIED
     assert "LAUNCH_SCOPE_NOT_VERIFIED" in result.technical_blocking_reasons
     assert_blocked(result)
@@ -234,7 +242,8 @@ def test_different_account_stops_before_colab_and_drops_binding():
     result, _, colab = run(expected_account_binding=OTHER_BINDING)
     assert result.identity is CheckStatus.ACCOUNT_MISMATCH
     assert result.account_binding is None and colab.calls == []
-    assert result.ownership_preconditions is CheckStatus.NOT_VERIFIED
+    assert result.create_preconditions is CheckStatus.NOT_VERIFIED
+    assert result.runtime_ownership is CheckStatus.NOT_CHECKED
     assert_blocked(result)
 
 
@@ -413,3 +422,135 @@ def test_internal_failure_is_contained_without_chaining(monkeypatch):
     assert "PREFLIGHT_INTERNAL_ERROR" in result.technical_blocking_reasons
     assert TOKEN not in repr(result)
     assert_blocked(result)
+
+
+# ---- PHASE 14 / #242: status provenance -------------------------------------
+
+UNCHECKED_OWNERSHIP = ("durable_ownership_record", "runtime_ownership", "execution_lease")
+CONSTRUCTOR_FIELDS = ("identity", "colab_access", "tier", "t4", "declared_launch_scope", "launch_scope",
+                      "cost_gate", "policy_gate", "technical_blocking_reasons",
+                      "launch_blocking_reasons", "launch_approval", "remote_requests")
+
+
+@pytest.mark.parametrize("scopes", [
+    FULL_SCOPES,
+    [SCOPE_COLAB],
+    "openid " + SCOPE_COLAB + " " + SCOPE_COLAB_READONLY,
+    ["openid", SCOPE_COLAB, SCOPE_COLAB, "https://www.googleapis.com/auth/cloud-platform"],
+])
+def test_fabricated_full_scope_never_verifies_create_permission(scopes):
+    result, _, colab = run(granted_scopes=scopes)
+    assert result.declared_launch_scope is CheckStatus.DECLARED_ONLY
+    assert result.launch_scope is CheckStatus.NOT_VERIFIED
+    assert result.create_preconditions is CheckStatus.NOT_VERIFIED
+    assert not result.technical_precheck_passed
+    assert "LAUNCH_SCOPE_NOT_VERIFIED" in result.launch_blocking_reasons
+    assert_no_mutation(colab)
+    assert_blocked(result)
+
+
+def test_readonly_get_success_is_not_create_permission():
+    result, _, colab = run(granted_scopes=["openid", SCOPE_COLAB_READONLY])
+    assert result.colab_access is CheckStatus.VERIFIED  # readonly API access only
+    assert result.tier is TierStatus.FREE and result.t4 is T4Status.ELIGIBLE
+    assert result.declared_launch_scope is CheckStatus.AUTH_SCOPE_REQUIRED
+    assert result.launch_scope is CheckStatus.AUTH_SCOPE_REQUIRED
+    assert "LAUNCH_SCOPE_AUTH_SCOPE_REQUIRED" in result.technical_blocking_reasons
+    assert L.AUTH_SCOPE_REQUIRED in result.labels
+    assert_no_mutation(colab)
+    assert_blocked(result)
+
+
+def test_userinfo_success_never_implies_runtime_ownership():
+    result, _, _ = run(expected_account_binding=BINDING)
+    assert result.identity is CheckStatus.VERIFIED and result.account_binding == BINDING
+    assert result.create_preconditions is CheckStatus.NOT_VERIFIED
+    for name in UNCHECKED_OWNERSHIP:
+        assert getattr(result, name) is CheckStatus.NOT_CHECKED
+    for reason in ("CREATE_PRECONDITIONS_NOT_VERIFIED", "DURABLE_OWNERSHIP_RECORD_NOT_CHECKED",
+                   "RUNTIME_OWNERSHIP_NOT_CHECKED", "EXECUTION_LEASE_NOT_CHECKED"):
+        assert reason in result.launch_blocking_reasons
+    assert not hasattr(result, "ownership_preconditions")
+    assert "ownership_preconditions" not in result.to_safe_dict()
+
+
+@pytest.mark.parametrize("name", ("create_preconditions",) + UNCHECKED_OWNERSHIP)
+def test_ownership_states_cannot_be_injected_through_constructor(name):
+    result, _, _ = run()
+    kwargs = {key: getattr(result, key) for key in CONSTRUCTOR_FIELDS}
+    type(result)(**kwargs)  # sanity: the allowed fields construct fine
+    with pytest.raises(TypeError):
+        type(result)(**kwargs, **{name: CheckStatus.VERIFIED})
+
+
+def test_preflight_never_touches_ownership_store_or_lease(monkeypatch):
+    from src.services import colab_runtime_ownership as ownership_module
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("preflight must not open ownership storage")
+    for cls in (ownership_module.OwnershipStore, ownership_module.RuntimeOwnership):
+        monkeypatch.setattr(cls, "__init__", forbidden)
+    result, _, _ = run(expected_account_binding=BINDING)
+    assert result.durable_ownership_record is CheckStatus.NOT_CHECKED
+    assert "PREFLIGHT_INTERNAL_ERROR" not in result.technical_blocking_reasons
+
+
+def _paid():
+    colab = Colab()
+    colab.subscription = httpx.Response(200, json={"name": "subscription", "tier": "SUBSCRIPTION_TIER_PRO"})
+    return run(colab=colab)
+
+
+SCENARIOS = {
+    "ok": lambda: run(expected_account_binding=BINDING),
+    "scope": lambda: run(granted_scopes=[SCOPE_COLAB]),
+    "readonly": lambda: run(granted_scopes=["openid", SCOPE_COLAB_READONLY]),
+    "expired": lambda: run(UserInfo(http_error(401))),
+    "mismatch": lambda: run(expected_account_binding=OTHER_BINDING),
+    "paid": _paid,
+    "no_network": lambda: run(network_approved=False),
+    "drive": lambda: run(granted_scopes=FULL_SCOPES + ["https://www.googleapis.com/auth/drive"]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SCENARIOS))
+def test_no_scenario_reaches_go_or_verified_launch_or_ownership(name):
+    result, _, colab = SCENARIOS[name]()
+    assert_blocked(result)
+    assert result.launch_scope is not CheckStatus.VERIFIED
+    assert result.create_preconditions is not CheckStatus.VERIFIED
+    for field_name in UNCHECKED_OWNERSHIP:
+        assert getattr(result, field_name) is CheckStatus.NOT_CHECKED
+    assert "OWNERSHIP_VERIFIED" not in json.dumps(result.to_safe_dict())
+    assert_no_mutation(colab)
+
+
+def test_regressions_scope_expired_mismatch_still_distinct():
+    assert run(granted_scopes=[SCOPE_COLAB])[0].identity is CheckStatus.AUTH_SCOPE_REQUIRED
+    assert run(UserInfo(http_error(401)))[0].identity is CheckStatus.AUTH_EXPIRED
+    assert run(expected_account_binding=OTHER_BINDING)[0].identity is CheckStatus.ACCOUNT_MISMATCH
+
+
+@pytest.mark.parametrize("method, path", [
+    ("POST", "/v1beta/runtimes"), ("DELETE", "/v1beta/runtimes/sorigul-0"),
+    ("POST", "/api/kernels"), ("DELETE", "/api/kernels/k"), ("PUT", "/api/contents/a.mp3"),
+    ("GET", "/api/contents/a.mp3"),
+])
+def test_mutation_kernel_and_contents_requests_reach_network_zero_times(monkeypatch, method, path):
+    def attempt(self, *args, **kwargs):
+        return self._http.request(method, "https://colaboratory.googleapis.com" + path)
+    monkeypatch.setattr(module.ColabRuntimeClient, "list_runtime_specs", attempt)
+    result, _, colab = run()
+    assert "READ_ONLY_GUARD_VIOLATION" in result.technical_blocking_reasons
+    assert colab.calls == [("GET", "/v1beta/subscription")]
+    assert_blocked(result)
+
+
+def test_new_status_fields_leak_no_secrets(caplog):
+    caplog.set_level(logging.DEBUG)
+    result = run(expected_account_binding=BINDING)[0]
+    text = repr(result) + json.dumps(result.to_safe_dict())
+    for secret in (TOKEN, SUBJECT, EMAIL, BINDING):
+        assert secret not in text and secret not in caplog.text
+    assert set(result.to_safe_dict()) >= {"declared_launch_scope", "launch_scope", "create_preconditions",
+                                          "durable_ownership_record", "runtime_ownership", "execution_lease"}
