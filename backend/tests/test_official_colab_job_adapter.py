@@ -322,15 +322,16 @@ def test_official_credentials_rejected_before_job_creation(env):
     assert env.manager.list_jobs() == []
 
 
-def test_whole_silence_preserves_existing_writer_rule_issue_238(env):
+def test_whole_silence_is_done_with_explicit_contract_issue_238(env):
     resolver = env.resolver()
-    before = valid_old_bundle(env.source)
+    valid_old_bundle(env.source)
     env.mock.server.silent = {0, 1}
     job = create(env, force_retranscribe=True)
     finished = execute(env, job, resolver)
-    assert finished.status is FileStatus.FAILED and finished.failed_files == 1
-    assert "TXT" in finished.error
-    assert all(path.read_bytes() == data for path, data in before.items())
+    assert finished.status is FileStatus.DONE and finished.failed_files == 0
+    paths = BundlePaths.final_for(env.source)
+    assert paths.txt.read_bytes() == paths.srt.read_bytes() == b""
+    assert json.loads(paths.json.read_text(encoding="utf-8"))["sorigul_silence"]["scope"] == "file"
 
 
 def test_local_job_still_uses_existing_local_resolver_branch(env):

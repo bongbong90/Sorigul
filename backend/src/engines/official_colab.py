@@ -105,6 +105,10 @@ class OfficialColabJobEngine:
                 "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in result.segments],
             })
             validated.metadata["colab_recovery_cache_used"] = result.metadata.get("colab_recovery_cache_used") is True
+            if result.silence_proof is not None:
+                if result.silence_proof["scope"] != "file":
+                    raise PipelineError("RESULT_NOT_CONFIRMED")
+                validated._set_verified_silence(result.silence_proof)
             return validated
         except (StopRequested, CancelRequested):
             raise

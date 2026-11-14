@@ -100,7 +100,7 @@ def _sorigul_worker(params):
     envelope = {"execution_id": execution, "run_id": run, "index": index,
                 "input_sha256": params["sha256"], "complete": True,
                 "error_code": None, "device": None, "compute_type": None,
-                "gpu_error": None, "silence": False, "payload": None}
+                "gpu_error": None, "silence": False, "payload": None, "duration_seconds": None}
     previous_logging = logging.root.manager.disable
     try:
         logging.disable(logging.CRITICAL)
@@ -178,6 +178,7 @@ def _sorigul_worker(params):
                     duration = info.duration
                     if not math.isfinite(duration) or not 0 < duration <= 301:
                         raise Failure("RESULT_INVALID")
+                    envelope["duration_seconds"] = duration
                     for s in segments:  # exhaust lazy generator before completion
                         if (not math.isfinite(s.start) or not math.isfinite(s.end)
                                 or not 0 <= s.start <= s.end <= duration + 0.1
