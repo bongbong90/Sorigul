@@ -29,6 +29,9 @@ from src.services.official_colab_launcher import LaunchCredentials, static_gate_
 
 SCOPES = ("openid", SCOPE_COLAB)
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+# Client JSON metadata may name Google's legacy endpoint. Execution always
+# uses AUTH_URL above; never follow a configurable authorization endpoint.
+CLIENT_AUTH_URIS = (AUTH_URL, "https://accounts.google.com/o/oauth2/auth")
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 CERT_URL = "https://www.googleapis.com/oauth2/v1/certs"
@@ -76,7 +79,7 @@ def load_client(path, drive_client_path=None):
         if ("web" in data or not isinstance(config, dict)
                 or not re.fullmatch(r"[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", config["client_id"])
                 or not isinstance(config.get("project_id"), str) or not config["project_id"]
-                or config.get("auth_uri") != AUTH_URL or config.get("token_uri") != TOKEN_URL
+                or config.get("auth_uri") not in CLIENT_AUTH_URIS or config.get("token_uri") != TOKEN_URL
                 or not isinstance(config.get("client_secret"), str) or not config["client_secret"]):
             raise ValueError
         # Google revocation can affect a project's grants: require a distinct
