@@ -145,6 +145,8 @@ class JobManager:
         stage: Optional[str] = None,
         file_metadata: Optional[Dict[str, FileMetadata]] = None,
     ) -> JobModel:
+        if engine == "official_colab" and engine_config:
+            raise ValueError("Official Colab Jobs cannot contain connection settings")
         job_id = str(uuid.uuid4())
         job = JobModel(
             job_id=job_id,

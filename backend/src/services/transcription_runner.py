@@ -26,6 +26,9 @@ from src.engines.local_whisper import (
     LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
     LocalWhisperEngine,
 )
+from src.engines.official_colab import OfficialColabJobEngine, disabled_error, OfficialColabEngineError
+from src.services.colab_full_file_pipeline import ColabFullFilePipeline
+from src.services.colab_runtime_ownership import RuntimeOwnership
 from src.services.job_manager import JobManager
 from src.services.colab_security import PairingRegistry, pairing_registry
 from src.services.output_bundle import OutputBundleWriter
@@ -57,14 +60,34 @@ class DefaultEngineResolver:
         self,
         cache_root: Optional[Path] = None,
         registry: PairingRegistry = pairing_registry,
+        *, official_colab_enabled=False, official_colab_ownership=None,
+        official_colab_pipeline_factory=ColabFullFilePipeline,
     ):
+        if type(official_colab_enabled) is not bool:
+            raise ValueError("Invalid internal engine switch")
         self._local = LocalWhisperEngine()
         self._colab: Dict[str, DirectColabEngine] = {}
         self._lock = threading.Lock()
         self._cache_root = cache_root or (get_app_data_dir() / "cache" / "colab")
         self._registry = registry
+        self._official_colab_enabled = official_colab_enabled
+        self._official_colab_ownership = official_colab_ownership
+        self._official_colab_pipeline_factory = official_colab_pipeline_factory
+
+    @property
+    def official_colab_enabled(self):
+        return self._official_colab_enabled and isinstance(self._official_colab_ownership, RuntimeOwnership)
 
     def __call__(self, job: JobModel) -> TranscriptionEngine:
+        if job.engine == "official_colab":
+            if not self.official_colab_enabled:
+                raise disabled_error()
+            if job.engine_config:
+                raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
+                                                category=ErrorCategory.CONFIGURATION)
+            return OfficialColabJobEngine(
+                self._official_colab_ownership, ColabRecoveryCache(self._cache_root / "official-colab"),
+                pipeline_factory=self._official_colab_pipeline_factory)
         if job.engine == "local_whisper":
             return self._local
         if job.engine == "direct_colab":
@@ -285,6 +308,8 @@ class TranscriptionRunner:
                     FFMPEG_PROCESS_CLEANUP_FAILED,
                     LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
                 }:
+                    process_cleanup_failed = True
+                if job.engine == "official_colab" and getattr(exc, "cleanup_required", False):
                     process_cleanup_failed = True
                 if exc.fatal:
                     fatal_error = True
