@@ -39,7 +39,7 @@ function App() {
   const [connectedBaseUrl, setConnectedBaseUrl] = useState<string | null>(null)
   const connection: EngineConnection = {
     engine, connectedBaseUrl, onBaseUrlChange: setConnectedBaseUrl,
-    onChangeEngine: (value) => { setEngine(value); if (value === 'local_whisper') setConnectedBaseUrl(null) },
+    onChangeEngine: (value) => { setEngine(value); if (value !== 'direct_colab') setConnectedBaseUrl(null) },
   }
   useDesktopNotifications()
   useCloseBehaviorSync()
