@@ -443,7 +443,12 @@ class CreateJobRequest(BaseModel):
 
 @router.post("/jobs", response_model=JobModel)
 def create_job(req: CreateJobRequest):
-    if req.engine not in {"local_whisper", "direct_colab"}:
+    if req.engine == "official_colab":
+        if getattr(engine_resolver, "official_colab_enabled", False) is not True:
+            raise HTTPException(status_code=400, detail="Official Colab engine is disabled.")
+        if req.colab_url is not None:
+            raise HTTPException(status_code=400, detail="Official Colab does not accept connection settings.")
+    elif req.engine not in {"local_whisper", "direct_colab"}:
         raise HTTPException(status_code=400, detail="Unsupported transcription engine.")
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")
