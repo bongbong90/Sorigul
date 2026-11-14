@@ -138,10 +138,10 @@ def env(tmp_path, monkeypatch, ml):
         owners.append(owner)
         return owner
 
-    def pipeline_factory(ownership, cache):
+    def pipeline_factory(ownership, cache, **provisioning_options):
         splitter = Splitter(tmp_path / f"split-{len(pipelines)}", durations["value"])
         pipeline = ColabFullFilePipeline(ownership, cache, splitter=splitter,
-                                         http_request=http, ws_connect=server.connect)
+                                         http_request=http, ws_connect=server.connect, **provisioning_options)
         pipelines.append(pipeline)
         return pipeline
 
@@ -151,13 +151,14 @@ def env(tmp_path, monkeypatch, ml):
     credentials = {"value": LaunchCredentials(OAUTH, SCOPES)}
     launch_errors = []
 
-    def install(authorizer=None, connected=True):
+    def install(authorizer=None, connected=True, **provisioning_options):
         launcher = OfficialColabLauncher(
             credential_provider=lambda: credentials["value"] if connected else None,
             ownership_store=store, ownership_factory=ownership_factory,
             authorizer=authorizer if authorizer is not None else ApprovingAuthorizer(),
             pipeline_factory=pipeline_factory, cache_root=tmp_path / "official-cache",
-            preflight_options={"colab_transport": httpx.MockTransport(handle), "userinfo_opener": userinfo})
+            preflight_options={"colab_transport": httpx.MockTransport(handle), "userinfo_opener": userinfo},
+            **provisioning_options)
         original_launch = launcher.launch
 
         def recording_launch():

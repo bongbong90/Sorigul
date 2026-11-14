@@ -1,6 +1,6 @@
 """Trusted, self-contained remote worker. Imported locally without ML imports.
 
-Provisioning (never installed by this module): faster-whisper==1.2.1,
+Provisioning (installed only by the separate authorized provisioner): faster-whisper==1.2.1,
 ctranslate2==4.6.0, huggingface-hub==0.36.0. No pip or external scripts.
 Model: Systran/faster-whisper-large-v3 at the immutable revision below.
 References: https://github.com/SYSTRAN/faster-whisper/tree/v1.2.1
@@ -148,6 +148,8 @@ def _sorigul_worker(params):
                     has_cuda = False
                     envelope["gpu_error"] = "CUDA_FAILED"
                 device = "cuda" if has_cuda else "cpu"
+                if params.get("require_cuda") and not has_cuda:
+                    raise Failure("GPU_UNAVAILABLE") from None
                 compute = "float16" if has_cuda else "int8"
                 # Cache supports reuse if a future separately reviewed controller
                 # keeps this kernel. File sessions retain it; one-shot runs clean it.
@@ -157,6 +159,8 @@ def _sorigul_worker(params):
                     if key not in cache:
                         cache[key] = WhisperModel(model_path, device=device, compute_type=compute)
                 except Exception:
+                    if params.get("require_cuda"):
+                        raise Failure("CUDA_FAILED") from None
                     if not has_cuda:
                         raise Failure("MODEL_LOAD_FAILED") from None
                     envelope["gpu_error"] = "CUDA_FAILED"
@@ -216,18 +220,19 @@ def _sorigul_worker(params):
 '''
 
 
-def build_worker_code(*, run_id, execution_id, index, size, sha256, allow_model_download=False):
+def build_worker_code(*, run_id, execution_id, index, size, sha256, allow_model_download=False, require_cuda=False):
     """Only validated scalars are serialized; no caller code/path/URL accepted."""
     if (not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id)
             or not isinstance(execution_id, str) or not re.fullmatch(r"[0-9a-f]{32}", execution_id)
             or type(index) is not int or not 0 <= index <= 99999
             or type(size) is not int or not 0 < size <= 256 * 1024 * 1024
             or not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-            or type(allow_model_download) is not bool):
+            or type(allow_model_download) is not bool or type(require_cuda) is not bool):
         raise ValueError("INVALID_INPUT")
     params = dict(run_id=run_id, execution_id=execution_id, index=index, size=size,
                   sha256=sha256, allow_model_download=allow_model_download,
                   packages=PACKAGES, repository=MODEL_REPOSITORY, revision=MODEL_REVISION)
+    params["require_cuda"] = require_cuda
     return (WORKER_SOURCE +
             "\n_sorigul_receipt = _sorigul_worker(" + repr(params) + ")\n")
 

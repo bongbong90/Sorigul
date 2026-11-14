@@ -51,6 +51,14 @@ class InferenceCode(str, Enum):
     DUPLICATE_EXECUTION = "DUPLICATE_EXECUTION"
     RESULT_INVALID = "RESULT_INVALID"
     RESULT_DOWNLOAD_FAILED = "RESULT_DOWNLOAD_FAILED"
+    PROVISIONING_NOT_APPROVED = "PROVISIONING_NOT_APPROVED"
+    PYTHON_UNSUPPORTED = "PYTHON_UNSUPPORTED"
+    PACKAGE_INSTALL_FAILED = "PACKAGE_INSTALL_FAILED"
+    PACKAGE_VERSION_MISMATCH = "PACKAGE_VERSION_MISMATCH"
+    PACKAGE_IMPORT_FAILED = "PACKAGE_IMPORT_FAILED"
+    MODEL_DOWNLOAD_FAILED = "MODEL_DOWNLOAD_FAILED"
+    MODEL_REVISION_MISMATCH = "MODEL_REVISION_MISMATCH"
+    MODEL_CACHE_INCOMPLETE = "MODEL_CACHE_INCOMPLETE"
     FILE_CLEANUP_FAILED = "FILE_CLEANUP_FAILED"
 
 
@@ -142,6 +150,10 @@ class ColabJupyterInference:
         self._closed = self._prepared = False
         self._runtime_name = None
         self._session_id = uuid.uuid4().hex
+        self.provisioning_uncertain = False
+        self._provision_actions = set()
+        self._provision_action = None
+        self._require_cuda = False
 
     def cancel(self):
         self._cancel.set()  # bounded recv polls; only our kernel is deleted
@@ -193,6 +205,7 @@ class ColabJupyterInference:
                     run_id=self._transfer.run_id, execution_id=self.execution_id,
                     index=index, size=record.size, sha256=record.sha256,
                     allow_model_download=self._allow_download,
+                    require_cuda=self._require_cuda,
                 )
                 self._output_dir = self._transfer.run_dir + "/inference-" + self.execution_id
                 self._output_path = self._output_dir + "/result.json"
@@ -286,6 +299,52 @@ class ColabJupyterInference:
         self._client._ws.send(json.dumps(message))
         return self._wait(msg_id, deadline, preparation=preparation)
 
+    def provision_step(self, action, *, authorizer=None):
+        """Internal fixed-code path; only the server provisioner calls this.
+
+        Uses the same kernel, binding, cancellation, receipt and cleanup rules.
+        An attempted step is consumed even if its outcome is unknown.
+        """
+        from src.services.colab_model_provisioner import build_provisioning_code
+        with self._lock:
+            if (not self._reuse_kernel or self._prepared or self._attempted or self._closed
+                    or action in self._provision_actions or self.provisioning_uncertain):
+                raise InferenceError(InferenceCode.DUPLICATE_EXECUTION)
+            code = build_provisioning_code(self.execution_id, action)
+            self._provision_actions.add(action)
+            self._provision_action = action
+            self._sent = self._reply = self._idle = False
+            try:
+                self._check_cancel()
+                owned = self._runtime.get_owned_runtime()
+                if authorizer is None or authorizer.authorize(owned) is not True:
+                    raise InferenceError(InferenceCode.PROVISIONING_NOT_APPROVED)
+                if (not self._transfer.matches_connection(owned.connection_info)
+                        or self._runtime_name is not None and self._runtime_name != owned.name):
+                    raise InferenceError(InferenceCode.AUTH_REJECTED)
+                if self._client is None:
+                    self._client = ColabJupyterClient(
+                        owned.connection_info, http_request=self._http_request,
+                        ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
+                        cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow)
+                    self._runtime_name = owned.name
+                self._ensure_kernel()
+                self._execute(code, preparation=True)
+                self._check_cancel()
+                self._require_cuda = True
+                return dict(self._provision_receipt)
+            except Exception as exc:
+                self.provisioning_uncertain = bool(
+                    self._client and self._client._unknown_kernel
+                    or self._sent and not (self._reply and self._idle))
+                code = exc.code if isinstance(exc, InferenceError) else InferenceCode.STATE_UNCERTAIN
+                if self.provisioning_uncertain:
+                    code = InferenceCode.STATE_UNCERTAIN
+                raise InferenceError(code) from None
+            finally:
+                self._provision_action = None
+                self.execution_id = uuid.uuid4().hex
+
     def prepare(self):
         """Fixed read-only package/cache/revision/device check on the shared kernel.
 
@@ -301,14 +360,19 @@ class ColabJupyterInference:
                 owned = self._runtime.get_owned_runtime()
                 if not self._transfer.matches_connection(owned.connection_info):
                     raise InferenceError(InferenceCode.CONNECTION_FAILED)
+                if self._runtime_name is not None and self._runtime_name != owned.name:
+                    raise InferenceError(InferenceCode.AUTH_REJECTED)
                 self._runtime_name = owned.name
-                self._client = ColabJupyterClient(
-                    owned.connection_info, http_request=self._http_request,
-                    ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
-                    cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow)
+                if self._client is None:
+                    self._client = ColabJupyterClient(
+                        owned.connection_info, http_request=self._http_request,
+                        ws_connect=self._ws_connect, connect_timeout=self._connect_timeout,
+                        cleanup_timeout=self._cleanup_timeout, utcnow=self._utcnow)
                 self._ensure_kernel()
                 self._execute(build_preparation_code(self.execution_id), preparation=True)
                 self._check_cancel()
+                if self._require_cuda and self._readiness["device"] != "cuda":
+                    raise InferenceError(InferenceCode.GPU_UNAVAILABLE)
                 return dict(self._readiness)
             except Exception as exc:
                 self.cleanup()
@@ -385,6 +449,27 @@ class ColabJupyterInference:
                 if reply_status != "ok":
                     raise InferenceError(InferenceCode.KERNEL_EXECUTION_FAILED)
                 if preparation:
+                    if self._provision_action is not None:
+                        from src.services.colab_inference_worker import PACKAGES
+                        if (not isinstance(receipt, dict) or set(receipt) != {
+                                "execution_id", "action", "revision", "missing", "model_cached", "error_code", "device"}
+                                or receipt["execution_id"] != self.execution_id
+                                or receipt["action"] != self._provision_action
+                                or receipt["revision"] != MODEL_REVISION or receipt["device"] != "cuda"
+                                or type(receipt["model_cached"]) is not bool
+                                or not isinstance(receipt["missing"], list)
+                                or any(not isinstance(p, str) or p not in PACKAGES for p in receipt["missing"])
+                                or len(set(receipt["missing"])) != len(receipt["missing"])):
+                            raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                        if receipt["error_code"] is not None:
+                            allowed = {"PYTHON_UNSUPPORTED", "GPU_UNAVAILABLE", "PACKAGE_INSTALL_FAILED",
+                                       "PACKAGE_VERSION_MISMATCH", "PACKAGE_IMPORT_FAILED", "MODEL_DOWNLOAD_FAILED",
+                                       "MODEL_REVISION_MISMATCH", "MODEL_CACHE_INCOMPLETE", "MODEL_LOAD_FAILED"}
+                            if receipt["error_code"] not in allowed:
+                                raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                            raise InferenceError(InferenceCode(receipt["error_code"]))
+                        self._provision_receipt = receipt
+                        return True, True
                     if (not isinstance(receipt, dict) or set(receipt) != {
                             "execution_id", "ready", "error_code", "device", "compute_type", "revision"}
                             or receipt["execution_id"] != self.execution_id
@@ -434,7 +519,7 @@ class ColabJupyterInference:
                 raise ValueError
             if value["error_code"] is not None:
                 allowed = {"INPUT_MISSING", "INPUT_INTEGRITY_MISMATCH", "MODEL_INSTALL_REQUIRED",
-                           "MODEL_LOAD_FAILED", "CUDA_FAILED", "KERNEL_EXECUTION_FAILED", "RESULT_INVALID"}
+                           "MODEL_LOAD_FAILED", "CUDA_FAILED", "GPU_UNAVAILABLE", "KERNEL_EXECUTION_FAILED", "RESULT_INVALID"}
                 if value["error_code"] not in allowed or value["payload"] is not None:
                     raise ValueError
                 return value
@@ -444,6 +529,8 @@ class ColabJupyterInference:
                     or not math.isfinite(value["duration_seconds"])
                     or not 0 < value["duration_seconds"] <= 301):
                 raise ValueError
+            if self._require_cuda and (value["device"] != "cuda" or value["gpu_error"] is not None):
+                raise InferenceError(InferenceCode.GPU_UNAVAILABLE)
             payload = value["payload"]
             if (not isinstance(payload, dict) or set(payload) != {"text", "language", "segments"}
                     or payload["language"] != "ko" or not isinstance(payload["text"], str)
