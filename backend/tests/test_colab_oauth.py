@@ -557,3 +557,80 @@ def test_readonly_identity_change_is_not_reported_connected(env):
     env.service._preflight = switched
     with pytest.raises(ColabOAuthError, match='IDENTITY_FAILED'): env.service.check()
     assert env.service.status()['auth_state'] == 'IDENTITY_FAILED' and env.service() is None
+
+
+# PHASE 18A: downloaded config metadata is an exact allowlist, not a URL source.
+@pytest.mark.parametrize('auth_uri', [
+    'https://accounts.google.com/o/oauth2/v2/auth',
+    'https://accounts.google.com/o/oauth2/auth',
+])
+def test_google_desktop_metadata_aliases_load_but_start_stays_v2_offline(env, auth_uri):
+    config = dict(env.config, auth_uri=auth_uri, redirect_uris=['http://localhost'])
+    original = json.dumps({'installed': config}).encode('utf-8')
+    env.client.write_bytes(original)
+    drive = env.root/'drive-public-client.json'
+    drive.write_text(json.dumps({'installed': dict(env.config,
+        project_id='mock-distinct-drive-project', client_id='mock-drive.apps.googleusercontent.com')}))
+    loaded = load_client(env.client, drive)
+    assert loaded == {key: env.config[key] for key in ('client_id', 'client_secret', 'project_id')}
+    result = env.service.start()
+    url = urlsplit(result['authorization_url'])
+    assert (url.scheme, url.netloc, url.path) == ('https', 'accounts.google.com', '/o/oauth2/v2/auth')
+    assert AUTH_URL == 'https://accounts.google.com/o/oauth2/v2/auth'
+    assert parse_qs(url.query)['scope'] == [' '.join(SCOPES)]
+    assert env.client.read_bytes() == original
+    assert not env.google.calls and not env.google.forms and not env.colab.calls
+    env.service.cancel()
+
+
+@pytest.mark.parametrize('auth_uri', [
+    'http://accounts.google.com/o/oauth2/auth',
+    'http://accounts.google.com/o/oauth2/v2/auth',
+    'https://evil.invalid/o/oauth2/auth',
+    'https://accounts.google.com.evil.invalid/o/oauth2/v2/auth',
+    'https://accounts.google.com@evil.invalid/o/oauth2/v2/auth',
+    'https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https://evil.invalid',
+    'https://accounts.google.com/o/oauth2/auth#fragment',
+    'https://accounts.google.com/o/oauth2/auth/',
+    'https://accounts.google.com:443/o/oauth2/v2/auth',
+    'https://accounts.google.com/other',
+    'javascript:alert(1)', '', None,
+])
+def test_metadata_unknown_auth_uris_fail_before_oauth_or_callback(env, auth_uri):
+    env.client.write_text(json.dumps({'installed': dict(env.config, auth_uri=auth_uri)}))
+    with pytest.raises(ColabOAuthError, match='CONFIG_INVALID'):
+        env.service.start()
+    assert not env.callbacks and not env.google.calls and not env.colab.calls
+
+
+@pytest.mark.parametrize('auth_uri', [AUTH_URL, 'https://accounts.google.com/o/oauth2/auth'])
+@pytest.mark.parametrize('field,value', [
+    ('token_uri', 'http://oauth2.googleapis.com/token'),
+    ('token_uri', 'https://evil.invalid/token'),
+    ('token_uri', 'https://oauth2.googleapis.com/token?x=1'),
+    ('client_id', 'not-a-google-desktop-client'),
+    ('project_id', ''),
+    ('client_secret', ''),
+])
+def test_both_metadata_forms_preserve_token_and_required_field_guards(env, auth_uri, field, value):
+    config = dict(env.config, auth_uri=auth_uri)
+    config[field] = value
+    env.client.write_text(json.dumps({'installed': config}))
+    with pytest.raises(ColabOAuthError, match='CONFIG_INVALID'):
+        env.service.start()
+    assert not env.callbacks and not env.google.calls and not env.colab.calls
+
+
+@pytest.mark.parametrize('auth_uri', [AUTH_URL, 'https://accounts.google.com/o/oauth2/auth'])
+@pytest.mark.parametrize('shared', ['project_id', 'client_id'])
+def test_both_metadata_forms_preserve_drive_separation(env, auth_uri, shared):
+    env.client.write_text(json.dumps({'installed': dict(env.config, auth_uri=auth_uri)}))
+    drive = env.root/'drive-public-client.json'
+    drive_config = dict(env.config, project_id='mock-distinct-drive-project',
+                        client_id='mock-drive.apps.googleusercontent.com')
+    drive_config[shared] = env.config[shared]
+    drive.write_text(json.dumps({'installed': drive_config}))
+    env.service._drive_client_path = drive
+    with pytest.raises(ColabOAuthError, match='CONFIG_INVALID'):
+        env.service.start()
+    assert not env.callbacks and not env.google.calls and not env.colab.calls
