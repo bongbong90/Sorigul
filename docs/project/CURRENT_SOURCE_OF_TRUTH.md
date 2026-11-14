@@ -74,6 +74,7 @@ Classification values are exact: `CURRENT CONTRACT`, `SUPERSEDED`, `HISTORICAL E
 | `colab/README.md` | CURRENT CONTRACT | Current Colab runtime usage and connection instructions. | Current Product Contract for engine/model behavior. |
 | `frontend/README.md` | CURRENT CONTRACT | Current frontend development commands with links to historical implementation records. | Current Product Contract for product behavior. |
 | `docs/README.md` | CURRENT CONTRACT | Current documentation routing entry point. | Current Product Contract and this ledger. |
+| `docs/COLAB_PHASE17_MODEL_PROVISIONING.md` | HISTORICAL EVIDENCE ONLY | PHASE 17 owned-runtime provisioning implementation and Mock validation scope; no live launch approval. | Current Product Contract, launch gates, and current code/tests. |
 | `docs/backend/CORE_BACKEND_FILE_JOB_MIGRATION.md` | SUPERSEDED | Pre-refinement migration snapshot includes earlier filename assumptions. | Core workflow plan and current code/tests. |
 | `docs/backend/DRIVE_RESULTS_DESKTOP_UX_MIGRATION.md` | SUPERSEDED | Records the old four-file Drive bundle and filename-derived classification. | Core workflow plan D11/D15 and this ledger. |
 | `docs/backend/TRANSCRIPTION_ENGINE_MIGRATION.md` | STALE | Requires ffprobe and describes CPU fallback as sufficient without the release CUDA gate. | Core workflow plan D20 and current release status. |

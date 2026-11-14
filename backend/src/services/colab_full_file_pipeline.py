@@ -2,7 +2,8 @@
 
 An existing RuntimeOwnership (the PHASE 04 ownership service) lends its active
 Runtime/lease. Its ColabRuntimeClient must already have GoogleAccountVerifier
-configured. This controller never creates/deletes a Runtime or installs models.
+configured. This controller never creates/deletes a Runtime. An optional trusted
+server provisioning authorizer enables fixed remote package/model preparation.
 Only the kernel, uploads and splitter temporaries created here are cleaned.
 """
 
@@ -116,13 +117,17 @@ def _sha256(path):
 class ColabFullFilePipeline:
     def __init__(self, ownership: RuntimeOwnership, cache: ColabRecoveryCache, *,
                  splitter=None, http_request=_http_request, ws_connect=_connect_ws,
-                 transfer_factory=ColabJupyterFileTransfer, inference_factory=ColabJupyterInference):
+                 transfer_factory=ColabJupyterFileTransfer, inference_factory=ColabJupyterInference,
+                 provisioning_authorizer=None, provisioning_event=lambda event: None):
         self.ownership, self.cache = ownership, cache
         self.splitter = splitter if splitter is not None else FFmpegAudioSplitter()
         self._http, self._ws = http_request, ws_connect
         self._transfer_factory, self._inference_factory = transfer_factory, inference_factory
         self._lock = threading.Lock()
         self.last_report = None
+        self._provisioning_authorizer = provisioning_authorizer
+        self._provisioning_event = provisioning_event
+        self.provisioning_report = None
 
     @staticmethod
     def _checkpoint(path, execution_id, status):
@@ -256,7 +261,11 @@ class ColabFullFilePipeline:
         code = error.code
         if isinstance(error, PipelineError):
             return error.signal
-        if code in (InferenceCode.MODEL_INSTALL_REQUIRED, InferenceCode.MODEL_LOAD_FAILED):
+        if code in (InferenceCode.MODEL_INSTALL_REQUIRED, InferenceCode.MODEL_LOAD_FAILED,
+                    InferenceCode.PROVISIONING_NOT_APPROVED, InferenceCode.PYTHON_UNSUPPORTED,
+                    InferenceCode.PACKAGE_INSTALL_FAILED, InferenceCode.PACKAGE_VERSION_MISMATCH,
+                    InferenceCode.PACKAGE_IMPORT_FAILED, InferenceCode.MODEL_DOWNLOAD_FAILED,
+                    InferenceCode.MODEL_REVISION_MISMATCH, InferenceCode.MODEL_CACHE_INCOMPLETE):
             return "MODEL_PREPARATION_REQUIRED"
         if code in (RuntimeErrorCode.AUTH_EXPIRED, RuntimeErrorCode.ACCESS_DENIED,
                     RuntimeErrorCode.NOT_OWNED, RuntimeErrorCode.PRECONDITION_UNVERIFIED,
@@ -334,6 +343,18 @@ class ColabFullFilePipeline:
                 inference = self._inference_factory(
                     bound, transfer, http_request=self._http, ws_connect=self._ws,
                     reuse_kernel=True, cancel_requested=requested)
+                if self._provisioning_authorizer is not None:
+                    from src.services.colab_model_provisioner import ColabModelProvisioner
+                    def provision_event(event):
+                        self._provisioning_event(event)
+                        event_callback("info", "ColabProvisioning:" + event["state"], event["message"])
+                    provisioner = ColabModelProvisioner(
+                        inference, authorizer=self._provisioning_authorizer, emit=provision_event)
+                    try:
+                        self.provisioning_report = provisioner.run()
+                    finally:
+                        if inference.provisioning_uncertain:
+                            signals.add("REMOTE_STATE_UNCERTAIN")
                 readiness = inference.prepare()
                 signals.add("GPU_CPU_PATH" if readiness["device"] == "cpu" else "COLAB_AVAILABLE")
                 token.raise_if_requested()

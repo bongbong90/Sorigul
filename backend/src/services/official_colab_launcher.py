@@ -22,6 +22,7 @@ persisted or returned by status().
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from functools import partial
 
 from src.domain.transcription import ErrorCategory
 from src.engines.colab import ColabRecoveryCache
@@ -136,12 +137,17 @@ class OfficialColabLauncher:
     def __init__(self, *, credential_provider, ownership_store=None,
                  ownership_factory=default_ownership_factory, authorizer=None,
                  pipeline_factory=ColabFullFilePipeline, cache_root: Path,
-                 preflight_options=None):
+                 preflight_options=None, provisioning_authorizer=None, provisioning_event=lambda event: None):
         self._credentials = credential_provider
         self._store = ownership_store if ownership_store is not None else OwnershipStore()
         self._ownership_factory = ownership_factory
         self._authorizer = authorizer if authorizer is not None else FailClosedLaunchAuthorizer()
         self._pipeline_factory = pipeline_factory
+        # A separate trusted server capability; never populated from Job/settings/request.
+        # Without it the existing read-only prepare path remains in use.
+        if provisioning_authorizer is not None:
+            self._pipeline_factory = partial(pipeline_factory,
+                provisioning_authorizer=provisioning_authorizer, provisioning_event=provisioning_event)
         self._cache_root = Path(cache_root)
         # Trusted test seams for the preflight's inner network layer only.
         self._preflight_options = dict(preflight_options or {})

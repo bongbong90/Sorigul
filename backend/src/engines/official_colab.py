@@ -89,6 +89,12 @@ class OfficialColabJobEngine:
             progress_callback(None if value == 1 else value)
 
         def event(level, category, message):
+            from src.services.colab_model_provisioner import MESSAGES
+            if isinstance(category, str) and category.startswith("ColabProvisioning:"):
+                state = category.partition(":")[2]
+                if state in MESSAGES and message == MESSAGES[state]:
+                    event_callback("info", category, MESSAGES[state])
+                    return
             # Do not let arbitrary remote content become a Job event/log.
             event_callback("info", "Colab", "전사 작업을 진행하고 있습니다.")
 
