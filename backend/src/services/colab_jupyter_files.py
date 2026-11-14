@@ -292,6 +292,19 @@ class ColabJupyterFileTransfer:
             raise TransferError(TransferCode.REMOTE_PATH_INVALID)
         return self._guard(f"{self.run_dir}/chunk-{index:05d}{LOCAL_SUFFIX}")
 
+    def matches_connection(self, connection_info):
+        """Read-only binding check for consumers of this run's owned files.
+
+        A refreshed token must first be installed by refresh_connection(); this
+        never retargets a transfer or claims ownership of another Runtime.
+        """
+        with self._lock:
+            try:
+                return (ColabJupyterClient._validate_info(connection_info) == self._base_url
+                        and connection_info.token == self._info.token)
+            except JupyterClientError:
+                return False
+
     def _guard(self, path):
         if not isinstance(path, str) or not (
                 path in (REMOTE_ROOT, self.run_dir) or self._file_path.fullmatch(path)):
