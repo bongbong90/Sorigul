@@ -39,7 +39,7 @@ export function CurrentTaskSection({
   const presentation = statusPresentation[status]
   const displayFilename = filename ?? '현재 작업 없음'
   const hasObservedEta = etaSeconds != null && Number.isFinite(etaSeconds) && etaSeconds > 0
-  const showsRuntime = engine === 'local_whisper' || engine === 'direct_colab'
+  const showsRuntime = engine === 'local_whisper' || engine === 'direct_colab' || engine === 'official_colab'
   const detail = status === 'TRANSCRIBING' && showsRuntime
     ? `경과 ${formatRuntimeSeconds(elapsedSeconds)} · ${hasObservedEta ? `ETA 약 ${formatRuntimeSeconds(etaSeconds)}` : 'ETA 계산 중'}`
     : presentation.detail

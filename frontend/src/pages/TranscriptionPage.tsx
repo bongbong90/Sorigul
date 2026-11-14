@@ -30,6 +30,8 @@ import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transc
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
 import { EngineSection, type EngineConnection } from '../components/transcription/EngineSection'
+import { useOfficialColabStatus } from '../hooks/useOfficialColabStatus'
+import type { EngineId } from '../api/client'
 import { HeaderActions } from '../components/layout/HeaderActions'
 
 import { OverallProgress, TranscriptionActions } from '../components/transcription/TranscriptionActions'
@@ -114,12 +116,13 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const [driveAuth, setDriveAuth] = useState('UNAUTHENTICATED')
   const [dialog, setDialog] = useState<DialogKind>(null)
 
-  const [fallbackEngine, setFallbackEngine] = useState<'local_whisper' | 'direct_colab'>('local_whisper')
+  const [fallbackEngine, setFallbackEngine] = useState<EngineId>('local_whisper')
   const [fallbackBaseUrl, setFallbackBaseUrl] = useState<string | null>(null)
   const engine = connection?.engine ?? fallbackEngine
   const setEngine = connection?.onChangeEngine ?? setFallbackEngine
   const connectedBaseUrl = connection ? connection.connectedBaseUrl : fallbackBaseUrl
   const setConnectedBaseUrl = connection?.onBaseUrlChange ?? setFallbackBaseUrl
+  const { refresh: refreshOfficialColabStatus } = useOfficialColabStatus(engine)
 
 
   const [pendingIds, setPendingIds] = useState<string[]>([])
@@ -173,9 +176,9 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
   const needsStagePrompt = Boolean(subject.trim()) && !knownStage && (!overrideStage || editingOverride)
 
-  function changeEngine(nextEngine: 'local_whisper' | 'direct_colab') {
+  function changeEngine(nextEngine: EngineId) {
     setEngine(nextEngine)
-    if (nextEngine === 'local_whisper') {
+    if (nextEngine !== 'direct_colab') {
       setConnectedBaseUrl(null)
     }
   }
@@ -408,7 +411,7 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   }, [pollGlobalRun])
 
   const runStartMs = latestRunStartMs(job?.events ?? [])
-  const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab')
+  const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab' || job?.engine === 'official_colab')
     && job.status === 'TRANSCRIBING'
   useEffect(() => {
     if (!isTranscribingWithRuntime) return
@@ -570,6 +573,22 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       setDialog(null)
       return
     }
+    if (engine === 'official_colab') {
+      // Fresh server answer at click time; the server re-checks on Job
+      // creation and again before any remote work, so this is UX only.
+      void refreshOfficialColabStatus().then((status) => {
+        if (status.available) startAttemptChecked(ids, force, scope)
+        else {
+          setMessage(`Colab 자동 연결을 지금 사용할 수 없습니다. ${status.reasons[0]?.message ?? ''} Local 전사를 선택할 수 있습니다.`.trim())
+          setDialog(null)
+        }
+      })
+      return
+    }
+    startAttemptChecked(ids, force, scope)
+  }
+
+  function startAttemptChecked(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
     if (preflightLockRef.current) return
     // #180: validate and snapshot the week before taking the lock; a paused
     // review later resumes with this value, never the live input.
@@ -729,7 +748,10 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       setJob(started); setGlobalActiveJob(started)
       // Only remember a course/subject that actually produced a valid Job.
       if (settings) {
-        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: engine })) }
+        // last_engine keeps its existing two-value schema: official Colab is
+        // never persisted, so older versions and defaults stay compatible.
+        const lastEngine = engine === 'official_colab' ? settings.last_engine : engine
+        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: lastEngine })) }
         catch { /* best-effort */ }
       }
       releasePreflight()

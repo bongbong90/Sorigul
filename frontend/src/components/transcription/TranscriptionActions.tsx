@@ -56,6 +56,6 @@ export function OverallProgress({ progressDoneCount, progressTotalCount, selecte
   return <div className="overall-progress" aria-label="전체 진행률" aria-live="polite">
     <span className="text-caption">전체 진행률 · {selectedCount}개 선택</span>
     <strong className="text-section-heading text-numeric">{progressDoneCount !== null && progressTotalCount !== null ? `${progressDoneCount} / ${progressTotalCount} 완료` : '현재 작업 없음'}</strong>
-    {engine ? <span className="text-caption">실제 엔진 · {engine === 'direct_colab' ? 'Google Colab' : 'Local'}</span> : null}
+    {engine ? <span className="text-caption">실제 엔진 · {engine === 'official_colab' ? 'Google Colab 자동 연결' : engine === 'direct_colab' ? 'Google Colab' : 'Local'}</span> : null}
   </div>
 }

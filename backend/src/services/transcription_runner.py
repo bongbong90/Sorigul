@@ -29,6 +29,7 @@ from src.engines.local_whisper import (
 from src.engines.official_colab import OfficialColabJobEngine, disabled_error, OfficialColabEngineError
 from src.services.colab_full_file_pipeline import ColabFullFilePipeline
 from src.services.colab_runtime_ownership import RuntimeOwnership
+from src.services.official_colab_launcher import disabled_status
 from src.services.job_manager import JobManager
 from src.services.colab_security import PairingRegistry, pairing_registry
 from src.services.output_bundle import OutputBundleWriter
@@ -62,6 +63,7 @@ class DefaultEngineResolver:
         registry: PairingRegistry = pairing_registry,
         *, official_colab_enabled=False, official_colab_ownership=None,
         official_colab_pipeline_factory=ColabFullFilePipeline,
+        official_colab_launcher=None,
     ):
         if type(official_colab_enabled) is not bool:
             raise ValueError("Invalid internal engine switch")
@@ -73,12 +75,29 @@ class DefaultEngineResolver:
         self._official_colab_enabled = official_colab_enabled
         self._official_colab_ownership = official_colab_ownership
         self._official_colab_pipeline_factory = official_colab_pipeline_factory
+        # Server-constructed only (#245); never derived from requests/settings.
+        self._official_colab_launcher = official_colab_launcher
 
     @property
     def official_colab_enabled(self):
+        if self._official_colab_launcher is not None:
+            return True
         return self._official_colab_enabled and isinstance(self._official_colab_ownership, RuntimeOwnership)
 
+    def official_colab_status(self) -> dict:
+        """No network. DISABLED unless the server injected a launcher."""
+        if self._official_colab_launcher is not None:
+            return self._official_colab_launcher.status()
+        if self.official_colab_enabled:
+            return {"state": "READY", "available": True, "reasons": []}
+        return disabled_status()
+
     def __call__(self, job: JobModel) -> TranscriptionEngine:
+        if job.engine == "official_colab" and self._official_colab_launcher is not None:
+            if job.engine_config:
+                raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
+                                                category=ErrorCategory.CONFIGURATION)
+            return self._official_colab_launcher.launch()
         if job.engine == "official_colab":
             if not self.official_colab_enabled:
                 raise disabled_error()
@@ -158,6 +177,7 @@ class TranscriptionRunner:
         try:
             scanned = {item.id: item for item in FileScanner(job.folder).scan()}
         except OSError as exc:
+            self._close_engine_session(job_id, engine)
             self._finish_fatal(
                 job_id,
                 token,
@@ -332,7 +352,26 @@ class TranscriptionRunner:
                 if observes_colab_speed:
                     self._update_colab_eta(job_id, colab_observations, scanned)
 
+        if not self._close_engine_session(job_id, engine):
+            process_cleanup_failed = True
         self._finalize(job_id, token, fatal_error, process_cleanup_failed)
+
+    def _close_engine_session(self, job_id: str, engine) -> bool:
+        """Release a per-Job remote session (official Colab owned Runtime).
+
+        Engines without close_session() are unaffected. A failed or uncertain
+        remote cleanup keeps the Job from being reported as a clean finish.
+        """
+        close = getattr(engine, "close_session", None)
+        if close is None:
+            return True
+        try:
+            clean = close() is True
+        except Exception:
+            clean = False
+        if not clean:
+            self._event(job_id, "error", "Colab", "원격 작업 정리를 확인하지 못했습니다. 다음 실행 전에 정리 상태를 확인해야 합니다.")
+        return clean
 
     def _clear_eta(self, job_id: str):
         self.job_manager.mutate_job(job_id, lambda job: setattr(job, "eta_seconds", None))

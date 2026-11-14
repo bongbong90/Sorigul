@@ -115,6 +115,21 @@ def local_runtime_status():
     return engine_resolver.local_runtime_status()
 
 
+def _official_colab_status() -> dict:
+    status = getattr(engine_resolver, "official_colab_status", None)
+    if status is None:
+        from src.services.official_colab_launcher import disabled_status
+        return disabled_status()
+    return status()
+
+
+@router.get("/engines/official-colab/status")
+def official_colab_status():
+    # No network: enabled state, static launch gates and local ownership only.
+    # Never returns credentials, account identifiers, Runtime names or URLs.
+    return _official_colab_status()
+
+
 @router.get("/events")
 def list_events():
     events = []
@@ -448,6 +463,14 @@ def create_job(req: CreateJobRequest):
             raise HTTPException(status_code=400, detail="Official Colab engine is disabled.")
         if req.colab_url is not None:
             raise HTTPException(status_code=400, detail="Official Colab does not accept connection settings.")
+        official_status = _official_colab_status()
+        if official_status.get("available") is not True:
+            reasons = official_status.get("reasons") or []
+            first = reasons[0]["message"] if reasons else "실행 조건이 확인되지 않았습니다."
+            raise HTTPException(
+                status_code=400,
+                detail=f"공식 Colab 자동 연결을 지금 사용할 수 없습니다. {first}",
+            )
     elif req.engine not in {"local_whisper", "direct_colab"}:
         raise HTTPException(status_code=400, detail="Unsupported transcription engine.")
     if req.engine == "direct_colab" and not req.colab_url:
