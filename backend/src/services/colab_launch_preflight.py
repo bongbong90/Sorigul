@@ -16,7 +16,15 @@ the network: no Runtime POST/DELETE, kernels, files, models, billing, CU
 purchase, undocumented usage endpoints (e.g. CLI /tun/m/ccu-info) or OAuth UI.
 
 granted_scopes (the OAuth token response `scope` field) may only DOWNGRADE a
-result; it is never evidence of authorization. Drive-scoped tokens are refused
+result; it is never evidence of authorization. It is not bound to the exact
+access token here, so a declared full `colaboratory` scope is DECLARED_ONLY and
+create permission (`launch_scope`) is never VERIFIED: the two allowed readonly
+GETs cannot prove that `runtimes.create` would be authorized (#242).
+
+Identity is not Runtime ownership. A verified account fingerprint is necessary,
+not sufficient: preflight never opens the OwnershipStore, inspects Runtimes or
+takes an execution lease, so those states are NOT_CHECKED and create
+preconditions are NOT_VERIFIED (#242). Drive-scoped tokens are refused
 locally so a Drive OAuth token is never reused for Colab.
 
 No logging. Results carry enums only; the access token, Google `sub`, email,
@@ -57,6 +65,7 @@ TIER_FREE = "SUBSCRIPTION_TIER_FREE"
 PAID_TIERS = frozenset({"SUBSCRIPTION_TIER_PRO", "SUBSCRIPTION_TIER_PRO_PLUS"})
 
 # What RuntimeOwnership/RuntimeClient need before any future create attempt.
+# Listed only; preflight verifies none beyond the account fingerprint.
 OWNERSHIP_REQUIREMENTS = (
     "VERIFIED_ACCOUNT_BINDING_FROM_GOOGLE_USERINFO",
     "DURABLE_OWNERSHIP_RECORD_BEFORE_POST",
@@ -89,7 +98,9 @@ class CheckStatus(str, Enum):
     RESPONSE_INVALID = "RESPONSE_INVALID"
     DRIVE_TOKEN_REFUSED = "DRIVE_TOKEN_REFUSED"
     READ_ONLY_GUARD_VIOLATION = "READ_ONLY_GUARD_VIOLATION"
+    DECLARED_ONLY = "DECLARED_ONLY"  # Caller-declared, not bound to this token.
     NOT_VERIFIED = "NOT_VERIFIED"
+    NOT_CHECKED = "NOT_CHECKED"      # Outside this read-only preflight's reach.
     NOT_RUN = "NOT_RUN"
 
 
@@ -133,11 +144,11 @@ _VERIFIED_POLICY_GATES = frozenset()
 @dataclass(frozen=True)
 class PreflightResult:
     identity: CheckStatus
-    colab_access: CheckStatus
+    colab_access: CheckStatus  # Readonly API access only, never create permission.
     tier: TierStatus
     t4: T4Status
-    launch_scope: CheckStatus  # Full colaboratory scope needed for a later create.
-    ownership_preconditions: CheckStatus
+    declared_launch_scope: CheckStatus  # DECLARED_ONLY / AUTH_SCOPE_REQUIRED / NOT_VERIFIED.
+    launch_scope: CheckStatus  # Verified create permission: never VERIFIED here.
     cost_gate: CostGate
     policy_gate: PolicyGate
     technical_blocking_reasons: tuple
@@ -146,6 +157,11 @@ class PreflightResult:
     remote_requests: int
     paid_cu_non_consumption_evidence: str = PAID_CU_NON_CONSUMPTION_EVIDENCE
     account_binding: str | None = field(default=None, repr=False)
+    # Not constructor arguments: preflight cannot establish these.
+    create_preconditions: CheckStatus = field(default=CheckStatus.NOT_VERIFIED, init=False)
+    durable_ownership_record: CheckStatus = field(default=CheckStatus.NOT_CHECKED, init=False)
+    runtime_ownership: CheckStatus = field(default=CheckStatus.NOT_CHECKED, init=False)
+    execution_lease: CheckStatus = field(default=CheckStatus.NOT_CHECKED, init=False)
 
     @property
     def technical_precheck_passed(self):
@@ -156,7 +172,8 @@ class PreflightResult:
         out = []
         if self.identity is CheckStatus.VERIFIED:
             out.append(PreflightLabel.IDENTITY_VERIFIED)
-        if CheckStatus.AUTH_SCOPE_REQUIRED in (self.identity, self.colab_access, self.launch_scope):
+        if CheckStatus.AUTH_SCOPE_REQUIRED in (self.identity, self.colab_access, self.launch_scope,
+                                               self.declared_launch_scope):
             out.append(PreflightLabel.AUTH_SCOPE_REQUIRED)
         if self.colab_access is CheckStatus.VERIFIED:
             out.append(PreflightLabel.COLAB_ACCESS_VERIFIED)
@@ -175,8 +192,12 @@ class PreflightResult:
         return {
             "identity": self.identity.value, "colab_access": self.colab_access.value,
             "tier": self.tier.value, "t4": self.t4.value,
+            "declared_launch_scope": self.declared_launch_scope.value,
             "launch_scope": self.launch_scope.value,
-            "ownership_preconditions": self.ownership_preconditions.value,
+            "create_preconditions": self.create_preconditions.value,
+            "durable_ownership_record": self.durable_ownership_record.value,
+            "runtime_ownership": self.runtime_ownership.value,
+            "execution_lease": self.execution_lease.value,
             "cost_gate": self.cost_gate.value, "policy_gate": self.policy_gate.value,
             "paid_cu_non_consumption_evidence": self.paid_cu_non_consumption_evidence,
             "technical_blocking_reasons": list(self.technical_blocking_reasons),
@@ -309,12 +330,16 @@ def run_launch_preflight(access_token, *, network_approved, expected_account_bin
     guard = opener = None
     scopes = _scope_set(granted_scopes)
 
+    # Declared scope can rule create out, never in (#242).
     if scopes is None:
-        launch_scope = CheckStatus.NOT_VERIFIED
+        declared_launch_scope = CheckStatus.NOT_VERIFIED
     elif SCOPE_COLAB in scopes:
-        launch_scope = CheckStatus.VERIFIED
+        declared_launch_scope = CheckStatus.DECLARED_ONLY
     else:
-        launch_scope = CheckStatus.AUTH_SCOPE_REQUIRED
+        declared_launch_scope = CheckStatus.AUTH_SCOPE_REQUIRED
+    launch_scope = (CheckStatus.AUTH_SCOPE_REQUIRED
+                    if declared_launch_scope is CheckStatus.AUTH_SCOPE_REQUIRED
+                    else CheckStatus.NOT_VERIFIED)
 
     def finish():
         if identity is not CheckStatus.VERIFIED:
@@ -327,17 +352,19 @@ def run_launch_preflight(access_token, *, network_approved, expected_account_bin
             technical.append("T4_" + t4.value)
         if launch_scope is not CheckStatus.VERIFIED:
             technical.append("LAUNCH_SCOPE_" + launch_scope.value)
-        ownership = CheckStatus.VERIFIED if identity is CheckStatus.VERIFIED else CheckStatus.NOT_VERIFIED
         requests = (guard.requests if guard else 0) + (opener.requests if opener else 0)
         reasons = list(dict.fromkeys(technical))
-        launch_reasons = list(reasons)
+        launch_reasons = list(reasons) + [
+            "CREATE_PRECONDITIONS_NOT_VERIFIED", "DURABLE_OWNERSHIP_RECORD_NOT_CHECKED",
+            "RUNTIME_OWNERSHIP_NOT_CHECKED", "EXECUTION_LEASE_NOT_CHECKED",
+        ]
         if COST_GATE not in _VERIFIED_COST_GATES:
             launch_reasons.append(COST_GATE.value)
         if POLICY_GATE not in _VERIFIED_POLICY_GATES:
             launch_reasons.append(POLICY_GATE.value)
         return PreflightResult(
-            identity=identity, colab_access=colab, tier=tier, t4=t4, launch_scope=launch_scope,
-            ownership_preconditions=ownership, cost_gate=COST_GATE, policy_gate=POLICY_GATE,
+            identity=identity, colab_access=colab, tier=tier, t4=t4,
+            declared_launch_scope=declared_launch_scope, launch_scope=launch_scope, cost_gate=COST_GATE, policy_gate=POLICY_GATE,
             technical_blocking_reasons=tuple(reasons),
             launch_blocking_reasons=tuple(launch_reasons),
             launch_approval=LaunchApproval.GO if not launch_reasons else LaunchApproval.BLOCKED,
@@ -358,7 +385,7 @@ def run_launch_preflight(access_token, *, network_approved, expected_account_bin
         return finish()
     if scopes is not None:
         if any("/auth/drive" in s for s in scopes):
-            identity = colab = launch_scope = CheckStatus.DRIVE_TOKEN_REFUSED
+            identity = colab = launch_scope = declared_launch_scope = CheckStatus.DRIVE_TOKEN_REFUSED
             return finish()
         if SCOPE_OPENID not in scopes:
             identity = CheckStatus.AUTH_SCOPE_REQUIRED
