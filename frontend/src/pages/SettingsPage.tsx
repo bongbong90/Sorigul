@@ -7,6 +7,7 @@ import { isTauri, openInBrowser } from '../lib/native'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { ColabAccountSettings } from '../components/ColabAccountSettings'
 
 const defaults: RuntimeSettings = {
   notifications: { file_complete: true, job_complete: true },
@@ -233,6 +234,7 @@ export function SettingsPage({ connection }: { connection?: EngineConnection } =
           {!isTauri() ? <div className="setting-note"><span>웹 개발 모드에서는 브라우저 handoff를 수행하지 않습니다.</span></div> : null}
           <div className="drive-retry-list">{driveEntries.map(({ job, id, state }) => <div className="setting-row" key={`${job.job_id}:${id}`}><span><strong>{id}</strong><small>{state.status === 'DONE' ? 'Drive 업로드 완료' : state.status === 'UPLOADING' ? 'Drive 업로드 중' : state.status === 'FAILED' ? 'Drive 업로드 실패' : state.status}{state.error ? ` · ${state.error}` : ''}</small></span>{state.status === 'FAILED' ? <Button variant="secondary" disabled={backend !== 'CONNECTED' || retrying !== null || job.files[id] !== 'DONE'} onClick={() => void retryDrive(job, id)}>Drive 실패 다시 시도</Button> : null}</div>)}{driveEntries.length === 0 ? <p className="text-caption">아직 Drive 업로드 기록이 없습니다.</p> : null}</div>
         </Card>
+        <ColabAccountSettings online={backend === 'CONNECTED'} criticalWork={criticalWork} />
         {connection ? <div className="settings-card-wide"><EngineSection {...connection} disabled={backend !== 'CONNECTED' || criticalWork} /></div> : null}
         <Card className="settings-card settings-card-wide"><div className="settings-card-heading"><Server aria-hidden="true" /><div><h3>Backend / Runtime</h3><p>실제 health 상태를 표시합니다.</p></div></div>
           <div className="runtime-state-grid"><div><Badge tone={backend === 'CONNECTED' ? 'done' : backend === 'STARTING' ? 'preparing' : 'failed'}>{backend === 'CONNECTED' ? 'Backend 연결됨' : backend === 'STARTING' ? 'Backend 시작 중' : 'Backend 오프라인'}</Badge><span>{backend === 'CONNECTED' ? '상태 확인 완료' : '전사를 시작할 수 없음'}</span></div></div>

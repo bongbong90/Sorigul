@@ -94,6 +94,7 @@ class DefaultEngineResolver:
         *, official_colab_enabled=False, official_colab_ownership=None,
         official_colab_pipeline_factory=ColabFullFilePipeline,
         official_colab_launcher=None,
+        official_colab_launcher_enabled=True,
     ):
         if type(official_colab_enabled) is not bool:
             raise ValueError("Invalid internal engine switch")
@@ -107,16 +108,19 @@ class DefaultEngineResolver:
         self._official_colab_pipeline_factory = official_colab_pipeline_factory
         # Server-constructed only (#245); never derived from requests/settings.
         self._official_colab_launcher = official_colab_launcher
+        self._official_colab_launcher_enabled = official_colab_launcher_enabled is True
 
     @property
     def official_colab_enabled(self):
         if self._official_colab_launcher is not None:
-            return True
+            return self._official_colab_launcher_enabled
         return self._official_colab_enabled and isinstance(self._official_colab_ownership, RuntimeOwnership)
 
     def official_colab_status(self) -> dict:
         """No network. DISABLED unless the server injected a launcher."""
         if self._official_colab_launcher is not None:
+            if not self._official_colab_launcher_enabled:
+                return disabled_status()
             return self._official_colab_launcher.status()
         if self.official_colab_enabled:
             return {"state": "READY", "available": True, "reasons": []}
@@ -124,6 +128,8 @@ class DefaultEngineResolver:
 
     def __call__(self, job: JobModel) -> TranscriptionEngine:
         if job.engine == "official_colab" and self._official_colab_launcher is not None:
+            if not self.official_colab_enabled:
+                raise disabled_error()
             if job.engine_config:
                 raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
                                                 category=ErrorCategory.CONFIGURATION)
