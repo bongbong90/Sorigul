@@ -26,6 +26,7 @@ from src.services.transcription_runner import (
 from src.domain.models import (
     BundleStatus,
     DriveFileState,
+    DriveDestination,
     FileMetadata,
     FileStatus,
     JobEvent,
@@ -50,6 +51,7 @@ from src.services.results import (
 )
 from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
+from src.services.drive_destination import DriveDestinationService, DriveFolderPage, DriveFolderSelection
 from src.utils.paths import get_app_data_dir
 
 logger = logging.getLogger(__name__)
@@ -306,6 +308,34 @@ def get_drive_status():
     return {"auth_state": drive_auth.state, "scope": DRIVE_SCOPE}
 
 
+@router.get("/drive/folders", response_model=DriveFolderPage)
+def browse_drive_folders(
+    folder_id: str = Query(default="root", pattern=r"^[A-Za-z0-9_-]{1,256}$"),
+    account_id: Optional[str] = Query(default=None, min_length=1, max_length=256),
+    page_token: Optional[str] = Query(default=None, max_length=4096),
+):
+    try:
+        return DriveDestinationService(drive_auth, settings_manager).browse(folder_id, account_id, page_token)
+    except DriveError as exc:
+        raise HTTPException(status_code=409, detail=exc.user_message)
+
+
+@router.put("/drive/destination", response_model=RuntimeSettings)
+def select_drive_destination(req: DriveFolderSelection):
+    try:
+        return DriveDestinationService(drive_auth, settings_manager).select(req)
+    except DriveError as exc:
+        raise HTTPException(status_code=409, detail=exc.user_message)
+
+
+@router.delete("/drive/destination", response_model=RuntimeSettings)
+def reset_drive_destination():
+    try:
+        return DriveDestinationService(drive_auth, settings_manager).reset()
+    except DriveError as exc:
+        raise HTTPException(status_code=409, detail=exc.user_message)
+
+
 @router.post("/drive/auth/start")
 def start_drive_auth():
     try:
@@ -536,6 +566,10 @@ def create_job(req: CreateJobRequest):
         subject=subject,
         stage=stage,
         file_metadata=file_metadata,
+        drive_destination=DriveDestination(
+            parent=current_settings.drive_parent,
+            exam_root=current_settings.drive_exam_root,
+        ),
     )
     return job
 

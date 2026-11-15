@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Literal, Optional, Dict, Any
 from datetime import datetime
 
@@ -78,6 +78,21 @@ class FileMetadata(BaseModel):
     normalized_name: Optional[str] = None
 
 
+class DriveParentFolder(BaseModel):
+    """Validated remote identity; display_path is descriptive, never routing data."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    folder_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,256}$")
+    account_id: str = Field(min_length=1, max_length=256)
+    display_path: str = Field(min_length=1, max_length=8192)
+
+
+class DriveDestination(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    version: Literal[1] = 1
+    parent: Optional[DriveParentFolder] = None
+    exam_root: str = "2026 제37회 공인중개사 자격시험"
+
+
 class JobModel(BaseModel):
     job_id: str
     created_at: datetime = Field(default_factory=datetime.now)
@@ -88,6 +103,8 @@ class JobModel(BaseModel):
     engine_config: Dict[str, Any] = Field(default_factory=dict)
     force_retranscribe: bool = False
     upload_to_drive: bool = False
+    # None only for persisted pre-#246 Jobs: unknown destinations fail closed.
+    drive_destination: Optional[DriveDestination] = Field(default=None, frozen=True)
     total_files: int
     done_files: int
     failed_files: int
