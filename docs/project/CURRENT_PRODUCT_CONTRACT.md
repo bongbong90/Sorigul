@@ -1,5 +1,13 @@
 # Sorigul Current Product Contract
 
+## 2026-11-15 사용자 재확인 — Google 답변 대기 금지 / 선택적 무료 Colab / Local 우선 전환 (#264)
+
+**Status: LOCKED.** 2026-09-28 및 2026-11-13에 명시한 사용자의 결정을 2026-11-15 재확인했다. **Google 공식 정책 답변은 Local 개발·검증·실사용 준비의 선행조건이 아니다.** Colab의 무과금성, 정책 적합성, 무료 이용 가능성이 제한되거나 확인되지 않으면 **Colab 작업만 PENDING/BLOCKED로 남기고, 대기나 유료 우회 없이 Local OpenAI Whisper 전사 작업을 우선 진행한다.** 기존 Colab 기능을 삭제하지 않는다.
+
+이것은 Google 정책 위반을 허용한다는 뜻이 아니다. 불확실하거나 금지된 외부 호출은 실행하지 않는다. **로컬 경로의 작업 우선순위 결정**과 **실제 Google/OAuth/Runtime/GPU/Drive 실행에 대한 별도 승인**은 구분한다. 기존 사용자 데이터 보호, Runtime 소유권/복구, DEFAULT OFF, release/merge gate는 유지한다. 로컬 완료 여부와 Colab 외부 검증 여부를 분리하여 보고하며, 이전 LIVE 결과를 소급 PASS로 바꾸지 않는다.
+
+세부 운영 결정 및 새 채팅 인수인계: [`DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md`](DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md). 이 최신 사용자 결정은 과거 문서에서 Google 답변을 기다리도록 해석한 **일정 의존성**보다 우선한다.
+
 ## 2026-10-15 사용자 승인 — #192 정확한 과목명 예외
 
 D12/D16의 정확한 과목명 계약에 `공인중개사법`/`중개사법` 두 입력만
@@ -270,6 +278,8 @@ Local Runtime 자체의 크기(약 2GB)는 현재 lightweight 계약 위반이 �
 
 무료 사용 여부를 안전하게 확인할 수 없으면 기능을 삭제하거나 paid fallback으로 바꾸지 않는다. validation을 `PENDING_ZERO_COST_EXTERNAL_VALIDATION`으로 남긴다.
 
+**사용자 LOCKED 결정 (#264): 이 PENDING은 Colab/외부 검증에만 적용된다. Google 공식 답변을 기다리지 말고 Local 전사·설치·실사용 검증을 독립적으로 진행한다. Colab 사용 자체의 비용/정책 안전성과 개별 실환경 실행 승인이 불충분하면 해당 Colab 호출은 금지한다.**
+
 ## 9. Study-use deadline
 
 Deadline: **2026-10-31 KST**
@@ -311,6 +321,7 @@ Acceptance 의미:
 
 | Topic | Legacy / Earlier Contract | Current Contract | Decision Type | Current Authority | Notes |
 |---|---|---|---|---|---|
+| Google/Colab availability & reply | Google 답변이나 외부 게이트가 전체 진행의 선행조건인 것으로 해석 가능 | **답변 대기 금지; Colab은 무료·허용·승인된 경우만 선택적 사용, 불명확하면 외부 PENDING + Local-first** | Explicit user reaffirmation (2026-11-15) | §8 / #264 | 이전 LIVE evidence·실행 승인·유료 금지는 그대로 유지 |
 | Dashboard | Legacy statistics Dashboard | Dashboard 제거, structured Log | Approved Intentional Change | §5A | 복구 금지 |
 | Drive bundle | MP3/TXT/JSON/SRT 4종 | TXT/JSON/SRT only; MP3 전송 안 함 | Approved Intentional Change | §5B | #108 correction history 유지 |
 | Prompt/corrections | subject prompt와 text correction | 미이식 | Approved Intentional Change | §5C | decoding options는 유지 |
