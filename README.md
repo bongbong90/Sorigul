@@ -18,6 +18,12 @@ Sorigul은 greenfield architecture를 사용하되 Legacy ACTIVE 사용자 기�
 - [Roadmap](docs/project/ROADMAP.md)
 - [Documentation index](docs/README.md)
 
+## Current locked execution choice (2026-11-15 / #264)
+
+**Do not wait for Google's official response to progress Sorigul.** Colab is optional and free-only; when cost, policy or availability is limited/unverified, hold **only Colab** and prioritize fully Local Whisper transcription development and validation. No paid workaround, unapproved LIVE call or runtime creation. Local and Colab acceptance are distinct; all user-data and release gates remain.
+
+Start new development chats with the [LOCKED Colab optional / Local-first decision and handoff](docs/project/DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md) and the [canonical Current Product Contract](docs/project/CURRENT_PRODUCT_CONTRACT.md). **Do not reopen the Google-reply waiting debate.**
+
 ## #113 canonical preflight
 
 #113 artifact session 전에 개발자나 에이전트가 개별 pytest working directory, PYTHONPATH 또는 child command를 기억해서 재구성하지 않는다. repository root에서 아래 **한 명령만** 실행한다.
