@@ -98,6 +98,7 @@ def run_qa(*, upload: UploadEvidence, expected: bytes, expected_path: str,
     A fresh diagnostics instance prevents cross-run stale success/access flags.
     """
     diagnostics = QADiagnostics(run_outcome="RUNNING")
+    pending = None
     try:
         if type(upload) is UploadEvidence:
             diagnostics.upload_verified = upload.verified
@@ -109,18 +110,34 @@ def run_qa(*, upload: UploadEvidence, expected: bytes, expected_path: str,
             verify_readback(lambda: transport.open_readback(timeout_seconds=20),
                 expected=expected, expected_path=expected_path, diagnostics=diagnostics,
                 max_response_bytes=max_response_bytes)
+    except BaseException as exc:
+        pending = exc
+        raise
     finally:
         # Each helper captures its own failure; Runtime cleanup always follows.
         try:
             _cleanup(diagnostics, file_cleanup, runtime=False)
+        except BaseException as exc:
+            if pending is None:
+                pending = exc
+            raise pending from None
         finally:
             try:
                 _cleanup(diagnostics, runtime_cleanup, runtime=True)
+            except BaseException as exc:
+                if pending is None:
+                    pending = exc
+                raise pending from None
             finally:
                 diagnostics.run_outcome = "PASS" if all(
                     value == "PASS" for value in checks(diagnostics.snapshot()).values()) else "FAIL"
                 try:
                     save_snapshot(diagnostics.snapshot())
-                except Exception:
+                except BaseException as exc:
+                    diagnostics.run_outcome = "FAIL"
+                    if pending is not None:
+                        raise pending from None
+                    if not isinstance(exc, Exception):
+                        raise
                     raise QAResultSaveError("QA_RESULT_SAVE_FAILED") from None
     return diagnostics

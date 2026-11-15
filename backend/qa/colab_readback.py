@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 from http.client import IncompleteRead
 import json
+import sys
 from typing import Callable
 from urllib.error import HTTPError, URLError
 
@@ -45,11 +47,15 @@ class Code(str, Enum):
     HASH_MISMATCH = "SHA256_MISMATCH"
     BYTES_MISMATCH = "BYTES_MISMATCH"
     UNEXPECTED = "QA_UNEXPECTED_EXCEPTION"
+    CLOSE_FAILED = "RESPONSE_CLOSE_FAILED"
+    OWNED_TRANSPORT_BLOCKED = "OWNED_TRANSPORT_BLOCKED"
 
 
 class CheckFailed(Exception):
-    def __init__(self, code: Code):
+    def __init__(self, code: Code, *, http_status=None, response_received=False):
         self.code = code
+        self.http_status = _status(http_status)
+        self.response_received = response_received is True
         super().__init__(code.value)
 
 
@@ -133,6 +139,28 @@ def _close_error(exc):
         return True
 
 
+@contextmanager
+def _response_scope(open_response, receipt):
+    """Close independently; a close failure cannot replace a primary failure."""
+    manager = open_response()
+    response = manager.__enter__()
+    pending = (None, None, None)
+    try:
+        yield response
+    except BaseException:
+        pending = sys.exc_info()
+        raise
+    finally:
+        try:
+            manager.__exit__(*pending)
+        except BaseException as exc:
+            receipt.response_close_failed = True
+            if pending[0] is None:
+                if isinstance(exc, Exception):
+                    raise CheckFailed(Code.CLOSE_FAILED) from None
+                raise
+
+
 @dataclass
 class QADiagnostics:
     # Upload evidence is kept separately; a QA readback failure cannot change it.
@@ -204,7 +232,7 @@ def verify_readback(open_response: Callable, *, expected: bytes,
             raise CheckFailed(Code.CONFIG_INVALID)
         receipt.stage_id = Stage.OPEN.value
         receipt.request_attempted = diagnostics.jupyter_request_attempted = True
-        with open_response() as response:
+        with _response_scope(open_response, receipt) as response:
             receipt.response_received = diagnostics.jupyter_accessed = True
             receipt.stage_id = Stage.STATUS.value
             receipt.http_status = _status(response.status)
@@ -266,9 +294,14 @@ def verify_readback(open_response: Callable, *, expected: bytes,
             receipt.response_received = diagnostics.jupyter_accessed = True
             receipt.http_status = _status(exc.code)
             receipt.error_code = Code.HTTP_ERROR.value
-            receipt.response_close_failed = _close_error(exc)
+            close_failed = _close_error(exc)
+            receipt.response_close_failed = (receipt.response_close_failed or close_failed
+                                             or getattr(exc, "_qa_close_failed", False) is True)
         elif isinstance(exc, CheckFailed):
             receipt.error_code = exc.code.value
+            if exc.response_received:
+                receipt.response_received = diagnostics.jupyter_accessed = True
+                receipt.http_status = exc.http_status
         elif isinstance(exc, TimeoutError) or (isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)):
             receipt.error_code = Code.TIMEOUT.value
         elif isinstance(exc, IncompleteRead):
