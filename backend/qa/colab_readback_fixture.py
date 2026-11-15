@@ -7,7 +7,7 @@ import base64
 import io
 import json
 
-from qa.colab_readback import QADiagnostics, verify_readback
+from qa.colab_qa_run import FileCleanupEvidence, RuntimeCleanupEvidence, UploadEvidence, run_qa
 
 
 def main():
@@ -22,11 +22,16 @@ def main():
         status = 200
         headers = {"Content-Length": str(len(payload))}
 
-    diagnostics = QADiagnostics()
-    passed = verify_readback(lambda: SyntheticResponse(payload), expected=expected,
-                             expected_path=path, diagnostics=diagnostics)
-    print(json.dumps(diagnostics.snapshot(), sort_keys=True))
-    return 0 if passed else 1
+    class SyntheticTransport:
+        def open_readback(self, *, timeout_seconds):
+            return SyntheticResponse(payload)
+
+    diagnostics = run_qa(upload=UploadEvidence(True, True, True, 11, 11),
+        expected=expected, expected_path=path, transport=SyntheticTransport(),
+        file_cleanup=lambda: FileCleanupEvidence(True, True, True),
+        runtime_cleanup=lambda: RuntimeCleanupEvidence(True, True, True, True),
+        save_snapshot=lambda snapshot: print(json.dumps(snapshot, sort_keys=True)))
+    return 0 if diagnostics.run_outcome == "PASS" else 1
 
 
 if __name__ == "__main__":
