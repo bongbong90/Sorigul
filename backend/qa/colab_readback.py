@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 from http.client import IncompleteRead
@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 
 
 class Stage(str, Enum):
+    CONFIG = "READBACK_CONFIG"
     OPEN = "READBACK_OPEN"
     STATUS = "READBACK_HTTP_STATUS"
     READ = "READBACK_BODY"
@@ -31,6 +32,7 @@ class Stage(str, Enum):
 
 
 class Code(str, Enum):
+    CONFIG_INVALID = "CONFIG_INVALID"
     HTTP_ERROR = "HTTP_ERROR"
     TIMEOUT = "TIMEOUT"
     TRANSPORT = "TRANSPORT_ERROR"
@@ -89,6 +91,7 @@ class ReadbackReceipt:
     size_equal: bool | None = None
     sha256_equal: bool | None = None
     bytes_equal: bool | None = None
+    response_close_failed: bool = False
 
 
 @dataclass
@@ -99,6 +102,35 @@ class CleanupReceipt:
     exception_type: str | None = None
     error_code: str | None = None
     http_status: int | None = None
+    response_close_failed: bool = False
+
+
+_EXCEPTION_TYPES = {
+    "CheckFailed", "HTTPError", "TimeoutError", "IncompleteRead", "JSONDecodeError",
+    "Base64Error", "UnicodeError", "URLError", "KeyError", "TypeError", "ValueError",
+    "OSError", "OtherException",
+}
+
+
+def _choice(value, choices, default=None):
+    return value if type(value) is str and value in choices else default
+
+
+def _boolean(value):
+    return value if type(value) is bool else None
+
+
+def _count(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _close_error(exc):
+    try:
+        exc.close()
+        return False
+    except Exception:
+        # Preserve the primary HTTP failure, never expose close error text.
+        return True
 
 
 @dataclass
@@ -111,9 +143,50 @@ class QADiagnostics:
     readback: ReadbackReceipt = field(default_factory=ReadbackReceipt)
     file_cleanup: CleanupReceipt = field(default_factory=CleanupReceipt)
     runtime_cleanup: CleanupReceipt = field(default_factory=CleanupReceipt)
+    upload_chunks_total: int | None = None
+    upload_chunks_acknowledged: int | None = None
+    upload_size_equal: bool | None = None
+    run_outcome: str = "NOT_RUN"
 
     def snapshot(self):
-        return asdict(self)
+        # An accidental callback assignment must not turn a safe receipt into
+        # a vehicle for raw response/header/exception data. No deepcopy/str/repr.
+        r = self.readback if type(self.readback) is ReadbackReceipt else ReadbackReceipt()
+        readback = {
+            "stage_id": _choice(r.stage_id, {s.value for s in Stage}, Stage.CONFIG.value),
+            "outcome": _choice(r.outcome, {"NOT_RUN", "RUNNING", "PASS", "FAIL"}, "FAIL"),
+            "exception_type": _choice(r.exception_type, _EXCEPTION_TYPES),
+            "error_code": _choice(r.error_code, {c.value for c in Code}),
+            "http_status": _status(r.http_status), "response_bytes": _count(r.response_bytes),
+        }
+        for name in ("request_attempted", "response_received", "json_valid", "path_valid",
+                     "type_valid", "format_valid", "content_valid", "base64_decoded",
+                     "size_equal", "sha256_equal", "bytes_equal", "response_close_failed"):
+            readback[name] = _boolean(getattr(r, name))
+        result = {
+            "upload_verified": _boolean(self.upload_verified),
+            "upload_content_sha256_verified": _boolean(self.upload_content_sha256_verified),
+            "upload_chunks_total": _count(self.upload_chunks_total),
+            "upload_chunks_acknowledged": _count(self.upload_chunks_acknowledged),
+            "upload_size_equal": _boolean(self.upload_size_equal),
+            "jupyter_request_attempted": _boolean(self.jupyter_request_attempted),
+            "jupyter_accessed": _boolean(self.jupyter_accessed), "readback": readback,
+            "run_outcome": _choice(self.run_outcome, {"NOT_RUN", "RUNNING", "PASS", "FAIL"}, "FAIL"),
+        }
+        for name in ("file_cleanup", "runtime_cleanup"):
+            c = getattr(self, name)
+            if type(c) is not CleanupReceipt:
+                c = CleanupReceipt()
+            result[name] = {
+                "stage_id": _choice(c.stage_id, {"NOT_RUN", "FILE_CLEANUP", "RUNTIME_CLEANUP"}, "NOT_RUN"),
+                "attempted": _boolean(c.attempted),
+                "outcome": _choice(c.outcome, {"NOT_RUN", "RUNNING", "PASS", "FAIL", "UNCONFIRMED"}, "FAIL"),
+                "exception_type": _choice(c.exception_type, _EXCEPTION_TYPES),
+                "error_code": _choice(c.error_code, {"FILE_CLEANUP_UNCONFIRMED", "RUNTIME_CLEANUP_UNCONFIRMED"}),
+                "http_status": _status(c.http_status),
+                "response_close_failed": _boolean(c.response_close_failed),
+            }
+        return result
 
 
 def verify_readback(open_response: Callable, *, expected: bytes,
@@ -125,10 +198,11 @@ def verify_readback(open_response: Callable, *, expected: bytes,
     path/origin and disable redirects. This helper never logs that path or URL.
     PASS requires matching size, locally computed SHA256 AND exact bytes.
     """
-    if type(max_response_bytes) is not int or max_response_bytes < 1:
-        raise ValueError("INVALID_RESPONSE_LIMIT")
-    receipt = diagnostics.readback = ReadbackReceipt(outcome="RUNNING")
+    receipt = diagnostics.readback = ReadbackReceipt(stage_id=Stage.CONFIG.value, outcome="RUNNING")
     try:
+        if type(max_response_bytes) is not int or max_response_bytes < 1:
+            raise CheckFailed(Code.CONFIG_INVALID)
+        receipt.stage_id = Stage.OPEN.value
         receipt.request_attempted = diagnostics.jupyter_request_attempted = True
         with open_response() as response:
             receipt.response_received = diagnostics.jupyter_accessed = True
@@ -166,7 +240,7 @@ def verify_readback(open_response: Callable, *, expected: bytes,
         receipt.base64_decoded = False
         # MIME/Jupyter-style line wraps are permitted. Other non-alphabet
         # characters remain errors, rather than using permissive validate=False.
-        encoded = model["content"].encode("ascii").replace(b"\r", b"").replace(b"\n", b"")
+        encoded = model["content"].encode("ascii").replace(b"\r\n", b"\n").replace(b"\n", b"")
         actual = base64.b64decode(encoded, validate=True)
         receipt.base64_decoded = True
         receipt.stage_id = Stage.SIZE.value
@@ -192,7 +266,7 @@ def verify_readback(open_response: Callable, *, expected: bytes,
             receipt.response_received = diagnostics.jupyter_accessed = True
             receipt.http_status = _status(exc.code)
             receipt.error_code = Code.HTTP_ERROR.value
-            exc.close()
+            receipt.response_close_failed = _close_error(exc)
         elif isinstance(exc, CheckFailed):
             receipt.error_code = exc.code.value
         elif isinstance(exc, TimeoutError) or (isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)):
@@ -235,5 +309,5 @@ def record_cleanup(diagnostics: QADiagnostics, *, runtime: bool,
         receipt.error_code = "RUNTIME_CLEANUP_UNCONFIRMED" if runtime else "FILE_CLEANUP_UNCONFIRMED"
         if isinstance(exc, HTTPError):
             receipt.http_status = _status(exc.code)
-            exc.close()
+            receipt.response_close_failed = _close_error(exc)
         return False
