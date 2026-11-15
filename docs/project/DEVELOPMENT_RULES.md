@@ -50,6 +50,15 @@
 - 실패한 gate를 건너뛰지 않는다. 원인과 영향, 다음 조치를 Issue에 남긴다.
 - 외부 zero-cost dependency를 안전하게 검증할 수 없으면 기능을 삭제하거나 paid fallback을 도입하지 않고 `PENDING`으로 기록한다.
 
+## Locked external dependency / Local-first decision (#264, 2026-11-15)
+
+- **Never make Google's official response a prerequisite for Local development, validation, installation or study-use preparation.** The user has already chosen not to wait for it; do not repeatedly seek the same strategy approval or invent another cloud-only QA phase to fill the wait.
+- **Colab is optional/best-effort and must remain free and compliant.** If cost/policy/availability is restricted or unverified, mark only the external Colab gate `PENDING_ZERO_COST_EXTERNAL_VALIDATION` / `NOT VERIFIED` / `BLOCKED` and immediately prioritize the independent Local Whisper path. Do not delete the Colab feature, activate billing, purchase credits, enable paid fallback or bypass any known policy restriction.
+- **Local status and cloud status are separate.** Cloud PENDING cannot be reported as a Local blocker, and Local success cannot be reported as a Colab PASS or full-release PASS without its own evidence.
+- This strategic priority is **not** approval for a particular actual API/OAuth/Runtime/Jupyter/GPU/Drive operation, protected user-data test, or automatic mid-job engine switch. Maintain explicit execution approvals, run ownership/cleanup/recovery, `DEFAULT OFF` and merge gates.
+- Current authoritative details and new-chat handoff: [`DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md`](DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md) and [`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md).
+- This latest LOCKED decision supersedes older planning text that implies waiting for a Google reply **only as a Local-work scheduling dependency**; do not rewrite historical test results.
+
 ## #113 preflight and artifact checkpoint semantics
 
 - #113의 pre-build command contract는 대화나 에이전트 기억이 아니라 repository가 소유한다.
