@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_OF_TRUTH = REPO_ROOT / "docs/project/CURRENT_SOURCE_OF_TRUTH.md"
 HISTORICAL_EVIDENCE = {
     "docs/design/TRANSCRIPTION_WORKSPACE_2026-10-15.md",
+    "docs/project/48_COLAB_DRIVE_VALIDATION_2026-11-11.md",
     "docs/release/CORE_WORKFLOW_REFINEMENT_BUILD_VALIDATION.md",
     "docs/release/FINAL_FEATURE_PARITY_REGRESSION.md",
     "docs/runtime/INSTALLER_INSTALLED_RUNTIME_VALIDATION.md",
@@ -139,8 +140,20 @@ def test_runtime_requirement_lines_are_exactly_pinned():
                 continue
             assert package_line.fullmatch(stripped), f"unpinned: {relative}: {stripped}"
 
-    assert "python-multipart==0.0.32" in read_repo("colab/requirements.txt").splitlines()
-    assert "python-multipart" not in read_repo("backend/requirements.txt")
+    # #224: python-multipart backs the backend regression of the Colab bootstrap
+    # multipart contract. It must stay pinned identically to the Colab runtime
+    # and must never become a Core runtime import.
+    multipart_pin = "python-multipart==0.0.32"
+    assert multipart_pin in read_repo("colab/requirements.txt").splitlines()
+    backend_multipart = [
+        line.strip()
+        for line in read_repo("backend/requirements.txt").splitlines()
+        if line.strip().startswith("python-multipart")
+    ]
+    assert backend_multipart in ([], [multipart_pin])
+    core_import = re.compile(r"^\s*(?:import|from)\s+(?:python_)?multipart\b", re.MULTILINE)
+    for source in (REPO_ROOT / "backend/src").rglob("*.py"):
+        assert not core_import.search(source.read_text(encoding="utf-8")), source
 
 
 def test_cuda_and_python_release_contracts_remain_exact():
