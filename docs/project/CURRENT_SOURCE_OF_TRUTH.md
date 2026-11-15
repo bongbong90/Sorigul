@@ -48,6 +48,11 @@ constraints, the 2026-10-31 study-use deadline, and the Git/GitHub governance lo
 
 Unclear cost fails closed: no paid resource or fallback is enabled when zero-cost status cannot be
 safely established.
+This restriction blocks only the unsafe/unknown **external Colab action**. The user-LOCKED
+2026-11-15 #264 decision prohibits waiting for Google's reply as a prerequisite
+for fully Local transcription development, installed QA or study-use preparation.
+See `DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md`; preserve separate
+Local and external statuses.
 
 The most important engine guardrail is explicit: Local is OpenAI Whisper `medium`; Colab is
 `faster-whisper large-v3` with CUDA `float16` preferred and CPU `int8` fallback. The current Sorigul
@@ -98,6 +103,7 @@ Classification values are exact: `CURRENT CONTRACT`, `SUPERSEDED`, `HISTORICAL E
 | `docs/design/typography.md` | CURRENT CONTRACT | Current typography rules. | Current CSS and executable UI. |
 | `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` | CURRENT CONTRACT | Preserves the D11+ decision provenance and implementation planning record. | Current Product Contract for current behavior. |
 | `docs/project/CURRENT_PRODUCT_CONTRACT.md` | CURRENT CONTRACT | Canonical current product-contract entry point and supersession map. | This file itself. |
+| `docs/project/DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md` | CURRENT CONTRACT | User-LOCKED decision: do not wait for Google; optional free Colab external validation never blocks independent Local-first work. | Current Product Contract §8 and #264; read in new-chat handoff. |
 | `docs/project/CURRENT_SOURCE_OF_TRUTH.md` | CURRENT CONTRACT | Current evidence precedence, amendments, and complete document ledger. | Current Product Contract for product behavior. |
 | `docs/project/DEVELOPMENT_RULES.md` | CURRENT CONTRACT | Mandatory Git/GitHub lifecycle and repository safety rules. | Current Product Contract where product behavior is involved. |
 | `docs/project/FEATURE_PARITY.md` | SUPERSEDED | Summary predates final release-only CUDA hardening and carries amended legacy language. | Core workflow plan and this ledger. |
