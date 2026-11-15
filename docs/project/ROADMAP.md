@@ -2,6 +2,12 @@
 
 현재 제품 행동은 [`CURRENT_PRODUCT_CONTRACT.md`](CURRENT_PRODUCT_CONTRACT.md)에서 시작한다. 이 roadmap은 과거 completed baseline을 보존하면서 [`SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md`](SORIGUL_FULL_LEGACY_PARITY_COMPLETION_PLAN_2026-09-28.md)의 현재 실행 순서를 요약한다.
 
+## LOCKED execution priority — Google response is NOT a dependency (#264, 2026-11-15)
+
+**Do not wait for Google to reply.** Free, policy-permitted Colab is an **optional external path**; if zero-cost/policy availability is restricted or unverified, keep #48/#60 `PENDING`/`BLOCKED` **for Colab only** and **continue Local transcription development/installed validation now**. No billing/credits/paid fallback or policy bypass. External LIVE actions and protected study-data tests still require their own explicit user approval, and historical gates/DEFAULT OFF/merge requirements stay in force.
+
+The Local implementation/installed workflow (#113, #56/#63, #47, then recovery/#114 as appropriate to current evidence) is an independent priority; do not add repetitive Google-response or Colab-only QA phases as a Local blocker. Authoritative [decision/handoff](DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md) and [product contract](CURRENT_PRODUCT_CONTRACT.md). Preserve the historical roadmap below without treating its external-step placement as a wait gate.
+
 ## Completed baseline
 
 - Project Foundation

@@ -8,4 +8,6 @@ Current product work starts with [`project/CURRENT_PRODUCT_CONTRACT.md`](project
 - Development lifecycle: [`project/DEVELOPMENT_RULES.md`](project/DEVELOPMENT_RULES.md)
 - Living release state: [`release/CURRENT_RELEASE_STATUS.md`](release/CURRENT_RELEASE_STATUS.md)
 
+**LOCKED operating decision (2026-11-15 / #264):** [Do not wait for Google; free Colab optional, Local-first fallback](project/DECISION_COLAB_OPTIONAL_LOCAL_FIRST_2026-11-15.md). New chat/agent handoff must apply this decision before interpreting historical external-validation blockers. Cost/policy uncertainty blocks cloud actions, not Local work.
+
 Historical build, planning and validation records remain evidence; they are not by themselves a current product or release verdict.
