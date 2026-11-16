@@ -18,6 +18,10 @@ Sorigul은 greenfield architecture를 사용하되 Legacy ACTIVE 사용자 기�
 - [Roadmap](docs/project/ROADMAP.md)
 - [Documentation index](docs/README.md)
 
+## Current PHASE 20 → PHASE 19 handoff (2026-11-15)
+
+The user-approved order is **Phase 20 Drive destination picker (source + offline Mock tests) first**, then final **Phase 19 Local Runtime/Core/MSI packaging and installed acceptance**. Phase 19's 2026-11-15 WinError 5 / canonical preflight FAIL is preserved as a **release blocker, not a blocker for Phase 20 offline feature development**. Read the [current handoff](docs/project/PHASE20_BEFORE_PHASE19_HANDOFF_2026-11-15.md) and the linked [Phase 19 result](docs/release/PHASE19_2026-11-15_RESULT.md) / [rollback plan](docs/release/PHASE19_2026-11-15_EXECUTION_AND_ROLLBACK_PLAN.md) before starting a new CODEX session. No Google LIVE/API or build/install/merge approval is implied.
+
 ## #113 canonical preflight
 
 #113 artifact session 전에 개발자나 에이전트가 개별 pytest working directory, PYTHONPATH 또는 child command를 기억해서 재구성하지 않는다. repository root에서 아래 **한 명령만** 실행한다.
