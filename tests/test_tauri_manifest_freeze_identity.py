@@ -29,7 +29,11 @@ def test_windows_checkout_preserves_freeze_identity_after_tauri_lf_write(tmp_pat
     relative = "frontend/src-tauri/Cargo.toml"
     manifest = root / relative
     manifest.parent.mkdir(parents=True)
-    lf_manifest = (REPO / relative).read_bytes().replace(b"\r\n", b"\n")
+    repository_manifest = (REPO / relative).read_bytes()
+    lf_manifest = repository_manifest.replace(b"\r\n", b"\n")
+    assert repository_manifest == lf_manifest, (
+        "Refresh Cargo.toml under the LF attributes before freezing an existing checkout"
+    )
     manifest.write_bytes(lf_manifest)
     powershell = root / "owned.ps1"
     powershell.write_bytes(b"Write-Output 'synthetic'\n")
