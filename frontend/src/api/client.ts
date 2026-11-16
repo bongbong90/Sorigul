@@ -89,6 +89,11 @@ export interface JobModel {
   engine: string
   force_retranscribe: boolean
   upload_to_drive: boolean
+  drive_destination?: {
+    version: 1
+    parent: DriveParentFolder | null
+    exam_root: string
+  } | null
   total_files: number
   done_files: number
   failed_files: number
@@ -157,6 +162,27 @@ export interface RuntimeSettings {
   // per-run CreateJobRequest field, never a persisted setting (D23A).
   subject_stage_overrides: Record<string, '1차' | '2차'>
   drive_exam_root: string
+  drive_parent?: DriveParentFolder | null
+}
+
+export interface DriveParentFolder {
+  folder_id: string
+  account_id: string
+  display_path: string
+}
+
+export interface DriveFolderEntry {
+  folder_id: string
+  name: string
+  can_select: boolean
+}
+
+export interface DriveFolderPage {
+  account_id: string
+  folder: DriveFolderEntry
+  breadcrumbs: Array<{ folder_id: string; name: string }>
+  children: DriveFolderEntry[]
+  next_page_token: string | null
 }
 
 export interface ShutdownState {
@@ -340,6 +366,18 @@ export const api = {
       { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE },
     ),
   driveStatus: (signal?: AbortSignal) => request<{ auth_state: DriveAuthState; scope: string }>('/drive/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
+  driveFolders: (folderId = 'root', accountId?: string, pageToken?: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ folder_id: folderId })
+    if (accountId) query.set('account_id', accountId)
+    if (pageToken) query.set('page_token', pageToken)
+    return request<DriveFolderPage>(`/drive/folders?${query}`, { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE })
+  },
+  selectDriveDestination: (folderId: string, accountId: string) => request<RuntimeSettings>('/drive/destination', {
+    method: 'PUT', body: JSON.stringify({ folder_id: folderId, account_id: accountId }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
+  }),
+  resetDriveDestination: () => request<RuntimeSettings>('/drive/destination', {
+    method: 'DELETE', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  }),
   startDriveAuth: () => request<{ state: string; authorization_url: string; scope: string }>('/drive/auth/start', {
     method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
@@ -368,7 +406,8 @@ export const api = {
   events: (signal?: AbortSignal) => request<StructuredEvent[]>('/events', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   settings: (signal?: AbortSignal) => request<RuntimeSettings>('/settings', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   saveSettings: (settings: RuntimeSettings, signal?: AbortSignal) => request<RuntimeSettings>('/settings', {
-    method: 'PUT', body: JSON.stringify(settings), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+    // Validated Drive identity is writable only through its confirmation API.
+    method: 'PUT', body: JSON.stringify(Object.fromEntries(Object.entries(settings).filter(([key]) => key !== 'drive_parent'))), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   startColabRendezvous: (signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST', signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
   pollColabRendezvous: (requestId: string, signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId), { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),

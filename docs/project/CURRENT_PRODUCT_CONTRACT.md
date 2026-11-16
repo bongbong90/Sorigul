@@ -199,6 +199,17 @@ known subject는 stage를 자동 mapping한다. unknown exact subject는 persist
 
 Google Drive exam root는 configurable이다.
 
+2026-11-15 사용자 승인 / Phase 20 #246:
+
+- 설정에서 Google Drive 폴더 전용 탐색 → ID로 구분 → 경로 확인 → 명시적 저장으로 상위 폴더를 선택한다. 선택은 기존 Drive client/Scope를 사용하며 이름이나 표시 경로는 routing key가 아니다.
+- `drive_parent`는 검증된 폴더 ID, Drive `user.permissionId` 계정 식별자, 표시 경로를 함께 저장한다. 일반 settings patch로 지정하지 않고 검증 전용 API에서만 변경한다. 미지정/명시적 기본값 복원은 기존 My Drive `root` 동작이다. 기본 root를 탐색기에서 명시적으로 선택하면 해당 계정에 바인딩된다.
+- 선택한 상위 폴더 아래의 `drive_exam_root / 전사자료 / 과정 / [단계] 과목 / 주차` 자동 분류와 TXT/JSON/SRT 3종, MP3 업로드 금지, 기존 중복 검증 및 update-or-create를 유지한다.
+- 선택/저장 시 계정·폴더 종류·휴지통·접근·쓰기 권한과 경로를 검증한다. 업로드 때도 같은 계정과 정확한 폴더 ID/권한을 재확인한다. 삭제·권한 상실·계정 변경·대상 불명확이면 실패하며 root나 같은 이름의 다른 폴더로 대체하지 않는다. 이름/상위 경로가 변경되어도 유효한 같은 ID를 유지한다.
+- 새 Job의 `drive_destination`은 상위 폴더/계정 바인딩과 시험 폴더명을 생성 시 고정한다. 기존 Job/file 분류 metadata와 함께 저장되며 설정 변경·로컬/Drive Retry·재시작으로 목적지를 바꾸지 않는다. Drive 미지정 root는 기존 인증 계정의 root 의미를 유지하며, 오프라인 Local Job 생성을 위해 새 인증을 요구하지 않는다.
+- **이전 버전 호환:** snapshot이 없는 persisted Job은 읽고 로컬 전사/결과/Drive 기록을 보존하지만, 당시 시험 폴더·계정을 추정하지 않는다. 해당 Job의 새 Drive 업로드/Retry는 명시적으로 차단한다. 현재 설정을 소급 적용하거나 기존 원격 결과를 이동/재업로드하지 않는다.
+- Local DONE과 Drive FAILED는 분리한다. 자동 업로드는 계속 실행별 기본 OFF다. 폴더 선택이 엔진·OAuth 저장소/Scope·Runtime·설치 구조를 바꾸지 않는다.
+- 실행 순서는 Phase 20 구현/Mock 검증 → 승인된 최종 소스 회귀/preflight/Freeze → 별도 승인된 Phase 19 패키징이다. Phase 19 #269/#270 실패 증거는 보존하되 Phase 20 오프라인 개발의 선행 금지 조건으로 적용하지 않는다.
+
 ### I. Drive auto-upload
 
 per-run checkbox만 제공하며 app launch마다 `OFF`가 기본이다. 설정으로 persist하지 않는다.
@@ -321,6 +332,7 @@ Acceptance 의미:
 | Drive classification | filename 재파싱 | new Job metadata truth | Approved Intentional Change | §5F | legacy Job만 narrow fallback |
 | Stage mapping | fixed mapping 중심 | known auto mapping + unknown exact override | Approved Intentional Change | §5G | override persist |
 | Exam root | fixed/root assumption | configurable exam root | Approved Intentional Change | §5H | Drive setting |
+| Drive parent destination | My Drive root only; retry reads current exam setting | validated exact parent ID/account, preserved hierarchy, immutable Job destination; unknown pre-snapshot Job upload blocked | Approved Intentional Change | §5H / #246 / user 2026-11-15 | no implicit fallback, migration or re-upload |
 | Colab connection UX | manual/clipboard URL 중심 | auto rendezvous primary, manual fallback | Approved Intentional Change | §5J | URL persist 불필요 |
 | Colab chunk policy | older mixed recovery descriptions | 300 sec internal, hidden UI, approved retry/recovery/cancel | Approved Intentional Change | §5K | chunk detail 비노출 |
 | Audio duration | ffprobe/placeholder history | mutagen metadata, FFmpeg split | Approved Intentional Change | §5L | read failure는 honest unknown |
