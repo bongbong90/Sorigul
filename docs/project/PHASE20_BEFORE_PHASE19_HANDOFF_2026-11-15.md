@@ -4,6 +4,16 @@
 **Authority:** User 2026-11-15 scheduling reversal; [Phase 20 #246](https://github.com/bongbong90/Sorigul/issues/246), [Phase 19 #269](https://github.com/bongbong90/Sorigul/issues/269), [execution defect #270](https://github.com/bongbong90/Sorigul/issues/270), [Local-first decision #264](https://github.com/bongbong90/Sorigul/issues/264).  
 **Preserved submitted Phase 19 evidence:** [RESULT](../release/PHASE19_2026-11-15_RESULT.md) and [EXECUTION_AND_ROLLBACK_PLAN](../release/PHASE19_2026-11-15_EXECUTION_AND_ROLLBACK_PLAN.md). Both are original fixed-date reports, **HISTORICAL EVIDENCE ONLY**. Their local-file bytes were separately verified against the SHA256 values posted in #269; GitHub copies preserve the reported text, not necessarily the original line-ending bytes.
 
+## Resumption update — 2026-11-16 KST
+
+Phase 20 is already **IMPLEMENTED_MOCK_VERIFIED** at `087aba661c3ebf5feb25dc25be4077b91efe8373` ([Draft #272](https://github.com/bongbong90/Sorigul/pull/272), 15 feature files). The feature requirements below describe that implementation; do not restart Phase 20 development. Its preserved official results are Root **264 PASS / 4 FAIL**, Backend **843 PASS / 2 SKIP**, Frontend lint/typecheck/build PASS, Rust fmt/check/clippy PASS and **96 tests PASS**. Two Root failures need #268; two are #270 WinError 5. Integration remains `58d734a`; no constituent PR has been merged.
+
+Native Windows resumption used the existing [Draft #273](https://github.com/bongbong90/Sorigul/pull/273) at `e39977301f5f937c44d36d093a44448f49d7baf2`, stacked only on `087aba6`, in an isolated worktree with no concurrent Cargo/Backend/Root suite. Diagnostic unit tests **3 PASS**; the existing launch matrix **32/32 PASS under each of PS7 and Windows PowerShell 5.1 parents**. The four named historical Backend/Root failures passed in separate targeted runs; related Root bootstrap **66 PASS** and Backend PS5 **20 PASS**. #268's unchanged `6a7320b` separately passed all **14 readiness tests**. These are scoped observations, not a new official full regression or release PASS.
+
+**#270 remains BLOCKED / actual cause NOT DETERMINED.** Historical errors occur at Python `_winapi.CreateProcess` before PS5 script execution, including inherited cwd/environment helper calls; the current matrix and related suites did not reproduce them. Read-only ACL/event inspection found no attributable deny or matching AppLocker/Defender block; inspected CodeIntegrity errors concerned Chrome and do not establish a Sorigul cause. The tool's restricted shell also failed at `CreateProcessAsUserW` while the permitted native execution path worked; that separate launcher failure does not prove the historical Python cause. No production/test workaround, security-policy change, release Freeze or artifact/installer transition was performed. Local sanitized logs are under `tmp/issue270-evidence`; #270/#269/#7 and the existing PRs hold the resumption record.
+
+Next: retain #268/#272 review evidence, obtain an attributable #270 reproduction or supported-host remediation evidence, confirm the approved final source, then run the official full regression and canonical preflight/Probe before a new exact-head Freeze. Packaging/installation still require separate approval and verified rollback MSI. Earlier implementation-first instructions below are satisfied by #272; historical Phase 19 results remain immutable.
+
 ## Critical supersession: prevent the same delay in a new chat
 
 **CURRENT ORDER: PHASE 20 source implementation + offline Mock QA + commit/push/Draft PR → final approved source candidate / #268 reconciliation → #270 remediation and full canonical source regression/preflight/Freeze → PHASE 19 Local Runtime/Core/MSI final packaging and installed QA (separately authorized).**
@@ -58,6 +68,6 @@ No active artifact session, Freeze, Runtime/Core/MSI build, install, uninstall, 
 
 1. Read [Phase 20 #246](https://github.com/bongbong90/Sorigul/issues/246) and its **current execution order**.
 2. Read this handoff and the two exact-date Phase 19 reports; distinguish historical blocked verdict from superseded Phase 20 timing.
-3. Work only on Phase 20 code and offline tests until its implementation PR is ready. Track #270 independently as the real Phase 19 release gate.
+3. Phase 20's implementation PR is now ready as Draft #272 at `087aba6`; preserve it and use the resumption update above. Track #270 as the unresolved Phase 19 release gate.
 4. Once Phase 20 changes are in the approved release candidate, resume Phase 19 gates and protected rollout; not before.
 5. Report separately: `PHASE20_IMPLEMENTATION_STATUS`, `PHASE19_RELEASE_STATUS`, `COLAB_EXTERNAL_STATUS`, `USER_DATA_PRESERVATION`. Google policy answer is not a Local development blocker.
