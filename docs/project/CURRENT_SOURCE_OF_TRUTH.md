@@ -94,6 +94,7 @@ Classification values are exact: `CURRENT CONTRACT`, `SUPERSEDED`, `HISTORICAL E
 | `docs/design/icon_system.md` | CURRENT CONTRACT | Current icon-system rules. | Current tracked icons and executable UI. |
 | `docs/design/typography.md` | CURRENT CONTRACT | Current typography rules. | Current CSS and executable UI. |
 | `docs/migration/CORE_WORKFLOW_REFINEMENT_PLAN.md` | CURRENT CONTRACT | Preserves the D11+ decision provenance and implementation planning record. | Current Product Contract for current behavior. |
+| `docs/project/48_COLAB_DRIVE_VALIDATION_2026-11-11.md` | HISTORICAL EVIDENCE ONLY | #224 Colab/Drive source and Mock validation record at Integration `3406c4a`; no real Colab/Drive, cost or policy acceptance. | `docs/project/CURRENT_PRODUCT_CONTRACT.md` for product behavior; current #48/#60/#114 gate state. |
 | `docs/project/CURRENT_PRODUCT_CONTRACT.md` | CURRENT CONTRACT | Canonical current product-contract entry point and supersession map. | This file itself. |
 | `docs/project/CURRENT_SOURCE_OF_TRUTH.md` | CURRENT CONTRACT | Current evidence precedence, amendments, and complete document ledger. | Current Product Contract for product behavior. |
 | `docs/project/DEVELOPMENT_RULES.md` | CURRENT CONTRACT | Mandatory Git/GitHub lifecycle and repository safety rules. | Current Product Contract where product behavior is involved. |
