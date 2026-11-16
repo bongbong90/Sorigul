@@ -970,6 +970,7 @@ function DrivePathPreview({ course, subject, week, settings }: { course: string;
   return (
     <div className="setting-note">
       <div className="drive-path-preview">
+        {settings.drive_parent?.display_path || '내 드라이브'}{'\n/ '}
         {driveRoot}
 {'\n/ '}전사자료
 {'\n/ '}{trimmedCourse}

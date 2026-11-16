@@ -151,6 +151,9 @@ class DriveClassifier:
 
 
 class DriveClient(Protocol):
+    def account_id(self) -> str: ...
+    def get_folder(self, folder_id: str) -> dict: ...
+    def list_folders(self, parent_id: str, page_token: Optional[str] = None) -> dict: ...
     def find_or_create_folder(self, parent_id: str, name: str) -> str: ...
     def find_file(self, parent_id: str, name: str) -> Optional[str]: ...
     def create_file(self, parent_id: str, name: str, local_path: Path) -> str: ...
@@ -206,6 +209,30 @@ class GoogleDriveClient:
     @staticmethod
     def _escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace("'", "\\'")
+
+    def account_id(self) -> str:
+        # Opaque stable Drive user identity, never email, OAuth token or credential.
+        value = self.service.about().get(fields="user(permissionId)").execute()
+        identity = value.get("user", {}).get("permissionId")
+        if not isinstance(identity, str) or not identity:
+            raise DriveError("DRIVE_ACCOUNT_UNKNOWN", "Google Drive 계정을 확인할 수 없습니다. 다시 연결해 주세요.")
+        return identity
+
+    def get_folder(self, folder_id: str) -> dict:
+        return self.service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,trashed,parents,capabilities(canAddChildren)",
+        ).execute()
+
+    def list_folders(self, parent_id: str, page_token: Optional[str] = None) -> dict:
+        options = dict(
+            q=f"'{self._escape(parent_id)}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            fields="nextPageToken,files(id,name,mimeType,trashed,parents,capabilities(canAddChildren))",
+            orderBy="name", pageSize=100,
+        )
+        if page_token:
+            options["pageToken"] = page_token
+        return self.service.files().list(**options).execute()
 
     def _find_unique(self, query: str) -> Optional[str]:
         # Drive permits duplicate names, including folders. Never pick an
@@ -805,6 +832,15 @@ class DriveUploadService:
 
         self._set_state(job_id, file_id, DriveStatus.PENDING)
 
+        destination = job.drive_destination
+        if destination is None:
+            # Pre-#246 Jobs did not record exam-root/account/destination.
+            # Inferring from today's settings could upload to the wrong place.
+            message = "이전 버전 작업은 생성 당시 Drive 저장 위치를 확인할 수 없어 업로드할 수 없습니다. 로컬 결과는 보존됩니다."
+            self._set_state(job_id, file_id, DriveStatus.FAILED, message)
+            self._event(job_id, "error", "Drive", message, file_id)
+            return self._current(job_id, file_id)
+
         try:
             client = self.auth.ensure_client()
         except DriveError as exc:
@@ -813,7 +849,7 @@ class DriveUploadService:
             return self._current(job_id, file_id)
 
         try:
-            exam_root = self.settings.get().drive_exam_root
+            exam_root = destination.exam_root
             classification = self.classifier.classify(job, file_id, exam_root)
         except DriveError as exc:
             self._set_state(job_id, file_id, DriveStatus.CLASSIFICATION_FAILED, exc.user_message)
@@ -834,6 +870,9 @@ class DriveUploadService:
                     handle.read(1)
 
             parent_id = "root"
+            if destination.parent is not None:
+                from src.services.drive_destination import DriveDestinationService
+                parent_id = DriveDestinationService.validate_parent(client, destination.parent)
             for folder_name in classification.folders:
                 parent_id = client.find_or_create_folder(parent_id, folder_name)
         except DriveError as exc:
