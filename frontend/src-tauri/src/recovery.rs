@@ -40,10 +40,47 @@ pub fn confirm_saved_idle(path: &Path) -> Result<(), String> {
 
 pub fn confirm_port_free(port: u16) -> Result<(), String> {
     // HTTP timeout is not proof of a free port (silent/non-HTTP listener).
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-        .map_err(|_| "PORT_OCCUPIED_BY_OTHER_SERVICE")?;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).map_err(|_error| {
+        // #276: test builds keep the io::Error of this very bind call for the
+        // failure message. Product builds discard it exactly as before.
+        #[cfg(test)]
+        bind_observation::record(port, &_error);
+        "PORT_OCCUPIED_BY_OTHER_SERVICE"
+    })?;
     drop(listener);
     Ok(())
+}
+
+/// #276 test-only observation of the first failed bind in `confirm_port_free`.
+/// Thread-local, so tests running in parallel never see each other's errors.
+#[cfg(test)]
+mod bind_observation {
+    use std::cell::RefCell;
+
+    pub struct BindObservation {
+        pub port: u16,
+        pub raw_os_error: Option<i32>,
+        pub kind: String,
+        pub message: String,
+    }
+
+    thread_local! {
+        static LAST: RefCell<Option<BindObservation>> = const { RefCell::new(None) };
+    }
+
+    pub fn record(port: u16, error: &std::io::Error) {
+        let observation = BindObservation {
+            port,
+            raw_os_error: error.raw_os_error(),
+            kind: format!("{:?}", error.kind()),
+            message: error.to_string(),
+        };
+        LAST.with(|last| *last.borrow_mut() = Some(observation));
+    }
+
+    pub fn take() -> Option<BindObservation> {
+        LAST.with(|last| last.borrow_mut().take())
+    }
 }
 
 pub fn confirm_offline_idle(port: u16) -> Result<(), String> {
@@ -170,13 +207,151 @@ mod tests {
         )
         .is_err());
     }
+    /// #276: describes one `confirm_port_free` call. The OS error is the one
+    /// recorded from that call's own bind; nothing here binds again.
+    fn port_report(
+        phase: &str,
+        port: u16,
+        result: &Result<(), String>,
+        observation: &Option<super::bind_observation::BindObservation>,
+        with_socket_rows: bool,
+    ) -> String {
+        let first_bind = match observation {
+            Some(o) => format!(
+                "observed_port={} raw_os_error={} kind={} message={:?}",
+                o.port,
+                o.raw_os_error
+                    .map_or("NOT_CAPTURED".to_string(), |code| code.to_string()),
+                o.kind,
+                o.message
+            ),
+            None => "NOT_CAPTURED".to_string(),
+        };
+        let rows = if with_socket_rows {
+            tcp_rows_for_port(port)
+        } else {
+            "NOT_QUERIED".to_string()
+        };
+        format!(
+            "ISSUE276_OBSERVATION phase={phase} port={port} test_pid={} result={result:?} \
+             first_failed_bind=[{first_bind}] tcp_rows_observed_after_call=[{rows}]",
+            std::process::id()
+        )
+    }
+
+    /// IPv4 TCP table rows (any state) whose local port is `port`: local
+    /// address, MIB state and owning PID only. Read after the failed call, so
+    /// the state may already differ; never read as proof of another owner.
+    #[cfg(target_os = "windows")]
+    fn tcp_rows_for_port(port: u16) -> String {
+        use windows_sys::Win32::{
+            NetworkManagement::IpHelper::{
+                GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+            },
+            Networking::WinSock::AF_INET,
+        };
+        let mut size = 0;
+        unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+        }
+        for _ in 0..3 {
+            if size < 4 {
+                return "NOT_CAPTURED: table size unavailable".into();
+            }
+            let mut buffer = vec![0u8; size as usize];
+            let result = unsafe {
+                GetExtendedTcpTable(
+                    buffer.as_mut_ptr().cast(),
+                    &mut size,
+                    0,
+                    AF_INET as u32,
+                    TCP_TABLE_OWNER_PID_ALL,
+                    0,
+                )
+            };
+            if result == 122 {
+                continue; // ERROR_INSUFFICIENT_BUFFER: table grew between calls.
+            }
+            if result != 0 {
+                return format!("NOT_CAPTURED: GetExtendedTcpTable={result}");
+            }
+            let count = unsafe { std::ptr::read_unaligned(buffer.as_ptr().cast::<u32>()) } as usize;
+            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+            if count > (buffer.len() - 4) / row_size {
+                return "NOT_CAPTURED: malformed table".into();
+            }
+            let rows: Vec<String> = (0..count)
+                .map(|index| unsafe {
+                    std::ptr::read_unaligned(
+                        buffer
+                            .as_ptr()
+                            .add(4 + index * row_size)
+                            .cast::<MIB_TCPROW_OWNER_PID>(),
+                    )
+                })
+                .filter(|row| u16::from_be(row.dwLocalPort as u16) == port)
+                .take(16)
+                .map(|row| {
+                    format!(
+                        "local={} mib_state={} owning_pid={}",
+                        std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr)),
+                        row.dwState,
+                        row.dwOwningPid
+                    )
+                })
+                .collect();
+            return if rows.is_empty() {
+                "NO_ROWS".into()
+            } else {
+                rows.join("; ")
+            };
+        }
+        "NOT_CAPTURED: table kept changing".into()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn tcp_rows_for_port(_port: u16) -> String {
+        "NOT_CAPTURED: unsupported platform".into()
+    }
+
     #[test]
     fn silent_port_listener_blocks_recovery_and_is_not_killed() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert!(confirm_port_free(port).is_err());
+        let _ = super::bind_observation::take();
+        let held = confirm_port_free(port);
+        let held_observation = super::bind_observation::take();
+        eprintln!(
+            "{}",
+            port_report("listener_held", port, &held, &held_observation, false)
+        );
+        assert!(
+            held.is_err(),
+            "{}",
+            port_report("listener_held", port, &held, &held_observation, true)
+        );
         assert!(listener.local_addr().is_ok());
         drop(listener);
-        assert_eq!(confirm_port_free(port), Ok(()));
+        let released = confirm_port_free(port);
+        let released_observation = super::bind_observation::take();
+        assert_eq!(
+            released,
+            Ok(()),
+            "{}",
+            port_report(
+                "after_listener_drop",
+                port,
+                &released,
+                &released_observation,
+                true
+            )
+        );
     }
 }
