@@ -25,8 +25,10 @@ from src.domain.models import (
     JobModel,
 )
 from src.services.job_manager import JobManager
+from src.services.classification import KNOWN_SUBJECT_STAGE, drive_subject, filename_subject
 from src.services.output_bundle import BundlePaths, OutputBundleValidator
 from src.services.scanner import FileScanner
+from src.services.windows_system import resolve_system32_executable
 
 
 logger = logging.getLogger(__name__)
@@ -103,13 +105,13 @@ class DriveClassifier:
 
         if has_full_metadata:
             course = job.course
-            subject = job.subject
+            subject = drive_subject(job.subject)
             stage = job.stage
             week = int(file_metadata.week)
             lesson = int(file_metadata.lesson)
 
             subject_folder = f"[{stage}] {subject}"
-            week_subject = "중개사법" if subject == "공인중개사법" else subject
+            week_subject = filename_subject(subject)
             week_folder = f"{course}_{week_subject}_{week}주차"
 
             return DriveClassification(
@@ -129,19 +131,19 @@ class DriveClassifier:
         course = match.group("course")
         raw_subject = match.group("subject")
 
-        from src.services.classification import KNOWN_SUBJECT_STAGE
         stage = KNOWN_SUBJECT_STAGE.get(raw_subject)
 
         if course not in COURSES or not stage:
             raise DriveError("DRIVE_CLASSIFICATION_FAILED", "과정 또는 과목을 Google Drive에서 분류할 수 없습니다.")
         week = int(match.group("week"))
         lesson = int(match.group("lesson"))
-        subject_folder = f"[{stage}] {raw_subject}"
-        week_subject = "중개사법" if raw_subject == "공인중개사법" else raw_subject
+        subject = drive_subject(raw_subject)
+        subject_folder = f"[{stage}] {subject}"
+        week_subject = filename_subject(subject)
         week_folder = f"{course}_{week_subject}_{week}주차"
         return DriveClassification(
             course=course,
-            subject=raw_subject,
+            subject=subject,
             week=week,
             lesson=lesson,
             folders=(exam_root, "전사자료", course, subject_folder, week_folder),
@@ -149,6 +151,9 @@ class DriveClassifier:
 
 
 class DriveClient(Protocol):
+    def account_id(self) -> str: ...
+    def get_folder(self, folder_id: str) -> dict: ...
+    def list_folders(self, parent_id: str, page_token: Optional[str] = None) -> dict: ...
     def find_or_create_folder(self, parent_id: str, name: str) -> str: ...
     def find_file(self, parent_id: str, name: str) -> Optional[str]: ...
     def create_file(self, parent_id: str, name: str, local_path: Path) -> str: ...
@@ -205,15 +210,60 @@ class GoogleDriveClient:
     def _escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace("'", "\\'")
 
+    def account_id(self) -> str:
+        # Opaque stable Drive user identity, never email, OAuth token or credential.
+        value = self.service.about().get(fields="user(permissionId)").execute()
+        identity = value.get("user", {}).get("permissionId")
+        if not isinstance(identity, str) or not identity:
+            raise DriveError("DRIVE_ACCOUNT_UNKNOWN", "Google Drive 계정을 확인할 수 없습니다. 다시 연결해 주세요.")
+        return identity
+
+    def get_folder(self, folder_id: str) -> dict:
+        return self.service.files().get(
+            fileId=folder_id,
+            fields="id,name,mimeType,trashed,parents,capabilities(canAddChildren)",
+        ).execute()
+
+    def list_folders(self, parent_id: str, page_token: Optional[str] = None) -> dict:
+        options = dict(
+            q=f"'{self._escape(parent_id)}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            fields="nextPageToken,files(id,name,mimeType,trashed,parents,capabilities(canAddChildren))",
+            orderBy="name", pageSize=100,
+        )
+        if page_token:
+            options["pageToken"] = page_token
+        return self.service.files().list(**options).execute()
+
+    def _find_unique(self, query: str) -> Optional[str]:
+        # Drive permits duplicate names, including folders. Never pick an
+        # arbitrary existing object to update or an arbitrary upload subtree.
+        found = None
+        page_token = None
+        while True:
+            options = dict(q=query, fields="nextPageToken,files(id,name)", pageSize=2)
+            if page_token:
+                options["pageToken"] = page_token
+            page = self.service.files().list(**options).execute()
+            for item in page.get("files", []):
+                if found is not None:
+                    raise DriveError(
+                        "DRIVE_TARGET_AMBIGUOUS",
+                        "Google Drive에 같은 이름의 대상이 여러 개 있습니다. 중복을 확인한 뒤 다시 시도해 주세요.",
+                    )
+                found = item["id"]
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                return found
+
     def find_or_create_folder(self, parent_id: str, name: str) -> str:
         query = (
             f"'{self._escape(parent_id)}' in parents and "
             f"name = '{self._escape(name)}' and "
             "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
         )
-        files = self.service.files().list(q=query, fields="files(id,name)", pageSize=10).execute().get("files", [])
-        if files:
-            return files[0]["id"]
+        existing = self._find_unique(query)
+        if existing is not None:
+            return existing
         created = self.service.files().create(
             body={
                 "name": name,
@@ -227,10 +277,10 @@ class GoogleDriveClient:
     def find_file(self, parent_id: str, name: str) -> Optional[str]:
         query = (
             f"'{self._escape(parent_id)}' in parents and "
-            f"name = '{self._escape(name)}' and trashed = false"
+            f"name = '{self._escape(name)}' and "
+            "mimeType != 'application/vnd.google-apps.folder' and trashed = false"
         )
-        files = self.service.files().list(q=query, fields="files(id,name)", pageSize=10).execute().get("files", [])
-        return files[0]["id"] if files else None
+        return self._find_unique(query)
 
     def create_file(self, parent_id: str, name: str, local_path: Path) -> str:
         from googleapiclient.http import MediaFileUpload
@@ -443,7 +493,7 @@ class OAuthAttempt:
 def _resolve_current_windows_sid(run=None) -> str:
     runner = run or subprocess.run
     result = runner(
-        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        [str(resolve_system32_executable("whoami.exe")), "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
         check=True,
@@ -469,7 +519,7 @@ def enforce_private_file_permissions(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(path),
                     "/inheritance:r",
                     "/grant:r",
@@ -514,7 +564,7 @@ def write_private_file(
             sid = _resolve_current_windows_sid(runner)
             runner(
                 [
-                    "icacls.exe",
+                    str(resolve_system32_executable("icacls.exe")),
                     str(temp_path),
                     "/inheritance:r",
                     "/grant:r",
@@ -737,6 +787,10 @@ class DriveUploadService:
         self.event_callback = event_callback
         self._in_flight: set[Tuple[str, str]] = set()
         self._in_flight_lock = threading.Lock()
+        # Manual retries and automatic uploads from different Jobs can resolve
+        # to the same Drive destination. Serialize lookup/create within this
+        # app so both cannot observe a missing folder/file and create copies.
+        self._upload_lock = threading.Lock()
 
     def upload(self, job_id: str, file_id: str) -> DriveFileState:
         key = (job_id, file_id)
@@ -747,10 +801,21 @@ class DriveUploadService:
                 )
             self._in_flight.add(key)
         try:
-            return self._upload(job_id, file_id)
+            with self._upload_lock:
+                return self._upload(job_id, file_id)
         finally:
             with self._in_flight_lock:
                 self._in_flight.discard(key)
+
+    def active_upload(self) -> Optional[Tuple[str, str]]:
+        """One (job_id, file_id) whose upload call is executing, or None.
+        Read-only; covers manual and automatic uploads alike."""
+        with self._in_flight_lock:
+            return next(iter(sorted(self._in_flight)), None)
+
+    def has_in_flight(self) -> bool:
+        with self._in_flight_lock:
+            return bool(self._in_flight)
 
     def mark_failed(self, job_id: str, file_id: str, message: str):
         """Best-effort Drive FAILED marker for an upload that ended with an
@@ -767,6 +832,15 @@ class DriveUploadService:
 
         self._set_state(job_id, file_id, DriveStatus.PENDING)
 
+        destination = job.drive_destination
+        if destination is None:
+            # Pre-#246 Jobs did not record exam-root/account/destination.
+            # Inferring from today's settings could upload to the wrong place.
+            message = "이전 버전 작업은 생성 당시 Drive 저장 위치를 확인할 수 없어 업로드할 수 없습니다. 로컬 결과는 보존됩니다."
+            self._set_state(job_id, file_id, DriveStatus.FAILED, message)
+            self._event(job_id, "error", "Drive", message, file_id)
+            return self._current(job_id, file_id)
+
         try:
             client = self.auth.ensure_client()
         except DriveError as exc:
@@ -775,7 +849,7 @@ class DriveUploadService:
             return self._current(job_id, file_id)
 
         try:
-            exam_root = self.settings.get().drive_exam_root
+            exam_root = destination.exam_root
             classification = self.classifier.classify(job, file_id, exam_root)
         except DriveError as exc:
             self._set_state(job_id, file_id, DriveStatus.CLASSIFICATION_FAILED, exc.user_message)
@@ -796,6 +870,9 @@ class DriveUploadService:
                     handle.read(1)
 
             parent_id = "root"
+            if destination.parent is not None:
+                from src.services.drive_destination import DriveDestinationService
+                parent_id = DriveDestinationService.validate_parent(client, destination.parent)
             for folder_name in classification.folders:
                 parent_id = client.find_or_create_folder(parent_id, folder_name)
         except DriveError as exc:
@@ -831,6 +908,7 @@ class DriveUploadService:
                 DriveStatus.FAILED,
                 DRIVE_NETWORK_FAILURE_MESSAGE
                 if _is_network_failure(exc)
+                else exc.user_message if isinstance(exc, DriveError)
                 else "Google Drive 파일 업로드에 실패했습니다.",
                 remote_ids,
             )
@@ -885,7 +963,6 @@ class DriveExecutionService:
     transcription runner, so Drive network I/O can never hold a
     transcription completion. One task per (job, file) at a time; every
     task's failure is contained here and only ever recorded as Drive state.
-    A single worker keeps tasks FIFO, which `after_pending_uploads` relies on.
     """
 
     def __init__(self, upload_service: DriveUploadService, max_workers: int = 1):
@@ -910,17 +987,38 @@ class DriveExecutionService:
             future = self._futures.get((job_id, file_id))
             return future is not None and not future.done()
 
+    def has_pending_work(self) -> bool:
+        """True while any automatic upload is queued or running."""
+        with self._lock:
+            return any(not future.done() for future in self._futures.values())
+
     def after_pending_uploads(self, job_id: str, callback: Callable[[], None]):
         """Runs ``callback`` once every upload already scheduled for this Job
         has finished (inline when there is none)."""
         with self._lock:
-            pending = any(
-                key[0] == job_id and not future.done() for key, future in self._futures.items()
-            )
-            if pending:
-                self._executor.submit(self._contain, callback)
-                return
-        self._contain(callback)
+            pending = [
+                future for key, future in self._futures.items()
+                if key[0] == job_id and not future.done()
+            ]
+        if not pending:
+            self._contain(callback)
+            return
+        # A FIFO barrier can run before an earlier upload completes when the
+        # executor has multiple workers. Observe completion of the actual
+        # Futures instead, without occupying (or deadlocking) a worker.
+        remaining = len(pending)
+        completion_lock = threading.Lock()
+
+        def finished(_future):
+            nonlocal remaining
+            with completion_lock:
+                remaining -= 1
+                last = remaining == 0
+            if last:
+                self._contain(callback)
+
+        for future in pending:
+            future.add_done_callback(finished)
 
     def _run(self, job_id: str, file_id: str):
         try:

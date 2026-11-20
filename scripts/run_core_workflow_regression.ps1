@@ -11,14 +11,24 @@ function Invoke-Checked {
         [Parameter(Mandatory = $false)][string[]]$Arguments = @()
     )
 
+    $OriginalProcessPolicy = [Environment]::GetEnvironmentVariable('PSExecutionPolicyPreference', 'Process')
+    $OriginalModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
     Push-Location $WorkingDirectory
     try {
+        # Keep Python's PS5 regression children on the actual machine policy.
+        if ($Command -ceq $Python) {
+            [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $null, 'Process')
+            # Let PS5 children construct native defaults without inherited PS7 modules.
+            [Environment]::SetEnvironmentVariable('PSModulePath', $null, 'Process')
+        }
         & $Command @Arguments
         if ($LASTEXITCODE -ne 0) {
             throw "Command failed with exit code $LASTEXITCODE`: $Command $($Arguments -join ' ')"
         }
     }
     finally {
+        [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $OriginalProcessPolicy, 'Process')
+        [Environment]::SetEnvironmentVariable('PSModulePath', $OriginalModulePath, 'Process')
         Pop-Location
     }
 }

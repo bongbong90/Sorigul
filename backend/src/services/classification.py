@@ -1,16 +1,27 @@
 from typing import Dict, Mapping, Optional
 
 # CORE_WORKFLOW_REFINEMENT_PLAN.md D16 -- exact, trimmed subject strings only.
-# No alias/fuzzy matching: this table is intentionally not reused as a
+# #192 permits exactly 공인중개사법/중개사법; no other alias/fuzzy matching.
+# This table is intentionally not reused as a
 # filename-detection heuristic (that was removed under D12).
 KNOWN_SUBJECT_STAGE: Dict[str, str] = {
     "부동산학개론": "1차",
     "민법": "1차",
     "공인중개사법": "2차",
+    "중개사법": "2차",
     "부동산공법": "2차",
     "부동산공시법": "2차",
     "부동산세법": "2차",
 }
+
+
+def filename_subject(subject: str) -> str:
+    """#192's exact D12/D16 exception; never normalize persisted files."""
+    return "중개사법" if subject in ("공인중개사법", "중개사법") else subject
+
+
+def drive_subject(subject: str) -> str:
+    return "공인중개사법" if subject in ("공인중개사법", "중개사법") else subject
 
 
 class StageRequiredError(ValueError):
