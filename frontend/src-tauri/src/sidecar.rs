@@ -63,7 +63,40 @@ pub trait SupervisedJob: Send {
     fn owns_listener(&self, _port: u16) -> Result<(), String> {
         Err("LISTENER_OWNERSHIP_UNKNOWN".into())
     }
+
+    /// Terminates only the PyInstaller one-file *payload* of the owned
+    /// bootloader (#278): direct children of `bootloader_pid` that are
+    /// members of this job, were created no earlier than the bootloader,
+    /// and run the bootloader's own image. The bootloader itself is left
+    /// alive so it can run its normal exit path, which removes its
+    /// `%TEMP%\_MEI*` extraction directory. Returns how many payload
+    /// processes were terminated; an unsupported or failed query is an
+    /// error and never "zero, so everything is fine".
+    fn terminate_onefile_payload(&self, _bootloader_pid: u32) -> Result<u32, String> {
+        Err("ONEFILE_PAYLOAD_UNSUPPORTED".into())
+    }
 }
+
+/// How `SidecarManager::cleanup()` ended the owned backend (#278).
+/// Diagnostics/tests only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupPath {
+    /// The retained process handle already reported exit; nothing was
+    /// signalled (a reused PID is never targeted).
+    AlreadyExited,
+    /// Only the one-file payload was terminated and the bootloader then
+    /// exited on its own within the bounded wait, i.e. it ran its own
+    /// extraction-directory cleanup.
+    BootloaderExitedAfterPayload,
+    /// The previous forced path: `taskkill /T /F` on the owned PID (or a
+    /// direct kill when no trusted taskkill exists).
+    ForcedTree,
+}
+
+/// Upper bound for the bootloader to remove its extraction directory and
+/// exit after its payload was terminated, before the forced tree path.
+#[cfg(target_os = "windows")]
+const ONEFILE_BOOTLOADER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The steps that must *all* succeed before an owned backend may run:
 /// create a kill-on-close job, assign the still-suspended child to it, then
@@ -306,6 +339,77 @@ impl SupervisedJob for JobObject {
         }
     }
 
+    fn terminate_onefile_payload(&self, bootloader_pid: u32) -> Result<u32, String> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        };
+
+        let bootloader =
+            OwnedProcessHandle::open(bootloader_pid, PROCESS_QUERY_LIMITED_INFORMATION)
+                .ok_or_else(|| "ONEFILE_BOOTLOADER_UNAVAILABLE".to_string())?;
+        if !bootloader.is_in_job(self.handle) {
+            return Err("ONEFILE_BOOTLOADER_NOT_OWNED".into());
+        }
+        let image = bootloader
+            .image_path()
+            .ok_or_else(|| "ONEFILE_BOOTLOADER_IMAGE_UNKNOWN".to_string())?;
+        let created = bootloader
+            .creation_time()
+            .ok_or_else(|| "ONEFILE_BOOTLOADER_TIME_UNKNOWN".to_string())?;
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("ONEFILE_PROCESS_SNAPSHOT_FAILED".into());
+        }
+        let mut candidates = Vec::new();
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while more {
+            if entry.th32ParentProcessID == bootloader_pid && entry.th32ProcessID != bootloader_pid
+            {
+                candidates.push(entry.th32ProcessID);
+            }
+            more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        unsafe {
+            CloseHandle(snapshot);
+        }
+
+        let mut terminated = 0;
+        for pid in candidates {
+            // The opened handle pins this exact process; every check below is
+            // made against it, so a PID reused after the snapshot can never
+            // pass job membership, creation order and image identity at once.
+            let Some(child) = OwnedProcessHandle::open(
+                pid,
+                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            ) else {
+                continue;
+            };
+            if !child.is_in_job(self.handle) {
+                continue;
+            }
+            match child.creation_time() {
+                Some(child_created) if child_created >= created => {}
+                _ => continue,
+            }
+            match child.image_path() {
+                Some(child_image) if child_image.eq_ignore_ascii_case(&image) => {}
+                _ => continue,
+            }
+            if unsafe { TerminateProcess(child.0, 1) } != 0 {
+                terminated += 1;
+            }
+        }
+        Ok(terminated)
+    }
+
     /// Assigns an already-created (and, by construction here, still
     /// suspended) process to this job. Never assigns a process this
     /// manager did not itself spawn -- callers only ever pass a child
@@ -326,6 +430,78 @@ impl Drop for JobObject {
     fn drop(&mut self) {
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+/// A process handle closed on drop. Used to pin one exact process while
+/// its job membership, creation time and image are checked (#278).
+#[cfg(target_os = "windows")]
+struct OwnedProcessHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl OwnedProcessHandle {
+    fn open(pid: u32, access: u32) -> Option<Self> {
+        let handle = unsafe { windows_sys::Win32::System::Threading::OpenProcess(access, 0, pid) };
+        if handle.is_null() {
+            None
+        } else {
+            Some(Self(handle))
+        }
+    }
+
+    fn is_in_job(&self, job: windows_sys::Win32::Foundation::HANDLE) -> bool {
+        let mut belongs = 0;
+        let ok = unsafe {
+            windows_sys::Win32::System::JobObjects::IsProcessInJob(self.0, job, &mut belongs)
+        };
+        ok != 0 && belongs != 0
+    }
+
+    fn image_path(&self) -> Option<String> {
+        let mut buffer = vec![0u16; 32768];
+        let mut size = buffer.len() as u32;
+        let ok = unsafe {
+            windows_sys::Win32::System::Threading::QueryFullProcessImageNameW(
+                self.0,
+                0,
+                buffer.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+
+    fn creation_time(&self) -> Option<u64> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        let mut created: FILETIME = unsafe { std::mem::zeroed() };
+        let mut exited: FILETIME = unsafe { std::mem::zeroed() };
+        let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+        let mut user: FILETIME = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            windows_sys::Win32::System::Threading::GetProcessTimes(
+                self.0,
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedProcessHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
         }
     }
 }
@@ -506,6 +682,7 @@ pub struct SidecarManager {
     owned: AtomicBool,
     supervisor: Box<dyn ProcessSupervisor>,
     last_rejected_child: Mutex<Option<RejectedChild>>,
+    last_cleanup: Mutex<Option<CleanupPath>>,
 }
 
 impl Default for SidecarManager {
@@ -527,6 +704,7 @@ impl SidecarManager {
             owned: AtomicBool::new(false),
             supervisor,
             last_rejected_child: Mutex::new(None),
+            last_cleanup: Mutex::new(None),
         }
     }
 
@@ -535,6 +713,13 @@ impl SidecarManager {
     #[allow(dead_code)]
     pub fn last_rejected_child(&self) -> Option<RejectedChild> {
         *self.last_rejected_child.lock().unwrap()
+    }
+
+    /// How the most recent `cleanup()` ended an owned backend (#278).
+    /// Diagnostics/tests only.
+    #[allow(dead_code)]
+    pub fn last_cleanup(&self) -> Option<CleanupPath> {
+        *self.last_cleanup.lock().unwrap()
     }
 
     pub fn is_owned(&self) -> bool {
@@ -857,13 +1042,25 @@ impl SidecarManager {
         let mut guard = self.process.lock().unwrap();
         if let Some(mut owned) = guard.take() {
             let pid = owned.child.id();
+            let path;
             #[cfg(target_os = "windows")]
             {
                 // Never taskkill a PID after our retained process handle
                 // confirms exit: Windows may already have reused that PID.
-                match owned.child.try_wait() {
-                    Ok(Some(_)) => {}
-                    _ => match taskkill_tree_command(pid) {
+                if let Ok(Some(_)) = owned.child.try_wait() {
+                    path = CleanupPath::AlreadyExited;
+                } else if Self::end_onefile_payload_then_wait(&mut owned, pid) {
+                    // #278: the bootloader exited on its own after only its
+                    // one-file payload was terminated, so it ran its normal
+                    // exit path (extraction-directory removal). Remaining job
+                    // members (e.g. a Worker) are ended by the kill-on-close
+                    // job handle dropped below.
+                    path = CleanupPath::BootloaderExitedAfterPayload;
+                } else if let Ok(Some(_)) = owned.child.try_wait() {
+                    path = CleanupPath::BootloaderExitedAfterPayload;
+                } else {
+                    path = CleanupPath::ForcedTree;
+                    match taskkill_tree_command(pid) {
                         Ok(mut kill) => {
                             let _ = kill.status();
                         }
@@ -873,18 +1070,50 @@ impl SidecarManager {
                         Err(_) => {
                             let _ = owned.child.kill();
                         }
-                    },
+                    }
                 }
             }
             #[cfg(not(target_os = "windows"))]
             {
+                let _ = pid;
+                path = CleanupPath::ForcedTree;
                 let _ = owned.child.kill();
             }
             let _ = owned.child.wait();
+            *self.last_cleanup.lock().unwrap() = Some(path);
             // `owned.job` drops here too, closing the Job Object handle;
             // harmless since the tree above is already dead by this point.
         }
         self.owned.store(false, Ordering::SeqCst);
+    }
+}
+
+impl SidecarManager {
+    /// #278: terminate only the owned bootloader's one-file payload, then
+    /// give the bootloader a bounded window to remove its extraction
+    /// directory and exit. Returns true only when the retained handle
+    /// confirms the bootloader exited within that window. Any failure,
+    /// zero payload processes (e.g. a dev backend that is not one-file),
+    /// or a timeout returns false so the caller keeps the forced path.
+    #[cfg(target_os = "windows")]
+    fn end_onefile_payload_then_wait(owned: &mut OwnedProcess, pid: u32) -> bool {
+        let Some(job) = owned.job.as_ref() else {
+            return false;
+        };
+        match job.terminate_onefile_payload(pid) {
+            Ok(count) if count > 0 => {}
+            _ => return false,
+        }
+        let deadline = Instant::now() + ONEFILE_BOOTLOADER_EXIT_TIMEOUT;
+        loop {
+            if let Ok(Some(_)) = owned.child.try_wait() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -2047,5 +2276,256 @@ mod tests {
             .eq_ignore_ascii_case("System32"));
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["/PID", "4242", "/T", "/F"]);
+    }
+
+    // -- #278: one-file bootloader gets to run its own exit path -----------
+
+    /// Waits (bounded) until `parent_pid` has a direct child, returning it.
+    #[cfg(target_os = "windows")]
+    fn wait_for_child_of(parent_pid: u32, name: &str) -> u32 {
+        for _ in 0..100 {
+            let output = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "(Get-CimInstance Win32_Process -Filter \"ParentProcessId={parent_pid} AND Name='{name}'\").ProcessId"
+                    ),
+                ])
+                .output()
+                .expect("query named child via Get-CimInstance");
+            if let Some(pid) = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.trim().parse::<u32>().ok())
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("no {name} child appeared under {parent_pid}");
+    }
+
+    /// Bootloader stand-in: `cmd /C cmd /C ping ...`. The outer cmd (owned,
+    /// same image as its direct child) waits for the inner cmd and then
+    /// exits on its own -- exactly the PyInstaller one-file shape whose
+    /// parent removes `_MEI*` after its payload ends. The inner cmd's own
+    /// child (ping) stands in for a Worker left for kill-on-close.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_lets_onefile_bootloader_exit_on_its_own_after_payload_terminates() {
+        let manager = SidecarManager::new();
+        let probe = FixedProbe::new(ProbeResult::Unreachable);
+        manager.start(
+            &probe,
+            SpawnSpec {
+                program: "cmd.exe".into(),
+                args: vec!["/C".into(), "cmd.exe /C ping -n 60 127.0.0.1 >NUL".into()],
+                current_dir: None,
+                env: vec![],
+            },
+        );
+        let bootloader = manager.owned_pid().expect("owned bootloader");
+        let payload = wait_for_child_of(bootloader, "cmd.exe");
+        let worker = wait_for_child_of(payload, "PING.EXE");
+
+        let started = Instant::now();
+        manager.cleanup();
+
+        assert_eq!(
+            manager.last_cleanup(),
+            Some(CleanupPath::BootloaderExitedAfterPayload)
+        );
+        assert!(
+            started.elapsed() < ONEFILE_BOOTLOADER_EXIT_TIMEOUT,
+            "bootloader should exit promptly, not by timeout"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!manager.is_owned());
+        assert!(!process_is_running(bootloader));
+        assert!(!process_is_running(payload));
+        assert!(
+            !process_is_running(worker),
+            "remaining job members must still end via kill-on-close"
+        );
+    }
+
+    /// A non-one-file root (dev uvicorn shape): its direct child runs a
+    /// different image, so nothing is a payload and the forced tree path
+    /// is used immediately, without waiting for any timeout.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_keeps_forced_tree_path_when_root_is_not_onefile() {
+        let manager = SidecarManager::new();
+        let probe = FixedProbe::new(ProbeResult::Unreachable);
+        manager.start(
+            &probe,
+            SpawnSpec {
+                program: "cmd.exe".into(),
+                args: vec!["/C".into(), "ping -n 60 127.0.0.1 >NUL".into()],
+                current_dir: None,
+                env: vec![],
+            },
+        );
+        let root = manager.owned_pid().expect("owned root");
+        let child = wait_for_child_of(root, "PING.EXE");
+
+        let started = Instant::now();
+        manager.cleanup();
+
+        assert_eq!(manager.last_cleanup(), Some(CleanupPath::ForcedTree));
+        assert!(started.elapsed() < ONEFILE_BOOTLOADER_EXIT_TIMEOUT);
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!process_is_running(root));
+        assert!(!process_is_running(child));
+    }
+
+    /// The payload is terminated but the root keeps running (it does not
+    /// wait for its child): the bounded wait expires and the existing
+    /// forced tree path still ends everything.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_falls_back_to_forced_tree_when_root_does_not_exit_in_time() {
+        let manager = SidecarManager::new();
+        let probe = FixedProbe::new(ProbeResult::Unreachable);
+        manager.start(
+            &probe,
+            spawn_spec_that_launches_a_child_and_stays_alive_long(),
+        );
+        let root = manager.owned_pid().expect("owned root");
+        let child = wait_for_child_of(root, "powershell.exe");
+
+        let started = Instant::now();
+        manager.cleanup();
+
+        assert_eq!(manager.last_cleanup(), Some(CleanupPath::ForcedTree));
+        assert!(started.elapsed() >= ONEFILE_BOOTLOADER_EXIT_TIMEOUT);
+        assert!(started.elapsed() < ONEFILE_BOOTLOADER_EXIT_TIMEOUT + Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!process_is_running(root));
+        assert!(!process_is_running(child));
+    }
+
+    #[cfg(target_os = "windows")]
+    fn spawn_spec_that_launches_a_child_and_stays_alive_long() -> SpawnSpec {
+        SpawnSpec {
+            program: "powershell".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -WindowStyle Hidden; Start-Sleep -Seconds 60".into(),
+            ],
+            current_dir: None,
+            env: vec![],
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cleanup_records_already_exited_without_signalling() {
+        let manager = SidecarManager::new();
+        manager.start(
+            &FixedProbe::new(ProbeResult::Unreachable),
+            SpawnSpec {
+                program: "cmd.exe".into(),
+                args: vec!["/C".into(), "exit 0".into()],
+                current_dir: None,
+                env: vec![],
+            },
+        );
+        for _ in 0..100 {
+            if manager.is_owned_process_alive() == Some(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        manager.cleanup();
+        assert_eq!(manager.last_cleanup(), Some(CleanupPath::AlreadyExited));
+        assert!(!manager.is_owned());
+    }
+
+    /// The payload query never acts on a process outside its own job:
+    /// an unrelated (this test's own) process is rejected as not owned,
+    /// and its children are left untouched.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn onefile_payload_termination_refuses_a_bootloader_outside_the_job() {
+        let job = PlatformSupervisor.create_job().expect("job");
+        let mut outsider = Command::new("cmd.exe")
+            .args(["/C", "cmd.exe /C ping -n 30 127.0.0.1 >NUL"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("unowned process");
+        let outsider_child = wait_for_child_of(outsider.id(), "cmd.exe");
+
+        assert_eq!(
+            job.terminate_onefile_payload(outsider.id()),
+            Err("ONEFILE_BOOTLOADER_NOT_OWNED".to_string())
+        );
+        assert!(
+            process_is_running(outsider_child),
+            "unowned child must survive"
+        );
+
+        let _ = Command::new("taskkill")
+            .args(["/PID", &outsider.id().to_string(), "/T", "/F"])
+            .output();
+        let _ = outsider.wait();
+    }
+
+    /// Real PyInstaller one-file check (#278), opt-in: set
+    /// `SORIGUL_TEST_ONEFILE_EXE` to a harmless one-file executable that
+    /// stays alive (e.g. a `time.sleep` script built with the pinned
+    /// PyInstaller) and run with `--ignored`. TEMP/TMP are redirected to a
+    /// fresh directory owned by this test, so only its own `_MEI*` is seen.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn real_onefile_bootloader_removes_its_extraction_dir_after_cleanup() {
+        let exe = std::env::var("SORIGUL_TEST_ONEFILE_EXE")
+            .expect("set SORIGUL_TEST_ONEFILE_EXE to a harmless one-file executable");
+        let temp = std::env::temp_dir().join(format!(
+            "sorigul-278-onefile-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+        let temp_text = temp.to_string_lossy().into_owned();
+        let manager = SidecarManager::new();
+        manager.start(
+            &FixedProbe::new(ProbeResult::Unreachable),
+            SpawnSpec {
+                program: exe,
+                args: vec![],
+                current_dir: None,
+                env: vec![
+                    ("TEMP".into(), temp_text.clone()),
+                    ("TMP".into(), temp_text),
+                ],
+            },
+        );
+        let mei_dirs = || {
+            std::fs::read_dir(&temp)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("_MEI"))
+                .count()
+        };
+        for _ in 0..100 {
+            if mei_dirs() > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(mei_dirs(), 1, "bootloader should have extracted once");
+        std::thread::sleep(Duration::from_millis(1500));
+
+        manager.cleanup();
+
+        assert_eq!(
+            manager.last_cleanup(),
+            Some(CleanupPath::BootloaderExitedAfterPayload)
+        );
+        assert_eq!(mei_dirs(), 0, "bootloader must remove its own _MEI dir");
+        let _ = std::fs::remove_dir(&temp);
     }
 }
