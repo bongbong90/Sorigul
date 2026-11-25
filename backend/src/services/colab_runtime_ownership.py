@@ -468,6 +468,17 @@ class RuntimeOwnership:
                 except RuntimeClientError as exc:
                     if self._record.state == OwnershipState.BLOCKED:
                         return RecoveryResult(OwnershipState.BLOCKED, self._record.cleanup_required, exc.code)
+                    if (exc.code not in (RuntimeErrorCode.DELETE_FAILED, RuntimeErrorCode.NOT_OWNED)
+                            and self.client.create_failed_remotely()):
+                        # The create Operation ended with an error (e.g. Google's
+                        # DEADLINE_EXCEEDED): nothing can still appear, so the
+                        # idempotent allowMissing DELETE of our own name settles it.
+                        try:
+                            self._update(state=OwnershipState.CLEANUP_REQUIRED)
+                            self.client.delete_owned_runtime()
+                            return RecoveryResult(self._record.state, self._record.cleanup_required)
+                        except RuntimeClientError as delete_exc:
+                            exc = delete_exc
                     state = (OwnershipState.CLEANUP_REQUIRED if exc.code == RuntimeErrorCode.DELETE_FAILED
                              else OwnershipState.RECOVERY_REQUIRED)
                     self._update(state=state, cleanup_required=True)

@@ -350,6 +350,7 @@ class ColabRuntimeClient:
                                                  cause_code=RuntimeErrorCode.NOT_OWNED)
                     # Failure can be ambiguous; keep cleanup obligation until a
                     # successful DELETE or a definitive not-found verification.
+                    self._create_operation_failed = True
                     raise RuntimeClientError(self._classify(operation["error"]), cleanup_required=True)
                 response = operation.get("response")
                 if "error" in operation or not isinstance(response, dict) or response.get("name") != self._runtime_name:
@@ -435,6 +436,13 @@ class ColabRuntimeClient:
                 self._cleanup_required = False
                 self._runtime_name = None
                 return None
+
+    def create_failed_remotely(self):
+        """True only when this attempt's create Operation itself finished with
+        an error, so no Runtime can still appear after an allowMissing DELETE."""
+        with self._lock:
+            return (getattr(self, "_create_operation_failed", False) and not self._pending_operation
+                    and self._runtime_name is not None)
 
     def delete_owned_runtime(self):
         with self._lock:

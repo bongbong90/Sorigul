@@ -497,3 +497,24 @@ def test_consumed_client_cannot_prepare_another_attempt_after_cleanup(environmen
         owner.create()
     assert error.value.code == Code.DUPLICATE_CREATE
     assert len(server.calls) == before and store.load() == previous
+
+
+@pytest.mark.parametrize("done", [True, False])
+def test_recovery_of_create_that_failed_remotely_deletes_only_once_settled(environment, done):
+    # Live #60 attempt 3: the create Operation ended with code 4
+    # DEADLINE_EXCEEDED. Only a settled Operation permits the allowMissing DELETE.
+    _, record = start(environment)
+    store, server, make_client = environment
+    operation = {"name": "operations/mock-op", "done": done}
+    if done:
+        operation["error"] = {"code": 4, "message": "context deadline exceeded"}
+    server.overrides["GET", "/v1/operations/mock-op"] = httpx.Response(200, json=operation)
+    before = len(server.calls)
+    result = RuntimeOwnership(store, make_client()).recover(record.execution_id)
+    deletes = [r for r in server.calls[before:] if r.method == "DELETE"]
+    if done:
+        assert result.state == State.CLEANED and not result.cleanup_required
+        assert len(deletes) == 1 and store.load()[0].state == State.CLEANED
+    else:
+        assert result.state == State.RECOVERY_REQUIRED and result.cleanup_required
+        assert deletes == [] and store.load()[0].state == State.RECOVERY_REQUIRED
