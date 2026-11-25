@@ -342,7 +342,7 @@ export interface ColabAuthStatus {
   launch_approval: 'BLOCKED'
   blocking_reasons: string[]
   disconnect_allowed: boolean
-  preflight: { identity: string; colab_access: string; tier: string; t4: string; launch_scope: string; launch_approval: string; account_usage: { balance: number; hourly_rate: number; assignments: number } | null; paid_cu_non_consumption_evidence: string } | null
+  preflight: { identity: string; colab_access: string; tier: string; t4: string; launch_scope: string; launch_approval: string; account_usage: { balance: number | null; hourly_rate: number | null; assignments: number } | null; paid_cu_non_consumption_evidence: string } | null
 }
 
 export const api = {

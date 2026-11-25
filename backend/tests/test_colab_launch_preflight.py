@@ -95,7 +95,8 @@ class Colab:
                 "currentBalance": 0, "consumptionRateHourly": 0, "assignmentsCount": 0,
             })))
         outcome = {"/v1beta/subscription": self.subscription,
-                   "/v1beta/runtimespecs": self.specs}[request.url.path]
+                   "/v1beta/runtimespecs": self.specs,
+                   "/v1beta/runtimes": getattr(self, "runtimes", httpx.Response(200, json={}))}[request.url.path]
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -576,6 +577,30 @@ def test_usage_is_account_observation_only(payload):
                                            hourly_rate=payload["consumptionRateHourly"],
                                            assignments=payload["assignmentsCount"])
     else:
-        assert result.account_usage is None
+        # Unreadable snapshot: only the public runtimes.list count, never a zero balance.
+        assert result.account_usage == dict(balance=None, hourly_rate=None, assignments=0)
     assert all(method == "GET" for method, _ in colab.calls)
     assert_blocked(result)
+
+
+@pytest.mark.parametrize("runtimes, expected", [
+    (httpx.Response(200, json={"runtimes": [{"name": "runtimes/a"}]}), dict(balance=None, hourly_rate=None, assignments=1)),
+    (httpx.Response(200, json={"runtimes": [{"name": "runtimes/a"}], "nextPageToken": "n"}), None),
+    (httpx.Response(403, json={}), None),
+])
+def test_tunnel_rejection_falls_back_to_public_runtime_count(runtimes, expected):
+    # The tunnel ccu-info rejects non-CLI OAuth clients with an HTML 401.
+    colab = Colab()
+    colab.usage = httpx.Response(401, text="<html></html>", headers={"Content-Type": "text/html"})
+    colab.runtimes = runtimes
+    result, _, _ = run(colab=colab, include_usage=True)
+    assert result.account_usage == expected
+    assert all(method == "GET" for method, _ in colab.calls)
+    assert result.tier.value == "FREE"
+    assert_blocked(result)
+
+
+def test_runtime_list_is_refused_without_usage_read():
+    colab = Colab()
+    result, _, _ = run(colab=colab)
+    assert ("GET", "/v1beta/runtimes") not in colab.calls and result.account_usage is None

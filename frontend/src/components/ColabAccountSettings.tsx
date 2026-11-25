@@ -87,7 +87,7 @@ export function ColabAccountSettings({ online, criticalWork }: { online: boolean
       <ul>{status?.blocking_reasons.map((reason) => <li key={reason}>{blockers[reason] ?? '전사 실행 조건 확인이 필요합니다.'}</li>)}</ul>
       {status?.preflight ? <p className="text-caption">읽기 전용 확인: {status.preflight.tier === 'FREE' ? '무료 구독 확인' : '구독 조건 확인 필요'} · {status.preflight.t4 === 'ELIGIBLE' ? 'T4 자원 후보 확인' : 'GPU 확인 필요'} · Runtime 생성 권한 미검증</p> : null}
       {status?.preflight && <p className="text-caption">{status.preflight.account_usage
-        ? `조회 시점 잔액 ${status.preflight.account_usage.balance} CU · 시간당 ${status.preflight.account_usage.hourly_rate} CU · 활성 런타임 ${status.preflight.account_usage.assignments}개`
+        ? `조회 시점 잔액 ${status.preflight.account_usage.balance ?? '확인 불가'}${status.preflight.account_usage.balance === null ? '' : ' CU'} · 시간당 ${status.preflight.account_usage.hourly_rate ?? '확인 불가'}${status.preflight.account_usage.hourly_rate === null ? '' : ' CU'} · 활성 런타임 ${status.preflight.account_usage.assignments}개`
         : '계정 CU 사용량을 조회할 수 없습니다.'}</p>}
       {message ? <div className="setting-note" role="status"><span>{message}</span></div> : null}
       {!isTauri() ? <p className="text-caption">계정 연결은 Desktop 앱의 기본 브라우저에서 진행합니다.</p> : null}

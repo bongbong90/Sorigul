@@ -253,6 +253,18 @@ class ColabRuntimeClient:
         except (httpx.HTTPError, ValueError, OverflowError):
             return None
 
+    def count_active_runtimes(self):
+        """Public runtimes.list read. The tunnel CU snapshot rejects non-CLI
+        OAuth clients (401), so this is the only official assignment count."""
+        try:
+            payload = self._request("GET", "/v1beta/runtimes")
+        except RuntimeClientError:
+            return None
+        runtimes = payload.get("runtimes", [])
+        if not isinstance(runtimes, list) or payload.get("nextPageToken"):
+            return None  # never under-report a partial page
+        return len(runtimes)
+
     def get_subscription(self):
         payload = self._request("GET", "/v1beta/subscription")
         if payload.get("name") != "subscription" or payload.get("tier") != "SUBSCRIPTION_TIER_FREE":

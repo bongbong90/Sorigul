@@ -229,7 +229,7 @@ class _ReadOnlyColabTransport(httpx.BaseTransport):
 
     def handle_request(self, request):
         public_read = any(str(request.url) == API_ROOT + path for path in ALLOWED_COLAB_READS)
-        usage_read = self.include_usage and str(request.url) == USAGE_URL
+        usage_read = self.include_usage and str(request.url) in (USAGE_URL, API_ROOT + "/v1beta/runtimes")
         if request.method != "GET" or not (public_read or usage_read):
             self.violation = True
             raise _GuardViolation()
@@ -423,6 +423,11 @@ def run_launch_preflight(access_token, *, network_approved, expected_account_bin
 
         if include_usage:
             account_usage = client.get_account_usage()
+            if account_usage is None:
+                # Balance/rate stay unknown (None), never assumed to be zero.
+                count = client.count_active_runtimes()
+                if count is not None:
+                    account_usage = {"balance": None, "hourly_rate": None, "assignments": count}
 
         # 2. Colab access + subscription tier (one classified GET).
         try:
