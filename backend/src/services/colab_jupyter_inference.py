@@ -155,6 +155,11 @@ class ColabJupyterInference:
         self._provision_action = None
         self._require_cuda = False
 
+    def install_connection(self, info):
+        """Forward a reissued proxy token to this run's Jupyter client, if any."""
+        if self._client is not None:
+            self._client.install_connection(info)
+
     def cancel(self):
         self._cancel.set()  # bounded recv polls; only our kernel is deleted
 

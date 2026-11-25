@@ -288,6 +288,18 @@ class ColabJupyterFileTransfer:
                 raise TransferError(TransferCode.TOKEN_REFRESH_REQUIRED)
             self._info = updated
 
+    def install_connection(self, connection_info):
+        """Adopt a token reissued by runtimes.get for this same Runtime URL."""
+        with self._lock:
+            try:
+                valid = (ColabJupyterClient._validate_info(connection_info) == self._base_url
+                         and connection_info.expire_time > self._utcnow())
+            except JupyterClientError:
+                valid = False
+            if not valid:
+                raise TransferError(TransferCode.TOKEN_REFRESH_REQUIRED)
+            self._info = connection_info
+
     def remote_path_for(self, index):
         if type(index) is not int or not 0 <= index <= MAX_INDEX:
             raise TransferError(TransferCode.REMOTE_PATH_INVALID)

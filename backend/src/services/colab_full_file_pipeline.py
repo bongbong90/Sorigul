@@ -83,6 +83,9 @@ class _BoundRuntime:
         self.owner = owner
         self.identity = None
         self.connection = None
+        # HTTP holders of the proxy token. runtimes.get reissues it, so every
+        # fresh read is pushed to them; open WebSockets are left untouched.
+        self.listeners = []
 
     def get_owned_runtime(self):
         owner = self.owner
@@ -105,6 +108,8 @@ class _BoundRuntime:
             if self.connection is not None and connection != self.connection:
                 raise PipelineError("RUNTIME_BINDING_CHANGED", "AUTH_ACCESS_REQUIRED")
             self.identity, self.connection = identity, connection
+            for listener in self.listeners:
+                listener(info)
             return runtime
 
 
@@ -345,6 +350,7 @@ class ColabFullFilePipeline:
                 inference = self._inference_factory(
                     bound, transfer, http_request=self._http, ws_connect=self._ws,
                     reuse_kernel=True, cancel_requested=requested)
+                bound.listeners += [transfer.install_connection, inference.install_connection]
                 if self._provisioning_authorizer is not None:
                     from src.services.colab_model_provisioner import ColabModelProvisioner
                     def provision_event(event):

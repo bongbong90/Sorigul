@@ -208,6 +208,16 @@ class ColabJupyterClient:
         if self._info.expire_time <= self._utcnow():
             raise JupyterClientError(JupyterCode.TOKEN_REFRESH_REQUIRED)
 
+    def install_connection(self, info):
+        """Adopt a token reissued by runtimes.get for this same Runtime URL.
+
+        Only later HTTP requests use it; an open WebSocket is not reconnected.
+        """
+        with self._lock:
+            if self._validate_info(info) != self._base_url or info.expire_time <= self._utcnow():
+                raise JupyterClientError(JupyterCode.TOKEN_REFRESH_REQUIRED)
+            self._info = info
+
     def refresh_connection(self):
         """Caller-initiated owned-runtime lookup; never reconnect/re-execute."""
         with self._lock:

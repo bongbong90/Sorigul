@@ -755,17 +755,30 @@ def test_checkpoint_publication_failure_keeps_crash_guard_pending(setup):
     assert exc.value.code == "PRIOR_EXECUTION_UNRESOLVED"
 
 
-def test_reissued_proxy_token_on_runtime_reads_is_not_a_binding_change(setup):
-    # Live #60 run: runtimes.get returns a fresh short-lived proxy token, and
-    # pinning it as identity aborted the job as REMOTE_STATE_UNCERTAIN.
-    base, reads = setup.runtime.runtime, []
+
+@pytest.mark.parametrize("stale_rejected", [False, True])
+def test_reissued_proxy_token_is_installed_not_treated_as_binding_change(setup, stale_rejected):
+    # Live #60 runs: runtimes.get returns a fresh short-lived proxy token.
+    # Pinning it as identity aborted the job; keeping the first token for the
+    # transfer left later HTTP calls (and their cleanup) on a stale token.
+    base, reads, latest = setup.runtime.runtime, [], [TOKEN]
     def reissuing():
         payload = base()
         reads.append(1)
-        if len(reads) > 2:  # fixture create + first bound read keep the installed token
-            payload["connectionInfo"]["token"] = f"reissued-{len(reads)}"
+        if len(reads) > 2:  # fixture create + first bound read keep the original token
+            latest[0] = payload["connectionInfo"]["token"] = f"reissued-{len(reads)}"
         return payload
     setup.runtime.runtime = reissuing
+    http, connect, seen = setup.server.http, setup.server.connect, []
+    def check(headers):
+        token = headers.get("X-Colab-Runtime-Proxy-Token")
+        seen.append(token)
+        if stale_rejected:
+            assert token == latest[0], "stale proxy token used"
+        return dict(headers, **{"X-Colab-Runtime-Proxy-Token": TOKEN})
+    setup.server.http = lambda method, url, headers, body, timeout: http(method, url, check(headers), body, timeout)
+    setup.server.connect = lambda url, headers, timeout: connect(url.replace(
+        "token=" + str(headers.get("X-Colab-Runtime-Proxy-Token")), "token=" + TOKEN), check(headers), timeout)
     result = run(setup, setup.pipeline((300.0, 12.0)))
     assert result.text == "한국어 조각 0\n한국어 조각 1"
-    assert len(reads) > 3
+    assert len(reads) > 3 and any(token != TOKEN for token in seen)
