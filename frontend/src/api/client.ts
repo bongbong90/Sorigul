@@ -80,6 +80,17 @@ export interface JobEvent {
   filename?: string | null
 }
 
+// Transcription engine identifiers sent to the backend. Never shown to users.
+export type EngineId = 'local_whisper' | 'direct_colab' | 'official_colab'
+
+// Server readiness for automatic official Colab (#245). Contains no
+// credentials, account identifiers, Runtime names or URLs by contract.
+export interface OfficialColabStatus {
+  state: 'DISABLED' | 'BLOCKED' | 'READY'
+  available: boolean
+  reasons: { code: string; message: string }[]
+}
+
 export interface JobModel {
   job_id: string
   created_at: string
@@ -318,8 +329,30 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
   }
 }
 
+export interface ColabAuthStatus {
+  auth_state: 'DISCONNECTED' | 'AUTHORIZING' | 'CONNECTED' | 'INSUFFICIENT_SCOPE' | 'REFRESH_REQUIRED' | 'IDENTITY_FAILED'
+  message: string
+  configured: boolean
+  error_code: string | null
+  notice: string | null
+  scope_evidence: 'TOKEN_RESPONSE_VERIFIED' | 'NOT_VERIFIED'
+  runtime_create_permission: 'NOT_VERIFIED'
+  execution_state: 'UNVERIFIED'
+  execution_message: string
+  launch_approval: 'BLOCKED'
+  blocking_reasons: string[]
+  disconnect_allowed: boolean
+  preflight: { identity: string; colab_access: string; tier: string; t4: string; launch_scope: string; launch_approval: string; account_usage: { balance: number; hourly_rate: number; assignments: number } | null; paid_cu_non_consumption_evidence: string } | null
+}
+
 export const api = {
+  colabAuthStatus: (signal?: AbortSignal) => request<ColabAuthStatus>('/colab/auth/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  startColabAuth: () => request<{ authorization_url: string }>('/colab/auth/start', { method: 'POST', body: '{}', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  cancelColabAuth: () => request<ColabAuthStatus>('/colab/auth/cancel', { method: 'POST', body: '{}', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  checkColabAuth: () => request<ColabAuthStatus>('/colab/auth/check', { method: 'POST', body: '{}', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
+  disconnectColabAuth: () => request<ColabAuthStatus>('/colab/auth/disconnect', { method: 'POST', body: '{}', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   localRuntimeStatus: (signal?: AbortSignal) => request<{ available: boolean; code: string | null; message: string }>('/runtime/local/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  officialColabStatus: (signal?: AbortSignal) => request<OfficialColabStatus>('/engines/official-colab/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   health: (signal?: AbortSignal) => request<{ status: 'ok' }>('/health', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
@@ -343,7 +376,7 @@ export const api = {
     file_ids: string[]
     scope: 'selected' | 'all_incomplete'
     force_retranscribe?: boolean
-    engine?: 'local_whisper' | 'direct_colab'
+    engine?: EngineId
     colab_url?: string
     upload_to_drive?: boolean
     course: string

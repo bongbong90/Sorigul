@@ -59,13 +59,18 @@ def test_ui_bootstrap_commands_match_the_canonical_readme():
     setup = read_repo(SETUP_PATH)
     readme = read_repo("colab/README.md")
     expected = (
-        "!git clone https://github.com/bongbong90/Sorigul.git",
-        "!cd Sorigul && pip install -r colab/requirements.txt",
-        "!python Sorigul/colab/sorigul_colab_bootstrap.py",
+        '%%bash',
+        'set -eu',
+        'work=$(mktemp -d)',
+        'cd "$work"',
+        'git init -q',
+        'git fetch -q --depth=1 https://github.com/bongbong90/Sorigul.git 23c0429759e286566632f0155f1a4e4c6ee3c720',
+        'git checkout -q --detach FETCH_HEAD',
+        'python -m pip install -r colab/requirements.txt',
+        'python colab/sorigul_colab_bootstrap.py',
     )
 
     assert "COLAB_BOOTSTRAP_COMMANDS" in engine
-    assert len([line for line in setup.splitlines() if line.strip().startswith("'!")]) == 3
     for command in expected:
         assert command in setup
         assert command in readme
