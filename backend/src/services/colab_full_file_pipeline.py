@@ -99,7 +99,9 @@ class _BoundRuntime:
             if runtime.name != record.runtime_name:
                 raise PipelineError("RUNTIME_BINDING_CHANGED", "AUTH_ACCESS_REQUIRED")
             info = runtime.connection_info
-            connection = (info.url, info.token)
+            # runtimes.get reissues the short-lived proxy token; only the
+            # authenticated URL (with name/account above) is runtime identity.
+            connection = info.url
             if self.connection is not None and connection != self.connection:
                 raise PipelineError("RUNTIME_BINDING_CHANGED", "AUTH_ACCESS_REQUIRED")
             self.identity, self.connection = identity, connection

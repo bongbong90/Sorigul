@@ -502,9 +502,11 @@ def test_invalid_index_never_contacts_jupyter(setup, index):
     assert report.error_code is Code.INVALID_INPUT and setup.server.calls == []
 
 
-def test_transfer_connection_binding_does_not_accept_rotation_or_invalid_info(setup):
+def test_transfer_connection_binding_tolerates_token_reissue_not_retargeting(setup):
+    # runtimes.get reissues the short-lived proxy token on reads (#60 live run).
     assert setup.transfer.matches_connection(info())
-    assert not setup.transfer.matches_connection(info(token="different"))
+    assert setup.transfer.matches_connection(info(token="reissued"))
+    assert not setup.transfer.matches_connection(info(url="https://other-runtime.example.com"))
     assert not setup.transfer.matches_connection(None)
 
 

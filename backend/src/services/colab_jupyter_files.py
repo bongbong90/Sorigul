@@ -296,13 +296,14 @@ class ColabJupyterFileTransfer:
     def matches_connection(self, connection_info):
         """Read-only binding check for consumers of this run's owned files.
 
-        A refreshed token must first be installed by refresh_connection(); this
-        never retargets a transfer or claims ownership of another Runtime.
+        The proxy token is a short-lived credential that runtimes.get may
+        reissue on every read, so it is not identity: the installed token keeps
+        being used until refresh_connection(). This never retargets a transfer
+        or claims ownership of another Runtime.
         """
         with self._lock:
             try:
-                return (ColabJupyterClient._validate_info(connection_info) == self._base_url
-                        and connection_info.token == self._info.token)
+                return ColabJupyterClient._validate_info(connection_info) == self._base_url
             except JupyterClientError:
                 return False
 

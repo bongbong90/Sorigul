@@ -753,3 +753,19 @@ def test_checkpoint_publication_failure_keeps_crash_guard_pending(setup):
     with pytest.raises(PipelineError) as exc:
         run(setup)
     assert exc.value.code == "PRIOR_EXECUTION_UNRESOLVED"
+
+
+def test_reissued_proxy_token_on_runtime_reads_is_not_a_binding_change(setup):
+    # Live #60 run: runtimes.get returns a fresh short-lived proxy token, and
+    # pinning it as identity aborted the job as REMOTE_STATE_UNCERTAIN.
+    base, reads = setup.runtime.runtime, []
+    def reissuing():
+        payload = base()
+        reads.append(1)
+        if len(reads) > 2:  # fixture create + first bound read keep the installed token
+            payload["connectionInfo"]["token"] = f"reissued-{len(reads)}"
+        return payload
+    setup.runtime.runtime = reissuing
+    result = run(setup, setup.pipeline((300.0, 12.0)))
+    assert result.text == "한국어 조각 0\n한국어 조각 1"
+    assert len(reads) > 3
