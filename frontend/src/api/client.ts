@@ -55,8 +55,14 @@ export interface NormalizationPreview {
   warnings: string[]
   conflicts: string[]
   can_apply: boolean
-  // NORMALIZED | UNCHANGED | MISMATCH | INVALID_TARGET | CONFLICT
+  // NORMALIZED | UNCHANGED | MISMATCH | WEEK_MISMATCH | INVALID_TARGET | CONFLICT
   result_type: string
+  // The manually entered week the preview was computed against (#180).
+  manual_week: string | null
+  // MISMATCH/WEEK_MISMATCH: the backend-allocated target for an explicit
+  // "rename to typed course + subject + manual week" choice; null when no
+  // free lesson exists.
+  typed_target_name: string | null
 }
 
 export interface FileMetadata {
@@ -83,6 +89,11 @@ export interface JobModel {
   engine: string
   force_retranscribe: boolean
   upload_to_drive: boolean
+  drive_destination?: {
+    version: 1
+    parent: DriveParentFolder | null
+    exam_root: string
+  } | null
   total_files: number
   done_files: number
   failed_files: number
@@ -119,6 +130,11 @@ export interface FolderScanResult {
   counts: Record<FolderFilter, number>
 }
 
+export interface FolderRevision {
+  revision: string
+  file_count: number
+}
+
 export interface TextContent {
   filename: string
   text: string
@@ -146,6 +162,27 @@ export interface RuntimeSettings {
   // per-run CreateJobRequest field, never a persisted setting (D23A).
   subject_stage_overrides: Record<string, '1차' | '2차'>
   drive_exam_root: string
+  drive_parent?: DriveParentFolder | null
+}
+
+export interface DriveParentFolder {
+  folder_id: string
+  account_id: string
+  display_path: string
+}
+
+export interface DriveFolderEntry {
+  folder_id: string
+  name: string
+  can_select: boolean
+}
+
+export interface DriveFolderPage {
+  account_id: string
+  folder: DriveFolderEntry
+  breadcrumbs: Array<{ folder_id: string; name: string }>
+  children: DriveFolderEntry[]
+  next_page_token: string | null
 }
 
 export interface ShutdownState {
@@ -282,17 +319,18 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 }
 
 export const api = {
+  localRuntimeStatus: (signal?: AbortSignal) => request<{ available: boolean; code: string | null; message: string }>('/runtime/local/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   health: (signal?: AbortSignal) => request<{ status: 'ok' }>('/health', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  normalize: (folder: string, filename: string, course: string, subject: string) =>
+  normalize: (folder: string, filename: string, course: string, subject: string, week: number) =>
     request<NormalizationPreview>('/normalize/preview', {
-      method: 'POST', body: JSON.stringify({ folder, filename, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filename, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
-  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string) =>
+  normalizeBatch: (folder: string, filenames: string[], course: string, subject: string, week: number) =>
     request<NormalizationPreview[]>('/normalize/batch', {
-      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+      method: 'POST', body: JSON.stringify({ folder, filenames, course, subject, week }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
     }),
   rename: (folder: string, oldStem: string, newStem: string) =>
     request<{ status: string; old_file_id: string; new_file_id: string }>('/rename', {
@@ -310,9 +348,13 @@ export const api = {
     upload_to_drive?: boolean
     course: string
     subject: string
+    week: number
     stage?: '1차' | '2차'
     file_resolutions?: Record<string, 'CONTINUE_ORIGINAL'>
   }) => request<JobModel>('/jobs', { method: 'POST', body: JSON.stringify(payload), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
+  // Authoritative single-run owner (#126): the Job whose runner has not yet
+  // returned, across every folder and engine; null when idle.
+  activeJob: (signal?: AbortSignal) => request<JobModel | null>('/execution/active-job', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   startJob: (jobId: string) => request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   actionJob: (jobId: string, action: 'stop' | 'cancel' | 'retry') =>
     request<JobModel>(`/jobs/${encodeURIComponent(jobId)}/action`, {
@@ -324,19 +366,36 @@ export const api = {
       { method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE },
     ),
   driveStatus: (signal?: AbortSignal) => request<{ auth_state: DriveAuthState; scope: string }>('/drive/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
+  driveFolders: (folderId = 'root', accountId?: string, pageToken?: string, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ folder_id: folderId })
+    if (accountId) query.set('account_id', accountId)
+    if (pageToken) query.set('page_token', pageToken)
+    return request<DriveFolderPage>(`/drive/folders?${query}`, { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE })
+  },
+  selectDriveDestination: (folderId: string, accountId: string) => request<RuntimeSettings>('/drive/destination', {
+    method: 'PUT', body: JSON.stringify({ folder_id: folderId, account_id: accountId }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
+  }),
+  resetDriveDestination: () => request<RuntimeSettings>('/drive/destination', {
+    method: 'DELETE', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  }),
   startDriveAuth: () => request<{ state: string; authorization_url: string; scope: string }>('/drive/auth/start', {
     method: 'POST', timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
   completeDriveAuth: (code: string) => request<{ auth_state: DriveAuthState }>('/drive/auth/complete', {
     method: 'POST', body: JSON.stringify({ code }), timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE,
   }),
-  folders: (folder: string, filter: FolderFilter) => request<FolderScanResult>('/folders/scan', {
-    method: 'POST', body: JSON.stringify({ folder, filter }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  folders: (folder: string, filter: FolderFilter, signal?: AbortSignal) => request<FolderScanResult>('/folders/scan', {
+    method: 'POST', body: JSON.stringify({ folder, filter }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
-  textPreview: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`),
-  fullText: (scanId: string, itemId: string) =>
-    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`),
+  // #111 live-change probe: opaque top-level metadata revision of the one
+  // selected folder. Read-only; callers refresh via scan/folders on change.
+  folderRevision: (folder: string, signal?: AbortSignal) => request<FolderRevision>('/folders/revision', {
+    method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL,
+  }),
+  textPreview: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/preview`, { signal }),
+  fullText: (scanId: string, itemId: string, signal?: AbortSignal) =>
+    request<TextContent>(`/folders/${encodeURIComponent(scanId)}/items/${encodeURIComponent(itemId)}/text`, { signal }),
   openFolderIntent: (scanId: string, itemId?: string) => {
     const query = itemId ? `?item_id=${encodeURIComponent(itemId)}` : ''
     return request<{ action: 'OPEN_FOLDER'; folder: string; item_filename?: string }>(
@@ -347,7 +406,8 @@ export const api = {
   events: (signal?: AbortSignal) => request<StructuredEvent[]>('/events', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   settings: (signal?: AbortSignal) => request<RuntimeSettings>('/settings', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   saveSettings: (settings: RuntimeSettings, signal?: AbortSignal) => request<RuntimeSettings>('/settings', {
-    method: 'PUT', body: JSON.stringify(settings), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+    // Validated Drive identity is writable only through its confirmation API.
+    method: 'PUT', body: JSON.stringify(Object.fromEntries(Object.entries(settings).filter(([key]) => key !== 'drive_parent'))), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
   }),
   startColabRendezvous: (signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/start', { method: 'POST', signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),
   pollColabRendezvous: (requestId: string, signal?: AbortSignal) => request<RendezvousState>('/colab/rendezvous/' + encodeURIComponent(requestId), { signal, timeoutMs: REQUEST_TIMEOUT_MS.LONG_EXTERNAL_BRIDGE }),

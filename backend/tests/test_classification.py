@@ -17,6 +17,7 @@ from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatc
         ("부동산학개론", "1차"),
         ("민법", "1차"),
         ("공인중개사법", "2차"),
+        ("중개사법", "2차"),
         ("부동산공법", "2차"),
         ("부동산공시법", "2차"),
         ("부동산세법", "2차"),

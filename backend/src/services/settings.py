@@ -1,4 +1,5 @@
 import json
+import threading
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from src.domain.models import DriveParentFolder
 
 
 class CloseBehavior(str, Enum):
@@ -47,7 +49,9 @@ class RuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
-    close_behavior: CloseBehavior = CloseBehavior.TRAY
+    # #195: new/missing settings exit when idle; saved tray/exit values are
+    # loaded unchanged. Never migrate a saved tray value of unknown origin.
+    close_behavior: CloseBehavior = CloseBehavior.EXIT
     shutdown: ShutdownMode = ShutdownMode.DISABLED
     transcription_folder: Optional[str] = None
     last_course: Optional[str] = None
@@ -55,6 +59,7 @@ class RuntimeSettings(BaseModel):
     last_engine: Literal["local_whisper", "direct_colab"] = "local_whisper"
     subject_stage_overrides: StageOverrides = Field(default_factory=dict)
     drive_exam_root: str = "2026 제37회 공인중개사 자격시험"
+    drive_parent: Optional[DriveParentFolder] = None
 
 
 class SettingsPatch(BaseModel):
@@ -89,15 +94,26 @@ class SettingsPatch(BaseModel):
 class SettingsManager:
     def __init__(self, storage_path: Path):
         self.storage_path = storage_path
+        self._lock = threading.RLock()
         self._settings = self._load()
 
     def get(self) -> RuntimeSettings:
-        return self._settings.model_copy(deep=True)
+        with self._lock:
+            return self._settings.model_copy(deep=True)
 
     def update(self, patch: SettingsPatch) -> RuntimeSettings:
-        payload = self._settings.model_dump(mode="json")
-        payload.update(patch.model_dump(mode="json", exclude_unset=True))
-        candidate = RuntimeSettings.model_validate(payload)
+        with self._lock:
+            payload = self._settings.model_dump(mode="json")
+            payload.update(patch.model_dump(mode="json", exclude_unset=True))
+            return self._commit(RuntimeSettings.model_validate(payload))
+
+    def set_drive_parent(self, parent: Optional[DriveParentFolder]) -> RuntimeSettings:
+        # Only the Drive destination API calls this after remote validation.
+        # Ordinary settings patches cannot forge or overwrite this identity.
+        with self._lock:
+            return self._commit(self._settings.model_copy(update={"drive_parent": parent}))
+
+    def _commit(self, candidate: RuntimeSettings) -> RuntimeSettings:
         self._save(candidate)
         self._settings = candidate
         return self.get()
@@ -105,10 +121,15 @@ class SettingsManager:
     def _load(self) -> RuntimeSettings:
         if not self.storage_path.exists():
             return RuntimeSettings()
+        payload = None
         try:
             payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
             return RuntimeSettings.model_validate(payload)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError, TypeError):
+            if isinstance(payload, dict) and payload.get("drive_parent") is not None:
+                # A stored selection must never become root because validation
+                # of that selection (or another field) failed. Preserve bytes.
+                raise RuntimeError("저장된 Google Drive 위치가 포함된 설정을 읽을 수 없습니다. 원본 설정을 보존했습니다.") from None
             self._quarantine()
             return RuntimeSettings()
 

@@ -61,10 +61,10 @@ The frontend's existing offline/reconnect UX (`TranscriptionPage`/`SettingsPage`
 
 ## Process cleanup / orphan prevention / port handling
 
-Cleanup runs from exactly one place -- `RunEvent::ExitRequested` in `lib.rs::run()` -- reached by every legitimate exit path (tray "종료", or the last window closing with `close_behavior = exit`), so cleanup logic isn't duplicated or racy across handlers. `SidecarManager::cleanup()`:
+Cleanup runs from exactly one place -- `RunEvent::ExitRequested` in `lib.rs::run()` -- reached by every legitimate exit path (a confirmed-idle tray "종료" or `close_behavior = exit` window close), so cleanup logic isn't duplicated or racy across handlers. `SidecarManager::cleanup()`:
 
 - is a no-op if nothing is owned (reused-external case), and idempotent if called after an owned process is already gone;
-- on Windows, kills the owned process **and its child tree** via `taskkill.exe /PID <pid> /T /F` (fixed executable + fixed argument list, no shell string concatenation -- same discipline as the shutdown executor) rather than a single-process `kill()`, since `uvicorn`/Python can spawn workers;
+- on Windows, kills the owned process **and its child tree** via `System32\taskkill.exe /PID <pid> /T /F` (trusted absolute path from `GetSystemDirectoryW`, never a `PATH` lookup (#122); fixed argument list; if the trusted path cannot be resolved the owned child is killed directly and the Job Object drop takes the rest of the tree; no shell string concatenation -- same discipline as the shutdown executor) rather than a single-process `kill()`, since `uvicorn`/Python can spawn workers;
 - reaps the process afterward (`child.wait()`).
 
 Port release relies on the OS reclaiming the port once the owned process (and any of its children) actually exit; Tauri itself never binds the port.
@@ -92,15 +92,26 @@ Verified with real spawned processes in `sidecar.rs` tests (not mocked): `cleanu
 - The backend already only appends `FILE_COMPLETED` / `JOB_COMPLETED` application events when `notifications.file_complete` / `notifications.job_complete` is enabled (`desktop_state.py`, unchanged) -- so "setting OFF" is enforced at the source and the hook needs no separate settings check.
 - Dedupe: on the very first poll after mount, all currently-present relevant events are recorded as "seen" without notifying (avoids a notification burst from history/a reused backend); every poll after that only notifies for event keys (`intent|job_id|timestamp|message`) not seen before.
 - Notification body is the backend's existing short Korean user message (e.g. "파일 전사 완료: {filename}") -- never a raw traceback, path, or token.
-- Requests the OS notification permission once, lazily, only the first time it actually has something to send.
-- No Python toast library was added; the OS notification call (`@tauri-apps/plugin-notification`'s `sendNotification`) happens entirely in the JS/Tauri layer.
+- No Python toast library was added.
+
+### Completion toast (Issue #110, Legacy `TrayToastWindow` parity)
+
+Each new completion event is shown in the Sorigul-owned completion toast -- the Windows equivalent of Legacy's actionable toast with **폴더 열기** / **확인**. The plugin's notification action types are mobile-only and are not used.
+
+- One reusable window, `completion-toast`, declared hidden in `tauri.conf.json` (borderless, fixed 360x172, always-on-top, `skipTaskbar`, `focusable: false` so showing it never takes focus from the user or forces the main window forward). It is never created per event.
+- The hook invokes `show_completion_toast` with `{desktop_intent, job_id, file_id, message}` only. Rust (`completion_toast.rs` state + `lib.rs` commands) replaces the single payload, places the window bottom-right of the work area of the main window's monitor (else the primary monitor) with a 16px logical margin, shows it, and auto-hides it after 7200ms. Each show gets a new generation, so a newer event replaces the content and resets the timeout; a stale timer cannot hide it.
+- The toast view (`CompletionToast.tsx`, chosen in `main.tsx` by window label) subscribes to `sorigul://completion-toast` and then reads `get_completion_toast`, so the first event cannot be lost before its listener is ready.
+- **폴더 열기** invokes `open_notification_folder(job_id)`. Rust POSTs to the fixed local `POST /api/desktop/jobs/{job_id}/open-folder-intent`; the backend resolves the folder from the stored Job (404 unknown Job, 410 folder no longer a directory), and only a validated intent reaches the fixed `<Windows>\explorer.exe` argv launch (trusted absolute path from `GetSystemWindowsDirectoryW`, #122) shared with `open_folder_by_intent`. The frontend never sees the folder path.
+- **확인** invokes `dismiss_completion_toast`. Closing the toast itself only hides it; when the main window is destroyed (`close_behavior = exit`) the toast is destroyed with it, so the last-window exit and backend cleanup still happen.
+- One surface per event: the plain OS notification (`sendNotification`, title/body only) is used only if the toast could not be shown, with a console warning marking the degraded, folder-action-less path. OS notification permission is requested lazily only for that fallback.
+- Installed validation (placement, tray/minimized display, Explorer launch, Korean paths, multi-monitor, clean exit) is tracked by #56/#63.
 
 ## Tray
 
 Built once in `lib.rs::build_tray()` during `setup()` (never re-built, so no duplicate icons): one `TrayIconBuilder` with a 2-item menu ("앱 열기" / "종료"), using the app's configured window icon.
 
 - **앱 열기**: shows and focuses the `main` window.
-- **종료**: always performs a real exit -- owned-backend cleanup, then `app.exit(0)` -- regardless of the current `close_behavior` setting (matches the contract: Quit always quits).
+- **종료** (#174): regardless of `close_behavior`, runs the same single-pending close-guard check as an `exit` X close (`request_guarded_exit` -> `spawn_close_check`). Confirmed idle exits via `app.exit(0)` -> `RunEvent::ExitRequested` cleanup; active transcription/Drive work, or a guard that cannot be read (unreachable, HTTP error, malformed, timeout), refuses the exit, keeps everything running, hides the main window and shows the #128 notice. To quit during active work, Stop/Cancel it first. The tray handler never calls `cleanup()` or `app.exit` itself.
 - **close_behavior = tray**: the window's `CloseRequested` handler calls `api.prevent_close()` and hides the window; the backend keeps running.
 - **close_behavior = exit**: the handler does not prevent the close; the run loop's `RunEvent::ExitRequested` performs cleanup as the window (and app) actually close.
 
@@ -112,7 +123,7 @@ Built once in `lib.rs::build_tray()` during `setup()` (never re-built, so no dup
 
 `shutdown.rs`:
 
-- `RealShutdownExecutor`: fixed executable (`shutdown.exe`) + fixed arguments (`/s /t 0`) only -- no string built from user/network input ever reaches the command line, matching the same `CREATE_NO_WINDOW` + argv-array discipline as the sidecar's `taskkill` call.
+- `RealShutdownExecutor`: fixed executable (`System32\shutdown.exe`, trusted absolute path, never a `PATH` lookup -- #122) + fixed arguments (`/s /t 0`) only -- no string built from user/network input ever reaches the command line, matching the same `CREATE_NO_WINDOW` + argv-array discipline as the sidecar's `taskkill` call.
 - `ShutdownGate`: an atomic "has this cycle already executed" guard. `trigger()` calls the executor at most once per cycle no matter how many times it's called (duplicate polling, a stale ready event, etc.); `reset()` (invoked via the `reset_shutdown_gate` command whenever the frontend observes the phase leave `counting_down`/`ready_to_shutdown`, e.g. on cancel) re-arms it for the next countdown.
 - `ShutdownExecutor` is a trait specifically so `cargo test` exercises the gate/idempotence logic through a `CountingExecutor` fake -- **no test ever calls the real Windows shutdown command.**
 
@@ -143,8 +154,10 @@ No path is parsed, rebuilt, or transcoded across any boundary in this work packa
 
 - `core:default` + `core:window:allow-show` / `allow-hide` / `allow-set-focus` (tray open/close-to-tray)
 - `dialog:allow-open` (folder picker only -- not the broader `dialog:default`, which also covers save/message/confirm dialogs this app never uses)
-- `opener:allow-open-url`, `opener:allow-open-path`, `opener:allow-reveal-item-in-dir` (OAuth browser handoff, folder open, file reveal -- not blanket `opener:default`)
+- `opener:allow-open-url` (OAuth browser handoff only -- not `opener:allow-open-path`, `opener:allow-reveal-item-in-dir` or blanket `opener:default`; folder open/reveal goes through the Rust `open_folder_by_intent` / `open_notification_folder` commands after backend validation)
 - `notification:default` (the plugin's own scope; nothing broader)
+
+`capabilities/completion-toast.json` applies only to the `completion-toast` window and grants exactly `core:event:allow-listen` / `core:event:allow-unlisten`.
 
 No shell/process-execution permission exists in any capability file (the shell plugin isn't even a dependency -- see Tauri version above). No filesystem-scope permission (`fs:*`) is granted at all; the app never reads/writes files through Tauri's FS layer -- all filesystem access stays in the Python backend, exactly as before.
 

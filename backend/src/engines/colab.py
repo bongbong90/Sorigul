@@ -26,6 +26,8 @@ from src.services.colab_security import EMPTY_SHA256, PairingSession
 
 
 CHUNK_SECONDS = 300
+COLAB_RUNTIME_ENGINE = "faster-whisper"
+COLAB_RUNTIME_MODEL = "large-v3"
 FATAL_TRANSCRIBE_HTTP_STATUSES = frozenset({401, 403, 404, 405})
 # Hard ceiling for a single ffmpeg invocation while preparing Colab audio.
 FFMPEG_SPLIT_TIMEOUT_SECONDS = 300
@@ -197,6 +199,18 @@ class FFmpegAudioSplitter:
             clock=self._clock,
         )
 
+    @staticmethod
+    def _has_audio(path: Path) -> bool:
+        size = path.stat().st_size
+        if size >= 2048:
+            return True
+        # A small file can contain real audio, or only ID3 headers when
+        # source duration includes encoder padding past a chunk boundary.
+        # Keep short decodable MP3s, never send a header-only tail to Whisper.
+        from src.services.audio_metadata import AudioMetadataService
+        duration = AudioMetadataService().duration_seconds(path) if size else None
+        return duration is not None and duration > 0
+
     def split(
         self,
         source_path: Path,
@@ -237,7 +251,7 @@ class FFmpegAudioSplitter:
                     token.raise_if_requested()
                 start = index * chunk_seconds
                 chunk_duration = min(chunk_seconds, max(0.0, duration - start))
-                if chunk_duration < 1.0:
+                if chunk_duration <= 0.0:
                     continue
                 path = self._temp_dir / f"chunk-{index:05d}.mp3"
                 command = [
@@ -258,7 +272,9 @@ class FFmpegAudioSplitter:
                     str(path),
                 ]
                 self._run(command, token)
-                if path.stat().st_size < 2048:
+                # Short MP3s (including the tail after a 300s boundary) can
+                # be smaller than 2 KiB and still contain valid speech.
+                if not self._has_audio(path):
                     path.unlink(missing_ok=True)
                     continue
                 chunks.append(AudioChunk(index, path, float(start), chunk_duration))
@@ -299,7 +315,7 @@ class FFmpegAudioSplitter:
             self._run(command, token)
 
             for path in sorted(self._temp_dir.glob("chunk-*.mp3")):
-                if path.stat().st_size < 2048:
+                if not self._has_audio(path):
                     path.unlink(missing_ok=True)
                     continue
 
@@ -366,7 +382,10 @@ class DirectColabHttpClient:
             )
         self.auth_context = auth_context
         self.timeout_seconds = timeout_seconds
-        self.signature = f"direct-colab:{self.base_url}:{auth_context.fingerprint}:v2"
+        self.signature = (
+            f"direct-colab:{COLAB_RUNTIME_ENGINE}:{COLAB_RUNTIME_MODEL}:"
+            f"{self.base_url}:{auth_context.fingerprint}:v3"
+        )
 
     def check_health(self):
         request = urllib.request.Request(
@@ -378,6 +397,7 @@ class DirectColabHttpClient:
             with urllib.request.urlopen(request, timeout=30) as response:
                 if not 200 <= response.status < 300:
                     raise OSError(f"HTTP {response.status}")
+                body = response.read()
         except Exception as exc:
             raise EngineError(
                 "COLAB_UNAVAILABLE",
@@ -387,6 +407,31 @@ class DirectColabHttpClient:
                 retryable=False,
                 fatal=True,
             ) from exc
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise EngineError(
+                "COLAB_RUNTIME_INCOMPATIBLE",
+                ErrorCategory.CONFIGURATION,
+                "호환되는 Sorigul Colab 런타임이 아닙니다.",
+                technical_detail=f"invalid health response: {exc}",
+                retryable=False,
+                fatal=True,
+            ) from exc
+        expected = {
+            "status": "ok",
+            "engine": COLAB_RUNTIME_ENGINE,
+            "model": COLAB_RUNTIME_MODEL,
+        }
+        if not isinstance(payload, dict) or any(payload.get(key) != value for key, value in expected.items()):
+            raise EngineError(
+                "COLAB_RUNTIME_INCOMPATIBLE",
+                ErrorCategory.CONFIGURATION,
+                "호환되는 Sorigul Colab 런타임이 아닙니다.",
+                technical_detail=f"expected {expected!r}, received {payload!r}",
+                retryable=False,
+                fatal=True,
+            )
 
     def transcribe(self, chunk_path: Path) -> TranscriptionResult:
         boundary = f"----Sorigul{uuid.uuid4().hex}"

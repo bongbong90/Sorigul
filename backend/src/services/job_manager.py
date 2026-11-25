@@ -6,7 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 from pydantic import ValidationError
-from src.domain.models import FileMetadata, JobModel, FileStatus, JobEvent
+from src.domain.models import DriveDestination, FileMetadata, JobModel, FileStatus, JobEvent
 
 
 class JobStorageError(RuntimeError):
@@ -144,6 +144,7 @@ class JobManager:
         subject: Optional[str] = None,
         stage: Optional[str] = None,
         file_metadata: Optional[Dict[str, FileMetadata]] = None,
+        drive_destination: Optional[DriveDestination] = None,
     ) -> JobModel:
         job_id = str(uuid.uuid4())
         job = JobModel(
@@ -154,6 +155,7 @@ class JobManager:
             engine_config=engine_config or {},
             force_retranscribe=force_retranscribe,
             upload_to_drive=upload_to_drive,
+            drive_destination=drive_destination if drive_destination is not None else DriveDestination(),
             total_files=len(file_ids),
             done_files=0,
             failed_files=0,

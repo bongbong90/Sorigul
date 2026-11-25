@@ -1,4 +1,5 @@
 import json
+import json
 import os
 import urllib.error
 from pathlib import Path
@@ -24,6 +25,17 @@ from src.engines.colab import (
 from src.services.job_manager import JobManager
 from src.services.transcription_runner import TranscriptionRunner
 from src.services.colab_security import PairingRegistry
+
+
+HEALTH_PAYLOAD = json.dumps(
+    {
+        "status": "ok",
+        "engine": "faster-whisper",
+        "model": "large-v3",
+        "device": "cpu",
+        "compute_type": "int8",
+    }
+).encode("utf-8")
 
 
 def paired_session(base_url="https://example.invalid"):
@@ -343,7 +355,7 @@ def run_two_file_http_job(tmp_path, monkeypatch, transcribe_outcomes):
 
     def urlopen(request, **_kwargs):
         if request.full_url.endswith("/health"):
-            return FakeHttpResponse()
+            return FakeHttpResponse(HEALTH_PAYLOAD)
         transcribe_calls.append(request.full_url)
         outcome = next(outcomes)
         if isinstance(outcome, Exception):
@@ -461,6 +473,8 @@ def test_http_client_url_construction(monkeypatch):
     calls = []
     def mock_urlopen(req, **kwargs):
         calls.append(req.full_url)
+        if req.full_url.endswith('/health'):
+            return FakeHttpResponse(HEALTH_PAYLOAD)
         return FakeHttpResponse()
 
     monkeypatch.setattr('urllib.request.urlopen', mock_urlopen)
@@ -485,6 +499,45 @@ def test_http_client_url_construction(monkeypatch):
         assert calls[-1] == 'https://example.test/transcribe'
     finally:
         path.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    ({"engine": "openai-whisper"}, {"model": "medium"}),
+    ids=("wrong-engine", "wrong-model"),
+)
+def test_http_client_rejects_incompatible_runtime_identity(monkeypatch, overrides):
+    payload = json.loads(HEALTH_PAYLOAD)
+    payload.update(overrides)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: FakeHttpResponse(json.dumps(payload).encode("utf-8")),
+    )
+    client = DirectColabHttpClient(
+        "https://example.test", paired_session("https://example.test")
+    )
+
+    with pytest.raises(EngineError) as caught:
+        client.check_health()
+
+    assert caught.value.code == "COLAB_RUNTIME_INCOMPATIBLE"
+    assert caught.value.category == ErrorCategory.CONFIGURATION
+    assert caught.value.retryable is False
+    assert caught.value.fatal is True
+
+
+def test_http_client_accepts_canonical_runtime_identity(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: FakeHttpResponse(HEALTH_PAYLOAD),
+    )
+    client = DirectColabHttpClient(
+        "https://example.test", paired_session("https://example.test")
+    )
+
+    client.check_health()
+
+    assert "faster-whisper:large-v3" in client.signature
 
 def test_ffmpeg_splitter_fallback_on_duration_none(tmp_path, monkeypatch):
     import shutil

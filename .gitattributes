@@ -6,3 +6,5 @@
 *.css text eol=lf
 *.py text eol=lf
 *.ps1 text eol=crlf
+# Tauri emits this manifest as LF; keep frozen Windows checkout bytes stable.
+frontend/src-tauri/Cargo.toml text eol=lf
