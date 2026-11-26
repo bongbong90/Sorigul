@@ -116,6 +116,10 @@ def _sorigul_worker(params):
             except OSError:
                 libs[name] = False
         facts["libs"] = libs
+        try:
+            facts["cuda_lib_files"] = cuda_lib_files()
+        except Exception:
+            facts["cuda_lib_files"] = None
         for module in ("av", "numpy", "torch"):
             try:
                 facts[module] = clean(importlib.metadata.version(module))
@@ -129,9 +133,96 @@ def _sorigul_worker(params):
             facts["torch_error"] = clean(type(exc).__name__)
         return facts
 
+    def cuda_lib_files():
+        # Names only of CUDA runtime/cuBLAS/cuDNN files present on this image.
+        import glob
+        import site
+        roots = ["/usr/local/cuda*/lib64", "/usr/local/cuda*/targets/*/lib",
+                 "/usr/lib/x86_64-linux-gnu", "/usr/lib64-nvidia"]
+        try:
+            roots += [p + "/nvidia/*/lib" for p in site.getsitepackages()]
+        except Exception:
+            pass
+        found = set()
+        for root in roots:
+            for pattern in ("libcublas*.so*", "libcudart.so*", "libcudnn.so*"):
+                for path in glob.glob(root + "/" + pattern):
+                    parts = path.split("/")
+                    found.add(clean(parts[-3] + "/" + parts[-1] if "nvidia" in parts else parts[-1]))
+        return sorted(found)[:32]
+
+    def preload_cuda12():
+        # ctranslate2 4.6.0 (CUDA 12 build) dlopens cuBLAS 12 lazily at the first
+        # GPU compute. Colab images may ship CUDA 13 only (live run 6: torch
+        # cu130, libcublas.so.12 not on the loader path). Preload an existing
+        # CUDA 12 copy if one is present. No install, no package change.
+        import ctypes
+        import glob
+        import site
+        dirs = sorted(glob.glob("/usr/local/cuda-12*/lib64")) + ["/usr/local/cuda/lib64"]
+        try:
+            dirs += [p + "/nvidia/" + sub_dir + "/lib" for p in site.getsitepackages()
+                     for sub_dir in ("cuda_runtime", "cublas")]
+        except Exception:
+            pass
+        for name in ("libcudart.so.12", "libcublasLt.so.12", "libcublas.so.12"):
+            try:
+                ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)
+                continue
+            except OSError:
+                pass
+            for directory in dirs:
+                try:
+                    ctypes.CDLL(directory + "/" + name, mode=ctypes.RTLD_GLOBAL)
+                    break
+                except OSError:
+                    continue
+
     def diagnose(stage, cause):
         return {"stage": stage, "exception": clean(type(cause).__name__) if cause else None,
                 "message": clean(cause) if cause else None, "runtime": probe()}
+
+    def decode_audio(handle):
+        # faster-whisper 1.2.1 decode_audio(), minus av.open(metadata_errors=...),
+        # which PyAV >= 15 rejects (Colab ships av 19: live run 6, #60).
+        # Same s16 mono 16 kHz resample, invalid-frame skip and grouping.
+        import gc
+        import io
+        import itertools
+        import av
+        import numpy as np
+        resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=16000)
+        raw, dtype = io.BytesIO(), None
+
+        def valid(frames):
+            iterator = iter(frames)
+            while True:
+                try:
+                    yield next(iterator)
+                except StopIteration:
+                    break
+                except av.error.InvalidDataError:
+                    continue
+
+        def grouped(frames, num_samples=500000):
+            fifo = av.audio.fifo.AudioFifo()
+            for frame in frames:
+                frame.pts = None
+                fifo.write(frame)
+                if fifo.samples >= num_samples:
+                    yield fifo.read()
+            if fifo.samples > 0:
+                yield fifo.read()
+
+        with av.open(handle, mode="r") as container:
+            for frame in itertools.chain(grouped(valid(container.decode(audio=0))), [None]):
+                for out in resampler.resample(frame):
+                    array = out.to_ndarray()
+                    dtype = array.dtype
+                    raw.write(array)
+        del resampler
+        gc.collect()
+        return np.frombuffer(raw.getbuffer(), dtype=dtype).astype(np.float32) / 32768.0
 
     run, execution, index = params["run_id"], params["execution_id"], params["index"]
     if (not re.fullmatch(r"[0-9a-f]{32}", run)
@@ -197,6 +288,11 @@ def _sorigul_worker(params):
                     has_cuda = False
                     envelope["gpu_error"] = "CUDA_FAILED"
                 device = "cuda" if has_cuda else "cpu"
+                if has_cuda:
+                    try:
+                        preload_cuda12()
+                    except Exception:
+                        pass  # the decode itself reports any missing library
                 if params.get("require_cuda") and not has_cuda:
                     raise Failure("GPU_UNAVAILABLE") from None
                 compute = "float16" if has_cuda else "int8"
@@ -224,9 +320,7 @@ def _sorigul_worker(params):
                 failed = "CUDA_FAILED" if device == "cuda" else "KERNEL_EXECUTION_FAILED"
                 stage = "audio_decode"
                 try:
-                    # transcribe() decodes a file object exactly like this.
-                    from faster_whisper import decode_audio
-                    audio = decode_audio(handle, sampling_rate=16000)
+                    audio = decode_audio(handle)
                 except Exception as exc:
                     raise Failure("KERNEL_EXECUTION_FAILED", stage, exc) from None
                 try:

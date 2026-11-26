@@ -154,8 +154,8 @@ def sanitize_diagnostic(value, secrets=()):
                         and type(v) is bool for k, v in item.items()):
                     raise ValueError("RESULT_INVALID")
                 clean_runtime[key] = dict(item)
-            elif key == "cuda_compute_types":
-                if not isinstance(item, list) or len(item) > 16:
+            elif isinstance(item, list):
+                if len(item) > 32:
                     raise ValueError("RESULT_INVALID")
                 clean_runtime[key] = [_diag_text(t, secrets) for t in item]
             elif item is None or type(item) is int or type(item) is bool:

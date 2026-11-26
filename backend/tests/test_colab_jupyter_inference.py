@@ -60,12 +60,61 @@ def ml(monkeypatch):
         state.downloads.append((repository, kwargs))
         return "fixed-model-cache"
     monkeypatch.setattr(importlib.metadata, "version", lambda p: PACKAGES[p])
-    def decode_audio(handle, sampling_rate):
-        assert sampling_rate == 16000
-        if state.audio_fail:
-            raise ValueError("Invalid data found when processing input " + TOKEN)
-        return handle.read()  # stands in for the decoded waveform
-    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model, decode_audio=decode_audio))
+    import numpy as np
+
+    class Frame:  # PyAV-shaped stand-ins: s16 mono samples
+        def __init__(self, samples):
+            self.samples, self.pts = samples, 0
+
+        def to_ndarray(self):
+            return np.asarray([self.samples], dtype=np.int16)
+
+    class Fifo:
+        def __init__(self):
+            self.buffer = []
+
+        @property
+        def samples(self):
+            return len(self.buffer)
+
+        def write(self, frame):
+            self.buffer += frame.samples
+
+        def read(self):
+            frame, self.buffer = Frame(self.buffer), []
+            return frame
+
+    class Resampler:
+        def __init__(self, format, layout, rate):
+            assert (format, layout, rate) == ("s16", "mono", 16000)
+
+        def resample(self, frame):
+            return [] if frame is None else [frame]
+
+    class Container:
+        def __init__(self, handle, mode):
+            assert mode == "r"
+            if state.audio_fail:
+                raise ValueError("Invalid data found when processing input " + TOKEN)
+            self.data = handle.read()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def decode(self, audio):
+            yield Frame([int(b) * 64 for b in self.data[:256]])
+
+    class InvalidDataError(Exception):
+        pass
+
+    av = SimpleNamespace(open=Container, error=SimpleNamespace(InvalidDataError=InvalidDataError),
+                         audio=SimpleNamespace(resampler=SimpleNamespace(AudioResampler=Resampler),
+                                               fifo=SimpleNamespace(AudioFifo=Fifo)))
+    monkeypatch.setitem(sys.modules, "av", av)
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: state.cuda))
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
     return state
