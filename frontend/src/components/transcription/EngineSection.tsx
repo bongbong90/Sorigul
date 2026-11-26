@@ -45,8 +45,8 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
       await api.confirmOfficialColabCost()
       setCostChecked(false)
       await refreshOfficialStatus()
-    } catch (error) {
-      setCostError(getUserMessage(error))
+    } catch (failure) {
+      setCostError(getUserMessage(failure))
     } finally {
       setCostBusy(false)
     }
