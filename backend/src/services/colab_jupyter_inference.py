@@ -508,10 +508,14 @@ class ColabJupyterInference:
         try:
             if (not isinstance(model, dict) or model.get("path") != self._output_path
                     or model.get("type") != "file" or model.get("format") != "base64"
-                    or not isinstance(model.get("content"), str)
-                    or len(model["content"]) > 4 * ((MAX_RESULT_BYTES + 2) // 3)):
+                    or not isinstance(model.get("content"), str)):
                 raise ValueError
-            raw = base64.b64decode(model["content"], validate=True)
+            # Jupyter Server serves file content via base64.encodebytes (a "\n"
+            # every 76 chars). Accept exactly that line wrapping, nothing else.
+            content = model["content"].replace("\n", "")
+            if len(content) > 4 * ((MAX_RESULT_BYTES + 2) // 3):
+                raise ValueError
+            raw = base64.b64decode(content, validate=True)
             if len(raw) > MAX_RESULT_BYTES:
                 raise ValueError
             value = _loads(raw.decode("utf-8"))

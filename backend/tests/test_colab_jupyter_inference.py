@@ -172,8 +172,9 @@ class Server:
             raw = path.read_bytes()
             if self.mutate:
                 raw = self.mutate(raw)
+            # Real Jupyter Server uses encodebytes: newline-wrapped every 76 chars.
             return 200, {"path": name, "type": "file", "format": "base64",
-                         "content": base64.b64encode(raw).decode()}
+                         "content": base64.encodebytes(raw).decode("ascii")}
         if not self.hash_supported and "hash=1" in query:
             return 400, None
         import hashlib
