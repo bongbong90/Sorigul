@@ -49,6 +49,25 @@ class PipelineCleanup:
                 or bool(self.inference and self.inference.cleanup_required)
                 or bool(self.uploads and self.uploads.cleanup_required))
 
+    @property
+    def runtime_files_only(self):
+        """True when the only residue is owned temp files on the owned Runtime.
+
+        Local work (splitter, cache, lease, checkpoint) and the kernel are clean,
+        so deleting that Runtime (close_session, tracked by the ownership store)
+        removes everything left. Anything else stays a hard CLEANUP_REQUIRED.
+        """
+        if (not self.cleanup_required or self.splitter_failed or self.cache_failed
+                or self.inference_failed or self.uploads_failed or self.lease_failed
+                or self.checkpoint_failed):
+            return False
+        # Upload cleanup is files-only by contract (CleanupReport), so any
+        # upload residue is files on the owned Runtime.
+        inference = self.inference
+        return not (inference is not None and inference.cleanup_required and (
+            inference.error_code is not InferenceCode.FILE_CLEANUP_FAILED
+            or inference.kernel.cleanup_required))
+
 
 @dataclass(frozen=True)
 class PipelineReport:
@@ -401,12 +420,21 @@ class ColabFullFilePipeline:
                     if report.status == "STATE_UNCERTAIN":
                         signals.add("REMOTE_STATE_UNCERTAIN")
                     raise InferenceError(report.error_code or InferenceCode.STATE_UNCERTAIN)
-                if not report.cleanup.files_deleted or not report.cleanup.kernel_retained:
+                # On file residue the adapter closes its kernel on purpose; only a
+                # confirmed kernel delete lets the verified result through.
+                residue = not report.cleanup.files_deleted
+                if not report.cleanup.kernel_retained and not (
+                        residue and not report.cleanup.kernel.cleanup_required):
                     raise PipelineError("INFERENCE_CLEANUP_REQUIRED", "CLEANUP_REQUIRED")
                 if report.gpu_error:
                     signals.add("GPU_CPU_PATH")
+                # Persist the verified chunk before judging remote file cleanup,
+                # so a leftover temp file never costs a validated transcript.
                 completed[chunk.index] = self._validate_result(report.result, chunk)
                 self.cache.save(source, signature, completed)
+                if residue and len(completed) < len(chunks):
+                    # The next chunk reuses this execution's output dir.
+                    raise PipelineError("INFERENCE_CLEANUP_REQUIRED", "CLEANUP_REQUIRED")
                 if len(completed) < len(chunks):
                     progress_callback(len(completed) / len(chunks))
             token.raise_if_requested()
@@ -447,7 +475,12 @@ class ColabFullFilePipeline:
                 state = "CANCELLED" if token.is_cancel_requested else "STOPPED"
             preliminary = PipelineCleanup(inference_cleanup, uploads_cleanup, splitter_failed,
                                           False, inference_failed, uploads_failed)
-            if state == "COMPLETED" and preliminary.cleanup_required:
+            # A COMPLETED run whose only residue is temp files on the owned Runtime
+            # is delivered; close_session deletes that Runtime and the ownership
+            # store blocks every launch until it is CLEANED.
+            deferred = (state == "COMPLETED" and preliminary.runtime_files_only
+                        and "REMOTE_STATE_UNCERTAIN" not in signals)
+            if state == "COMPLETED" and preliminary.cleanup_required and not deferred:
                 clear_cache = False  # preserve verified results for an explicit FAILED retry
             if source is not None and checkpoint_started and (clear_cache or requested()):
                 try:
@@ -457,18 +490,24 @@ class ColabFullFilePipeline:
                     cache_failed = True
             cleanup = PipelineCleanup(inference_cleanup, uploads_cleanup, splitter_failed, cache_failed,
                                       inference_failed, uploads_failed)
+            deferred = deferred and cleanup.runtime_files_only
             if checkpoint_started:
-                checkpoint_status = ("CLEANUP_REQUIRED" if cleanup.cleanup_required else
+                checkpoint_status = ("COMPLETED" if deferred else
+                                     "CLEANUP_REQUIRED" if cleanup.cleanup_required else
                                      "STATE_UNCERTAIN" if "REMOTE_STATE_UNCERTAIN" in signals else state)
                 try:
                     self._checkpoint(checkpoint, execution_id, checkpoint_status)
                 except Exception:
                     cleanup = replace(cleanup, checkpoint_failed=True)
-            if cleanup.cleanup_required:
+                    deferred = False
+            if deferred:
+                signals.add("REMOTE_FILES_PENDING_RUNTIME_DELETE")
+            elif cleanup.cleanup_required:
                 signals.add("CLEANUP_REQUIRED")
                 if state == "COMPLETED":
                     state = "FAILED"
-            code = getattr(error, "code", None) or ("CLEANUP_REQUIRED" if cleanup.cleanup_required else None)
+            code = getattr(error, "code", None) or (
+                "CLEANUP_REQUIRED" if cleanup.cleanup_required and not deferred else None)
             self.last_report = PipelineReport(state, code.value if hasattr(code, "value") else code,
                                               tuple(sorted(signals)), tuple(sorted(completed)), used_cache, cleanup)
             try:
@@ -480,7 +519,8 @@ class ColabFullFilePipeline:
                     signals=tuple(sorted(signals | {"CLEANUP_REQUIRED"})))
             finally:
                 self._lock.release()
-        if self.last_report.cleanup.cleanup_required:
+        if self.last_report.cleanup.cleanup_required and not (
+                deferred and self.last_report.status == "COMPLETED" and self.last_report.cleanup.runtime_files_only):
             raise PipelineError("CLEANUP_REQUIRED", "CLEANUP_REQUIRED", report=self.last_report) from None
         if error is not None:
             if isinstance(error, (StopRequested, CancelRequested)):

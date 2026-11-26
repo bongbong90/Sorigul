@@ -701,6 +701,8 @@ def test_uploaded_chunk_must_match_hashed_split_plan_before_decode(setup):
 
 
 def test_input_upload_cleanup_failure_separate_from_successful_kernel_cleanup(setup):
+    # Uploaded chunks left on the owned Runtime are removed by deleting that
+    # Runtime (close_session); the verified transcript is still delivered.
     original = setup.server.http
     def refuse_delete(method, url, headers, body, timeout):
         if method == "DELETE" and url.endswith(".mp3"):
@@ -708,12 +710,39 @@ def test_input_upload_cleanup_failure_separate_from_successful_kernel_cleanup(se
         return original(method, url, headers, body, timeout)
     pipeline, progress = setup.pipeline(), []
     pipeline._http = refuse_delete
-    with pytest.raises(PipelineError):
-        run(setup, pipeline, progress=progress.append)
-    assert pipeline.last_report.cleanup.uploads.cleanup_required
-    assert not pipeline.last_report.cleanup.inference.cleanup_required
-    assert pipeline.last_report.cleanup.uploads.failed_paths
-    assert 1.0 not in progress
+    result = run(setup, pipeline, progress=progress.append)
+    report = pipeline.last_report
+    assert result.text and report.status == "COMPLETED" and report.error_code is None
+    assert report.cleanup.uploads.cleanup_required and report.cleanup.uploads.failed_paths
+    assert not report.cleanup.inference.cleanup_required
+    assert report.cleanup.runtime_files_only
+    assert "REMOTE_FILES_PENDING_RUNTIME_DELETE" in report.signals
+    assert "CLEANUP_REQUIRED" not in report.signals and progress[-1] == 1.0
+
+
+def test_inference_file_residue_on_last_chunk_delivers_verified_result(setup):
+    setup.server.file_delete_status = 500
+    pipeline = setup.pipeline(durations=(12.0,))
+    result = run(setup, pipeline)
+    report = pipeline.last_report
+    assert result.text and report.status == "COMPLETED"
+    assert report.cleanup.inference.error_code is not None
+    assert not report.cleanup.inference.kernel.cleanup_required
+    assert report.cleanup.runtime_files_only
+    assert "REMOTE_FILES_PENDING_RUNTIME_DELETE" in report.signals
+    # The file checkpoint is COMPLETED: the same source is not locked forever.
+    setup.server.file_delete_status = 204
+    run(setup, setup.pipeline(durations=(12.0,)))
+
+
+def test_inference_file_residue_mid_file_fails_but_keeps_verified_chunk(setup):
+    setup.server.file_delete_status = 500
+    pipeline = setup.pipeline()
+    with pytest.raises(PipelineError) as exc:
+        run(setup, pipeline)
+    assert exc.value.code == "CLEANUP_REQUIRED" and pipeline.last_report.status == "FAILED"
+    assert pipeline.last_report.completed_indices == (0,)
+    assert "REMOTE_FILES_PENDING_RUNTIME_DELETE" not in pipeline.last_report.signals
 
 
 def test_splitter_cleanup_failure_is_reported_and_never_100_percent(setup):

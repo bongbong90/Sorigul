@@ -102,7 +102,12 @@ class OfficialColabJobEngine:
             token.raise_if_requested()
             result = self._pipeline.transcribe(source_path, token, event, progress)
             report = self._pipeline.last_report
-            if (report is None or report.status != "COMPLETED" or report.cleanup.cleanup_required
+            # Residue limited to temp files on the owned Runtime is removed by
+            # close_session (Runtime delete); the ownership store gates the next launch.
+            deferred = (report is not None and report.cleanup.runtime_files_only
+                        and "REMOTE_FILES_PENDING_RUNTIME_DELETE" in report.signals)
+            if (report is None or report.status != "COMPLETED"
+                    or (report.cleanup.cleanup_required and not deferred)
                     or not isinstance(result, TranscriptionResult)):
                 raise PipelineError("RESULT_NOT_CONFIRMED")
             token.raise_if_requested()
