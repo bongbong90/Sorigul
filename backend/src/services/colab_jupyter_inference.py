@@ -93,6 +93,8 @@ class InferenceReport:
     compute_type: str | None = None
     gpu_error: InferenceCode | None = None
     silence: bool = False
+    # Sanitized remote failure facts (stage / exception class / message / runtime libs).
+    diagnostic: dict | None = None
 
     @property
     def local_fallback_possible(self):
@@ -110,6 +112,58 @@ def _unique_object(pairs):
             raise ValueError("RESULT_INVALID")
         value[key] = item
     return value
+
+
+_DIAG_STAGES = {"audio_decode", "model_init", "inference_start", "inference", "result", "worker"}
+
+
+def _diag_text(value, secrets=()):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("RESULT_INVALID")
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "<redacted>")
+    value = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in value)
+    value = re.sub(r"https?://\S+", "<url>", value)
+    value = re.sub(r"[0-9a-fA-F]{24,}", "<id>", value)
+    value = re.sub(r"[A-Za-z0-9_\-]{40,}", "<redacted>", value)
+    return " ".join(value.split())[:240]
+
+
+def sanitize_diagnostic(value, secrets=()):
+    """Second, client-side pass over the worker's diagnostic. Bounded shape."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {"stage", "exception", "message", "runtime"}
+            or value["stage"] not in _DIAG_STAGES):
+        raise ValueError("RESULT_INVALID")
+    runtime = value["runtime"]
+    clean_runtime = None
+    if runtime is not None:
+        if not isinstance(runtime, dict) or len(runtime) > 16:
+            raise ValueError("RESULT_INVALID")
+        clean_runtime = {}
+        for key, item in runtime.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[a-z0-9_]{1,32}", key):
+                raise ValueError("RESULT_INVALID")
+            if key == "libs":
+                if not isinstance(item, dict) or len(item) > 16 or not all(
+                        isinstance(k, str) and re.fullmatch(r"lib[A-Za-z0-9_.]{1,40}", k)
+                        and type(v) is bool for k, v in item.items()):
+                    raise ValueError("RESULT_INVALID")
+                clean_runtime[key] = dict(item)
+            elif key == "cuda_compute_types":
+                if not isinstance(item, list) or len(item) > 16:
+                    raise ValueError("RESULT_INVALID")
+                clean_runtime[key] = [_diag_text(t, secrets) for t in item]
+            elif item is None or type(item) is int or type(item) is bool:
+                clean_runtime[key] = item
+            else:
+                clean_runtime[key] = _diag_text(item, secrets)
+    return {"stage": value["stage"], "exception": _diag_text(value["exception"], secrets),
+            "message": _diag_text(value["message"], secrets), "runtime": clean_runtime}
 
 
 def _loads(raw):
@@ -148,6 +202,7 @@ class ColabJupyterInference:
         self._client = None
         self.execution_id = uuid.uuid4().hex
         self._output_dir = self._output_path = None
+        self.last_diagnostic = None
         self._reuse_kernel, self._cancel_requested = reuse_kernel, cancel_requested
         self._closed = self._prepared = False
         self._runtime_name = None
@@ -173,6 +228,7 @@ class ColabJupyterInference:
         with self._lock:
             if self._closed or (self._attempted and not self._reuse_kernel):
                 raise InferenceError(InferenceCode.DUPLICATE_EXECUTION)
+            self.last_diagnostic = None
             if self._attempted:
                 self.execution_id = uuid.uuid4().hex
             self._attempted = True
@@ -261,7 +317,8 @@ class ColabJupyterInference:
             else:
                 cleanup = self.cleanup()
             return InferenceReport(state, error, self.execution_id, self._sent, reply, idle,
-                                   cleanup, result, device, compute, gpu_error, silence)
+                                   cleanup, result, device, compute, gpu_error, silence,
+                                   self.last_diagnostic if state != "OK" else None)
 
     def _ensure_kernel(self):
         self._check_cancel()
@@ -522,7 +579,8 @@ class ColabJupyterInference:
                 raise ValueError
             value = _loads(raw.decode("utf-8"))
             keys = {"execution_id", "run_id", "index", "input_sha256", "complete", "error_code",
-                    "device", "compute_type", "gpu_error", "silence", "payload", "duration_seconds"}
+                    "device", "compute_type", "gpu_error", "silence", "payload", "duration_seconds",
+                    "diagnostic"}
             if (not isinstance(value, dict) or set(value) != keys or value["complete"] is not True
                     or value["execution_id"] != self.execution_id or value["run_id"] != self._transfer.run_id
                     or type(value["index"]) is not int or value["index"] != record.index
@@ -533,7 +591,12 @@ class ColabJupyterInference:
                            "MODEL_LOAD_FAILED", "CUDA_FAILED", "GPU_UNAVAILABLE", "KERNEL_EXECUTION_FAILED", "RESULT_INVALID"}
                 if value["error_code"] not in allowed or value["payload"] is not None:
                     raise ValueError
+                token = getattr(getattr(self._client, "_info", None), "token", None)
+                value["diagnostic"] = sanitize_diagnostic(value["diagnostic"], (token,))
+                self.last_diagnostic = value["diagnostic"]
                 return value
+            if value["diagnostic"] is not None:
+                raise ValueError
             if ((value["device"], value["compute_type"]) not in (("cuda", "float16"), ("cpu", "int8"))
                     or value["gpu_error"] not in (None, "GPU_UNAVAILABLE", "CUDA_FAILED")
                     or type(value["duration_seconds"]) not in (int, float)

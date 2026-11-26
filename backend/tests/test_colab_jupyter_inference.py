@@ -33,7 +33,7 @@ def deny_network(monkeypatch):
 
 @pytest.fixture
 def ml(monkeypatch):
-    state = SimpleNamespace(cuda=1, load_fail=False, decode_fail=False, rows=[
+    state = SimpleNamespace(cuda=1, load_fail=False, decode_fail=False, audio_fail=False, rows=[
         SimpleNamespace(start=0.2, end=1.2, text="가상 전사 내용")],
         loads=[], decodes=[], downloads=[], duration=2.0)
 
@@ -48,7 +48,7 @@ def ml(monkeypatch):
             # Real libraries can emit progress or sensitive exception context.
             print(TOKEN + "가상 전사 내용")
             logging.getLogger("fake-model").error(TOKEN + "가상 전사 내용")
-            state.decodes.append((source.read(), kwargs))
+            state.decodes.append((source, kwargs))
             if state.decode_fail:
                 def fail():
                     yield state.rows[0]
@@ -60,7 +60,12 @@ def ml(monkeypatch):
         state.downloads.append((repository, kwargs))
         return "fixed-model-cache"
     monkeypatch.setattr(importlib.metadata, "version", lambda p: PACKAGES[p])
-    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
+    def decode_audio(handle, sampling_rate):
+        assert sampling_rate == 16000
+        if state.audio_fail:
+            raise ValueError("Invalid data found when processing input " + TOKEN)
+        return handle.read()  # stands in for the decoded waveform
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model, decode_audio=decode_audio))
     monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: state.cuda))
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
     return state
@@ -562,3 +567,37 @@ def test_explicit_model_download_still_uses_immutable_revision(setup):
     assert setup.adapter(allow_model_download=True).run(0).status == "OK"
     assert setup.ml.downloads[0][1]["local_files_only"] is False
     assert setup.ml.downloads[0][1]["revision"] == MODEL_REVISION
+
+
+@pytest.mark.parametrize("fault,code,stage,exception", [
+    ("decode", Code.CUDA_FAILED, "inference", "RuntimeError"),
+    ("audio", Code.KERNEL_EXECUTION_FAILED, "audio_decode", "ValueError"),
+    ("load", Code.MODEL_LOAD_FAILED, "model_init", "RuntimeError")])
+def test_failure_diagnostic_names_stage_and_exception_without_secrets(setup, caplog, fault, code, stage, exception):
+    setup.ml.decode_fail = fault == "decode"
+    setup.ml.audio_fail = fault == "audio"
+    setup.ml.load_fail = fault == "load"
+    report = setup.adapter().run(0)
+    assert report.status == "ERROR" and report.error_code is code
+    diagnostic = report.diagnostic
+    assert diagnostic["stage"] == stage and diagnostic["exception"] == exception
+    assert isinstance(diagnostic["runtime"]["libs"], dict) and "libcublas.so.12" in diagnostic["runtime"]["libs"]
+    text = json.dumps(diagnostic, ensure_ascii=False)
+    assert TOKEN not in text and "가상 전사 내용" not in text and "<redacted>" in text
+
+
+def test_success_carries_no_diagnostic(setup):
+    report = setup.adapter().run(0)
+    assert report.status == "OK" and report.diagnostic is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"stage": "nope", "exception": None, "message": None, "runtime": None},
+    {"stage": "inference", "exception": None, "message": None},
+    {"stage": "inference", "exception": 3, "message": None, "runtime": None},
+    {"stage": "inference", "exception": None, "message": None, "runtime": {"libs": {"x": True}}},
+    {"stage": "inference", "exception": None, "message": None, "runtime": {"Bad-Key": 1}}])
+def test_diagnostic_shape_is_bounded(bad):
+    from src.services.colab_jupyter_inference import sanitize_diagnostic
+    with pytest.raises(ValueError):
+        sanitize_diagnostic(bad)

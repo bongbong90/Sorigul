@@ -83,7 +83,55 @@ def _sorigul_worker(params):
             pass
 
     class Failure(Exception):
-        pass
+        def __init__(self, code, stage=None, cause=None):
+            super().__init__(code)
+            self.stage, self.cause = stage, cause
+
+    def clean(text):
+        # ASCII only (drops any transcript), no ids/URLs/secret-shaped runs.
+        text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in str(text))
+        text = re.sub(r"https?://\S+", "<url>", text)
+        text = re.sub(r"[0-9a-fA-F]{24,}", "<id>", text)
+        text = re.sub(r"[A-Za-z0-9_\-]{40,}", "<redacted>", text)
+        return " ".join(text.split())[:240]
+
+    def probe():
+        # Read-only facts about this runtime's CUDA stack. No GPU work.
+        facts = {}
+        try:
+            import ctranslate2 as ct2
+            facts["ctranslate2"] = clean(getattr(ct2, "__version__", "?"))
+            facts["cuda_devices"] = int(ct2.get_cuda_device_count())
+            facts["cuda_compute_types"] = sorted(clean(t) for t in ct2.get_supported_compute_types("cuda"))
+        except Exception as exc:
+            facts["ctranslate2_error"] = clean(type(exc).__name__ + ": " + str(exc))
+        import ctypes
+        libs = {}
+        for name in ("libcuda.so.1", "libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12",
+                     "libcudnn.so.9", "libcudnn_ops.so.9", "libcudnn_cnn.so.9",
+                     "libcudnn.so.8", "libcudnn_ops_infer.so.8", "libcublas.so.11"):
+            try:
+                ctypes.CDLL(name)
+                libs[name] = True
+            except OSError:
+                libs[name] = False
+        facts["libs"] = libs
+        for module in ("av", "numpy", "torch"):
+            try:
+                facts[module] = clean(importlib.metadata.version(module))
+            except Exception:
+                facts[module] = None
+        try:
+            import torch
+            facts["torch_cuda"] = clean(torch.version.cuda)
+            facts["torch_cudnn"] = torch.backends.cudnn.version()
+        except Exception as exc:
+            facts["torch_error"] = clean(type(exc).__name__)
+        return facts
+
+    def diagnose(stage, cause):
+        return {"stage": stage, "exception": clean(type(cause).__name__) if cause else None,
+                "message": clean(cause) if cause else None, "runtime": probe()}
 
     run, execution, index = params["run_id"], params["execution_id"], params["index"]
     if (not re.fullmatch(r"[0-9a-f]{32}", run)
@@ -100,7 +148,8 @@ def _sorigul_worker(params):
     envelope = {"execution_id": execution, "run_id": run, "index": index,
                 "input_sha256": params["sha256"], "complete": True,
                 "error_code": None, "device": None, "compute_type": None,
-                "gpu_error": None, "silence": False, "payload": None, "duration_seconds": None}
+                "gpu_error": None, "silence": False, "payload": None, "duration_seconds": None,
+                "diagnostic": None}
     previous_logging = logging.root.manager.disable
     try:
         logging.disable(logging.CRITICAL)
@@ -158,60 +207,81 @@ def _sorigul_worker(params):
                 try:
                     if key not in cache:
                         cache[key] = WhisperModel(model_path, device=device, compute_type=compute)
-                except Exception:
+                except Exception as exc:
                     if params.get("require_cuda"):
-                        raise Failure("CUDA_FAILED") from None
+                        raise Failure("CUDA_FAILED", "model_init", exc) from None
                     if not has_cuda:
-                        raise Failure("MODEL_LOAD_FAILED") from None
+                        raise Failure("MODEL_LOAD_FAILED", "model_init", exc) from None
                     envelope["gpu_error"] = "CUDA_FAILED"
                     device, compute = "cpu", "int8"
                     key = (params["revision"], device, compute)
                     try:
                         if key not in cache:
                             cache[key] = WhisperModel(model_path, device=device, compute_type=compute)
-                    except Exception:
-                        raise Failure("MODEL_LOAD_FAILED") from None
+                    except Exception as exc:
+                        raise Failure("MODEL_LOAD_FAILED", "model_init", exc) from None
                 envelope.update(device=device, compute_type=compute)
+                failed = "CUDA_FAILED" if device == "cuda" else "KERNEL_EXECUTION_FAILED"
+                stage = "audio_decode"
                 try:
+                    # transcribe() decodes a file object exactly like this.
+                    from faster_whisper import decode_audio
+                    audio = decode_audio(handle, sampling_rate=16000)
+                except Exception as exc:
+                    raise Failure("KERNEL_EXECUTION_FAILED", stage, exc) from None
+                try:
+                    stage = "inference_start"
                     segments, info = cache[key].transcribe(
-                        handle, language="ko", task="transcribe", temperature=0,
+                        audio, language="ko", task="transcribe", temperature=0,
                         beam_size=5, best_of=5, patience=1.0,
                         condition_on_previous_text=False,
                     )
                     rows, text_bytes = [], 0
                     duration = info.duration
                     if not math.isfinite(duration) or not 0 < duration <= 301:
-                        raise Failure("RESULT_INVALID")
+                        raise Failure("RESULT_INVALID", "result")
                     envelope["duration_seconds"] = duration
+                    stage = "inference"
                     for s in segments:  # exhaust lazy generator before completion
                         if (not math.isfinite(s.start) or not math.isfinite(s.end)
                                 or not 0 <= s.start <= s.end <= duration + 0.1
                                 or not isinstance(s.text, str) or not s.text.strip()):
-                            raise Failure("RESULT_INVALID")
+                            raise Failure("RESULT_INVALID", "result")
                         text_bytes += len(s.text.encode("utf-8"))
                         if len(rows) >= 2000 or text_bytes > 12000:
-                            raise Failure("RESULT_INVALID")
+                            raise Failure("RESULT_INVALID", "result")
                         rows.append({"start": s.start, "end": s.end, "text": s.text})
+                    stage = "result"
                     check_input()  # never publish a result after input mutation
                     envelope["payload"] = {"text": "".join(s["text"] for s in rows),
                                            "language": "ko", "segments": rows}
                     envelope["silence"] = not rows
                 except Failure:
                     raise
-                except Exception:
+                except Exception as exc:
                     # Never retry a started decode, including lazy CUDA failure.
-                    raise Failure("CUDA_FAILED" if device == "cuda" else "KERNEL_EXECUTION_FAILED") from None
+                    raise Failure(failed, stage, exc) from None
     except Failure as exc:
         envelope["error_code"] = str(exc)
         envelope["payload"] = None
-    except Exception:
+        if exc.stage is not None:
+            try:
+                envelope["diagnostic"] = diagnose(exc.stage, exc.cause)
+            except Exception:
+                envelope["diagnostic"] = {"stage": exc.stage, "exception": None,
+                                          "message": None, "runtime": None}
+    except Exception as exc:
         envelope["error_code"] = "KERNEL_EXECUTION_FAILED"
         envelope["payload"] = None
+        try:
+            envelope["diagnostic"] = diagnose("worker", exc)
+        except Exception:
+            pass
     finally:
         logging.disable(previous_logging)
     raw = json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
     if len(raw) > 32768:
-        envelope.update(error_code="RESULT_INVALID", payload=None, silence=False)
+        envelope.update(error_code="RESULT_INVALID", payload=None, silence=False, diagnostic=None)
         raw = json.dumps(envelope).encode("utf-8")
     with (output_dir / "result.tmp").open("xb") as result:
         result.write(raw)

@@ -9,6 +9,7 @@ Only the kernel, uploads and splitter temporaries created here are cleaned.
 
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -30,6 +31,9 @@ from src.services.colab_jupyter_inference import ColabJupyterInference, Inferenc
 from src.services.colab_runtime_client import RuntimeClientError, RuntimeErrorCode
 from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore, RuntimeOwnership, _no_links
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PipelineCleanup:
@@ -77,6 +81,7 @@ class PipelineReport:
     completed_indices: tuple
     cache_used: bool
     cleanup: PipelineCleanup
+    diagnostic: dict | None = None  # sanitized remote failure facts, never transcript
     runtime_borrowed: bool = True  # ownership service, not this pipeline, owns Runtime deletion
 
     @property
@@ -327,6 +332,7 @@ class ColabFullFilePipeline:
         checkpoint_started = False
         execution_id = uuid.uuid4().hex
         completed, signals, result, error = {}, set(), None, None
+        diagnostic = None
         state, used_cache, clear_cache, cache_failed = "FAILED", False, False, False
         try:
             token.raise_if_requested()
@@ -417,6 +423,10 @@ class ColabFullFilePipeline:
                     signals.add("REMOTE_STATE_UNCERTAIN")
                 token.raise_if_requested()
                 if report.status != "OK":
+                    diagnostic = report.diagnostic
+                    if diagnostic is not None:
+                        logger.warning("Colab chunk %s failed: %s", chunk.index,
+                                       json.dumps(diagnostic, sort_keys=True))
                     if report.status == "STATE_UNCERTAIN":
                         signals.add("REMOTE_STATE_UNCERTAIN")
                     raise InferenceError(report.error_code or InferenceCode.STATE_UNCERTAIN)
@@ -509,7 +519,8 @@ class ColabFullFilePipeline:
             code = getattr(error, "code", None) or (
                 "CLEANUP_REQUIRED" if cleanup.cleanup_required and not deferred else None)
             self.last_report = PipelineReport(state, code.value if hasattr(code, "value") else code,
-                                              tuple(sorted(signals)), tuple(sorted(completed)), used_cache, cleanup)
+                                              tuple(sorted(signals)), tuple(sorted(completed)), used_cache, cleanup,
+                                              diagnostic)
             try:
                 if lease_held:
                     lease.__exit__(None, None, None)
