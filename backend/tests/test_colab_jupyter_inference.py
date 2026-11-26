@@ -44,13 +44,14 @@ def ml(monkeypatch):
             self.device = kwargs["device"]
             if state.load_fail is True or state.load_fail == self.device:
                 raise RuntimeError(TOKEN + "가상 전사 내용")
-            self.feature_extractor = SimpleNamespace(feature_size=128, nb_max_frames=3000)
+            # Real faster-whisper 1.2.1 attributes only (no feature_size: live run 7).
+            self.feature_extractor = SimpleNamespace(nb_max_frames=3000, mel_filters=None)
 
             def encode(features, to_cpu):
                 state.encodes.append((features.shape, to_cpu))
                 if state.gpu_compute_fail:
                     raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
-            self.model = SimpleNamespace(encode=encode)
+            self.model = SimpleNamespace(encode=encode, n_mels=128)
 
         def transcribe(self, source, **kwargs):
             # Real libraries can emit progress or sensitive exception context.

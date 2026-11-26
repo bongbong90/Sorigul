@@ -273,9 +273,11 @@ def _sorigul_provision(params):
                 # silence exercises GEMM + conv on the GPU (no audio, no decode).
                 error, stage = "CUDA_FAILED", "gpu_verify"
                 import numpy as np
-                extractor = model.feature_extractor
-                features = np.zeros((1, extractor.feature_size, extractor.nb_max_frames), dtype=np.float32)
-                model.model.encode(ctranslate2.StorageView.from_array(features), to_cpu=True)
+                # Same shapes/calls faster-whisper 1.2.1 uses: (1, n_mels, nb_max_frames).
+                frames = model.feature_extractor.nb_max_frames
+                features = np.zeros((1, model.model.n_mels, frames), dtype=np.float32)
+                model.model.encode(ctranslate2.StorageView.from_array(np.ascontiguousarray(features)),
+                                   to_cpu=True)
                 globals().setdefault("_sorigul_models_v1", {})[
                     (params["revision"], "cuda", "float16")] = model
             return receipt
