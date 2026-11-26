@@ -533,8 +533,11 @@ def test_product_route_oauth_to_default_off_launcher_and_job_zero_runtime(env, m
         assert client.get('/colab/auth/status').json()['auth_state'] == 'CONNECTED'
         assert routes.official_colab_launcher._credentials is auth
         assert routes.official_colab_launcher._load_credentials().access_token == TOKEN
-        assert routes.engine_resolver.official_colab_enabled is False
-        assert client.get('/engines/official-colab/status').json()['state'] == 'DISABLED'
+        # Wired one-click path, still BLOCKED by the closed COST / POLICY gates (#60).
+        assert routes.engine_resolver.official_colab_enabled is True
+        status = client.get('/engines/official-colab/status').json()
+        assert status['state'] == 'BLOCKED' and status['available'] is False
+        assert [r['code'] for r in status['reasons']] == ['COST_GATE_CONDITIONAL', 'POLICY_GATE_NOT_VERIFIED']
         assert client.post('/jobs', json=dict(folder=str(env.root), engine='official_colab', scope='selected',
             file_ids=['mock'], course='mock', subject='mock', week=1)).status_code == 400
         assert routes.job_manager.list_jobs() == [] and not env.colab.calls

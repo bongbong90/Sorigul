@@ -953,7 +953,7 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       <OverallProgress progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} engine={job?.engine} />
       {job?.error ? <div className="status-banner status-banner-warning" role="alert"><AlertTriangle aria-hidden="true" /><span>{job.error}</span><Button variant="secondary" onClick={onOpenSettings}>연결 상태 확인</Button></div> : null}
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
-      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
+      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} stageMessage={officialColabStageMessage(job)} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} actionsDisabled={globalRunActive} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} onEditWeek={onEditWeekForCurrent} />
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
@@ -963,6 +963,18 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       </div></div> : null}
     </div>
   )
+}
+
+// Latest official Colab stage from the Job's provisioning events (#60).
+function officialColabStageMessage(job: { engine?: string; events?: { category: string; message: string }[] } | null | undefined): string | null {
+  if (!job || job.engine !== 'official_colab') return null
+  const events = job.events ?? []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (!event.category.startsWith('ColabProvisioning:')) continue
+    return event.category === 'ColabProvisioning:READY' ? 'Colab GPU에서 전사하고 있습니다' : event.message
+  }
+  return null
 }
 
 // Mirrors DriveClassifier's folder chain (backend/src/services/drive.py):

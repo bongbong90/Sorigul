@@ -12,6 +12,8 @@ interface CurrentTaskSectionProps {
   engine?: string
   elapsedSeconds?: number | null
   etaSeconds?: number | null
+  /** Current official Colab preparation/transcription stage (server message). */
+  stageMessage?: string | null
 }
 
 function formatRuntimeSeconds(seconds: number | null | undefined): string {
@@ -35,13 +37,15 @@ export function CurrentTaskSection({
   engine,
   elapsedSeconds,
   etaSeconds,
+  stageMessage,
 }: CurrentTaskSectionProps) {
   const presentation = statusPresentation[status]
   const displayFilename = filename ?? '현재 작업 없음'
   const hasObservedEta = etaSeconds != null && Number.isFinite(etaSeconds) && etaSeconds > 0
   const showsRuntime = engine === 'local_whisper' || engine === 'direct_colab' || engine === 'official_colab'
+  const runtimeDetail = `경과 ${formatRuntimeSeconds(elapsedSeconds)} · ${hasObservedEta ? `ETA 약 ${formatRuntimeSeconds(etaSeconds)}` : 'ETA 계산 중'}`
   const detail = status === 'TRANSCRIBING' && showsRuntime
-    ? `경과 ${formatRuntimeSeconds(elapsedSeconds)} · ${hasObservedEta ? `ETA 약 ${formatRuntimeSeconds(etaSeconds)}` : 'ETA 계산 중'}`
+    ? (stageMessage ? `${stageMessage} · 경과 ${formatRuntimeSeconds(elapsedSeconds)}` : runtimeDetail)
     : presentation.detail
   const progressValue = ['PREPARING', 'TRANSCRIBING', 'SAVING', 'VERIFYING', 'RETRYING'].includes(status)
     ? progress

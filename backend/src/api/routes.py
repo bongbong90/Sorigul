@@ -57,7 +57,8 @@ from src.api.colab_oauth_routes import account_router
 from src.services.colab_oauth import ColabOAuthService
 from src.services.colab_oauth_store import ColabSecretStore
 from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore
-from src.services.official_colab_launcher import OfficialColabLauncher
+from src.services.official_colab_launcher import OfficialColabLauncher, OwnedRuntimeProvisioningAuthorizer
+from src.services.colab_maintenance import ColabMaintenance
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -99,16 +100,30 @@ colab_auth = ColabOAuthService(
     drive_client_path=app_data_dir / "auth" / "google_oauth_client.json",
     ownership_unresolved=_colab_connection_change_blocked,
 )
+# One-click path is wired end to end; the default FailClosedLaunchAuthorizer
+# keeps it BLOCKED while COST_GATE / POLICY_GATE are not satisfied (#60).
 official_colab_launcher = OfficialColabLauncher(
     credential_provider=colab_auth, ownership_store=colab_ownership_store,
     cache_root=app_data_dir / "cache" / "colab" / "official-colab",
+    provisioning_authorizer=OwnedRuntimeProvisioningAuthorizer(),
 )
 engine_resolver = DefaultEngineResolver(
-    official_colab_launcher=official_colab_launcher, official_colab_launcher_enabled=False)
+    official_colab_launcher=official_colab_launcher, official_colab_launcher_enabled=True)
 account_router(colab_auth, router)
 
 
 drive_execution_service = DriveExecutionService(drive_service)
+
+colab_maintenance = ColabMaintenance(
+    colab_auth=colab_auth, drive_auth=drive_auth, store=colab_ownership_store,
+    cache_root=app_data_dir / "cache" / "colab" / "official-colab",
+    job_active=lambda: execution_service.active_job_id() is not None,
+)
+
+
+def start_background_maintenance():
+    """App start: renew Google tokens, recover owned Runtimes, settle locks."""
+    colab_maintenance.start(force=True)
 
 
 def handle_file_completed(job_id: str, file_id: str, filename: str):
@@ -159,7 +174,10 @@ def _official_colab_status() -> dict:
 def official_colab_status():
     # No network: enabled state, static launch gates and local ownership only.
     # Never returns credentials, account identifiers, Runtime names or URLs.
-    return _official_colab_status()
+    status = _official_colab_status()
+    if any(r.get("code") == "OWNERSHIP_UNRESOLVED" for r in status.get("reasons") or []):
+        colab_maintenance.start(refresh=False)  # background, throttled self-heal
+    return status
 
 
 @router.get("/events")

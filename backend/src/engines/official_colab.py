@@ -28,6 +28,14 @@ def disabled_error():
                                     category=ErrorCategory.CONFIGURATION)
 
 
+PREPARATION_SHARE = 0.20
+PREPARATION_PROGRESS = {
+    "CHECKING": 0.02, "INSTALL_REQUIRED": 0.03, "INSTALLING": 0.05,
+    "MODEL_DOWNLOAD_REQUIRED": 0.08, "DOWNLOADING": 0.10, "VERIFYING": 0.15,
+    "READY": PREPARATION_SHARE,
+}
+
+
 class OfficialColabJobEngine:
     def __init__(self, ownership, cache, *, pipeline_factory=ColabFullFilePipeline):
         try:
@@ -44,8 +52,18 @@ class OfficialColabJobEngine:
         if getattr(error, "code", None) == "FFMPEG_PROCESS_CLEANUP_FAILED":
             cleanup = True
         local = bool(report and report.local_selection_possible) and not cleanup
-        if cleanup or getattr(error, "code", None) == "CLEANUP_REQUIRED":
-            return OfficialColabEngineError("CLEANUP_REQUIRED", "원격 작업 정리가 필요합니다.", cleanup_required=True)
+        code = getattr(error, "code", None)
+        code = getattr(code, "value", code)
+        stage = (report.diagnostic or {}).get("stage") if report is not None and getattr(report, "diagnostic", None) else None
+        if cleanup or code == "CLEANUP_REQUIRED":
+            return OfficialColabEngineError(
+                "CLEANUP_REQUIRED", "원격 작업 정리가 확인되지 않았습니다. 앱이 정리를 자동으로 다시 확인합니다.",
+                cleanup_required=True)
+        if code in ("PRIOR_EXECUTION_UNRESOLVED", "PRIOR_EXECUTION_STATE_INVALID"):
+            return OfficialColabEngineError(
+                "PRIOR_EXECUTION_UNRESOLVED",
+                "이 파일의 이전 Colab 작업 정리를 확인하고 있습니다. 잠시 후 다시 시도해 주세요.",
+                local_selection_possible=local)
         if "REMOTE_STATE_UNCERTAIN" in signals:
             return OfficialColabEngineError("STATE_UNCERTAIN", "원격 작업 상태를 확인할 수 없어 작업을 중단했습니다.")
         if "AUTH_ACCESS_REQUIRED" in signals:
@@ -70,8 +88,15 @@ class OfficialColabJobEngine:
             return OfficialColabEngineError("INPUT_INVALID", "이 MP3 파일을 처리할 수 없습니다.",
                                             category=ErrorCategory.INPUT, fatal=False,
                                             local_selection_possible=local)
-        if getattr(error, "code", None) in {"CUDA_FAILED", "GPU_UNAVAILABLE"}:
-            return OfficialColabEngineError("DEVICE_FAILED", "전사 장치를 사용할 수 없습니다.",
+        if stage == "audio_decode":
+            return OfficialColabEngineError("AUDIO_DECODE_FAILED",
+                                            "Colab에서 이 MP3를 읽지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.",
+                                            local_selection_possible=local)
+        if stage == "model_init" or code == "MODEL_LOAD_FAILED":
+            return OfficialColabEngineError("MODEL_LOAD_FAILED", "Colab에서 전사 모델을 불러오지 못했습니다.",
+                                            local_selection_possible=local)
+        if code in {"CUDA_FAILED", "GPU_UNAVAILABLE"}:
+            return OfficialColabEngineError("DEVICE_FAILED", "Colab GPU에서 전사하지 못했습니다.",
                                             local_selection_possible=local)
         return OfficialColabEngineError("FAILED", "전사 작업을 안전하게 완료하지 못했습니다.",
                                         local_selection_possible=local)
@@ -80,13 +105,27 @@ class OfficialColabJobEngine:
         if self._blocked:
             raise OfficialColabEngineError("SESSION_BLOCKED", "이전 원격 작업 상태를 먼저 확인해 주세요.")
 
+        # Stage progress (#60): environment preparation fills 0-20 %, decoded
+        # chunks 20-95 %. Never decreases; 100 % stays with the Writer.
+        shown = {"value": 0.0}
+
+        def report_progress(value):
+            if value > shown["value"]:
+                shown["value"] = value
+                progress_callback(round(value, 4))
+
         def progress(value):
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value)
                                       or not 0 <= value <= 1):
                 raise OfficialColabEngineError("RESULT_INVALID", "전사 진행 상태를 확인할 수 없습니다.")
             # Decode completion is not output-bundle completion. No invented ETA
             # or 100% before the existing Writer verifies/promotes all outputs.
-            progress_callback(None if value == 1 else value)
+            if value is None or value == 1:
+                progress_callback(None)
+            elif value == 0:
+                progress_callback(shown["value"])
+            else:
+                report_progress(PREPARATION_SHARE + (0.95 - PREPARATION_SHARE) * value)
 
         def event(level, category, message):
             from src.services.colab_model_provisioner import MESSAGES
@@ -94,6 +133,8 @@ class OfficialColabJobEngine:
                 state = category.partition(":")[2]
                 if state in MESSAGES and message == MESSAGES[state]:
                     event_callback("info", category, MESSAGES[state])
+                    if state in PREPARATION_PROGRESS:
+                        report_progress(PREPARATION_PROGRESS[state])
                     return
             # Do not let arbitrary remote content become a Job event/log.
             event_callback("info", "Colab", "전사 작업을 진행하고 있습니다.")

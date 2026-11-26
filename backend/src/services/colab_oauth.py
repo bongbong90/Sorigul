@@ -224,6 +224,15 @@ class ColabOAuthService:
                 disconnect_allowed=not blocked and not self._busy,
                 preflight=self._preflight_summary)
 
+    def refreshable(self):
+        """Local-only. True when only the short-lived access token expired and the
+        stored refresh token can renew it (for_launch/check does that)."""
+        with self._lock:
+            status = self.status()
+            return (status["configured"] and status["auth_state"] == "REFRESH_REQUIRED"
+                    and self._record is not None and self._error is None
+                    and not self._busy and self._attempt is None)
+
     def __call__(self):
         """Server credential provider, safe for launcher's local status()."""
         with self._lock:

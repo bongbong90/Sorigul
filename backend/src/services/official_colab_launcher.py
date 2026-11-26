@@ -133,6 +133,17 @@ class LaunchedOfficialColabEngine:
         return clean
 
 
+class OwnedRuntimeProvisioningAuthorizer:
+    """Product default: package install / pinned model download only on the
+    Runtime this app's own launch created. The provisioner is reachable only
+    after the launch authorizer approved, so closed COST/POLICY gates keep it
+    unreachable."""
+
+    def authorize(self, owned_runtime):
+        name = getattr(owned_runtime, "name", None)
+        return isinstance(name, str) and name.startswith("runtimes/sorigul-")
+
+
 class OfficialColabLauncher:
     def __init__(self, *, credential_provider, ownership_store=None,
                  ownership_factory=default_ownership_factory, authorizer=None,
@@ -163,6 +174,15 @@ class OfficialColabLauncher:
             return None
         return credentials
 
+    def _credentials_refreshable(self):
+        # An expired access token with a valid refresh token is still connected:
+        # launch() renews it through for_launch(). No network here.
+        refreshable = getattr(self._credentials, "refreshable", None)
+        try:
+            return callable(refreshable) and refreshable() is True
+        except Exception:
+            return False
+
     def _ownership_unresolved(self):
         try:
             return any(record.state is not OwnershipState.CLEANED for record in self._store.load())
@@ -172,7 +192,7 @@ class OfficialColabLauncher:
     def status(self):
         """No network. Lists every reason a launch would be refused right now."""
         reasons = list(self._authorizer.static_blockers())
-        if self._load_credentials() is None:
+        if self._load_credentials() is None and not self._credentials_refreshable():
             reasons.append("ACCOUNT_NOT_CONNECTED")
         if self._ownership_unresolved():
             reasons.append("OWNERSHIP_UNRESOLVED")
