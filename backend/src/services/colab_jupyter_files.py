@@ -161,6 +161,15 @@ class FileTransferRecord:
                 and self.error_code is not TransferCode.REMOTE_EXISTS)
 
 
+def listing_is_empty(content):
+    """Empty as Jupyter itself judges it (is_non_empty_dir): nothing, or only the
+    server-made checkpoints dir. Colab lists hidden entries (live run 5, #60),
+    so every directory we create shows `.ipynb_checkpoints` after our files go."""
+    return isinstance(content, list) and all(
+        isinstance(entry, dict) and entry.get("name") == ".ipynb_checkpoints"
+        and entry.get("type") == "directory" for entry in content) and len(content) <= 1
+
+
 @dataclass(frozen=True)
 class CleanupReport:
     deleted_paths: tuple
@@ -725,7 +734,7 @@ class ColabJupyterFileTransfer:
                 and payload.get("path") == self.run_dir
                 and isinstance(payload.get("content"), list)):
             return TransferCode.RESPONSE_INVALID
-        return "EMPTY" if not payload["content"] else TransferCode.REMOTE_EXISTS
+        return "EMPTY" if listing_is_empty(payload["content"]) else TransferCode.REMOTE_EXISTS
 
     def _owned(self, path):
         if path == self.run_dir:

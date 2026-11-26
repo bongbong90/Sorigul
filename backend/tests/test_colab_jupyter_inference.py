@@ -157,7 +157,12 @@ class Server:
             if not path.exists():
                 return 404, None
             if path.is_dir():
-                path.rmdir()
+                # Like Jupyter: a dir holding only the checkpoints dir is empty.
+                if {p.name for p in path.iterdir()} <= {".ipynb_checkpoints"}:
+                    import shutil
+                    shutil.rmtree(path)
+                else:
+                    path.rmdir()
             else:
                 path.unlink()
             return 204, None
@@ -165,7 +170,8 @@ class Server:
         if not path.exists():
             return 404, None
         if path.is_dir():
-            return 200, {"path": name, "type": "directory", "content": [p.name for p in path.iterdir()]}
+            return 200, {"path": name, "type": "directory", "content": [
+                {"name": p.name, "type": "directory" if p.is_dir() else "file"} for p in path.iterdir()]}
         if "content=1" in query:
             if self.download_status != 200:
                 return self.download_status, None
@@ -488,6 +494,30 @@ def test_foreign_file_blocks_output_directory_cleanup(setup):
     assert report.cleanup.cleanup_required
     assert Path(adapter._output_dir, "foreign.txt").read_text() == "preserve"
     assert ("DELETE", "/api/contents/" + adapter._output_dir) not in setup.server.calls
+
+
+def test_colab_checkpoints_dir_does_not_block_output_directory_cleanup(setup):
+    # Live run 5: Colab lists the server-made hidden `.ipynb_checkpoints` dir.
+    def add_checkpoints(raw):
+        for path in Path("sorigul-transfer").glob("*/inference-*"):
+            (path / ".ipynb_checkpoints").mkdir(exist_ok=True)
+        return raw
+    setup.server.mutate = add_checkpoints
+    adapter = setup.adapter()
+    report = adapter.run(0)
+    assert report.status == "OK" and report.cleanup.files_deleted
+    assert not report.cleanup.cleanup_required and not Path(adapter._output_dir).exists()
+
+
+@pytest.mark.parametrize("content,empty", [
+    ([], True), ([{"name": ".ipynb_checkpoints", "type": "directory"}], True),
+    ([{"name": ".ipynb_checkpoints", "type": "file"}], False),
+    ([{"name": "result.json", "type": "file"}], False),
+    ([{"name": ".ipynb_checkpoints", "type": "directory"}, {"name": "x", "type": "file"}], False),
+    ([".ipynb_checkpoints"], False), (None, False)])
+def test_listing_is_empty_matches_jupyter_checkpoint_rule(content, empty):
+    from src.services.colab_jupyter_files import listing_is_empty
+    assert listing_is_empty(content) is empty
 
 
 def test_connection_failure_before_send_is_not_uncertain_execution(setup):

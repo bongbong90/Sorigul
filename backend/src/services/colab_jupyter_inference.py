@@ -27,7 +27,9 @@ from src.services.colab_inference_worker import (
 from src.services.colab_jupyter_client import (
     MAX_MESSAGE_BYTES, CleanupResult, ColabJupyterClient, _connect_ws, _http_request,
 )
-from src.services.colab_jupyter_files import RemoteOwnership, TransferError, TransferStatus
+from src.services.colab_jupyter_files import (
+    RemoteOwnership, TransferError, TransferStatus, listing_is_empty,
+)
 
 
 class InferenceCode(str, Enum):
@@ -580,7 +582,8 @@ class ColabJupyterInference:
                 if status != 404:
                     if (status != 200 or not isinstance(model, dict)
                             or model.get("path") != self._output_dir
-                            or model.get("type") != "directory" or model.get("content") != []):
+                            or model.get("type") != "directory"
+                            or not listing_is_empty(model.get("content"))):
                         raise ValueError
                     status, _ = self._client._http("DELETE", "/api/contents/" + self._output_dir,
                                                    timeout=self._cleanup_timeout)
