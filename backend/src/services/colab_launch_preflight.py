@@ -125,8 +125,20 @@ class CostGate(str, Enum):
 
 
 class PolicyGate(str, Enum):
-    # Google has not confirmed the free-tier policy for this product scenario.
     NOT_VERIFIED = "POLICY_GATE_NOT_VERIFIED"
+    # Reviewed 2026-11-26 (#60). Google's own Colab CLI announcement (Colab PM
+    # + engineers, developers.googleblog.com, 2026-06-05) presents external
+    # clients that allocate a T4 ("standard free-tier GPU"), install packages,
+    # run Python scripts, download results and stop the runtime, "for both
+    # developers and AI agents". That is the "authorized by Google" programmatic
+    # pattern (Additional Terms), distinct from the FAQ's free-tier bans on
+    # remote control (SSH/remote desktop), web-UI serving, proxies and
+    # distributed workers. SORIGUL stays inside it by construction: the public
+    # REST API (colaboratory.googleapis.com), user-started Jobs only, one owned
+    # Runtime (launch blocked while any is unresolved), no keep-alive, delete
+    # after every Job. No explicit ToS clause names this use, and free
+    # resources may end without warning: that residual risk is reported.
+    OFFICIAL_PROGRAMMATIC_USE = "POLICY_GATE_OFFICIAL_PROGRAMMATIC_USE"
 
 
 class LaunchApproval(str, Enum):
@@ -135,10 +147,10 @@ class LaunchApproval(str, Enum):
 
 
 COST_GATE = CostGate.CONDITIONAL
-POLICY_GATE = PolicyGate.NOT_VERIFIED
+POLICY_GATE = PolicyGate.OFFICIAL_PROGRAMMATIC_USE
 PAID_CU_NON_CONSUMPTION_EVIDENCE = "NO_PER_RUNTIME_ZERO_COST_GUARANTEE"
 _VERIFIED_COST_GATES = frozenset()
-_VERIFIED_POLICY_GATES = frozenset()
+_VERIFIED_POLICY_GATES = frozenset({PolicyGate.OFFICIAL_PROGRAMMATIC_USE})
 
 
 @dataclass(frozen=True)
@@ -185,7 +197,8 @@ class PreflightResult:
         if self.technical_blocking_reasons:
             out.append(PreflightLabel.TECHNICAL_PRECHECK_BLOCKED)
         out.append(PreflightLabel.COST_GATE_CONDITIONAL)
-        out.append(PreflightLabel.POLICY_GATE_NOT_VERIFIED)
+        if self.policy_gate not in _VERIFIED_POLICY_GATES:
+            out.append(PreflightLabel.POLICY_GATE_NOT_VERIFIED)
         return tuple(out)
 
     def to_safe_dict(self):

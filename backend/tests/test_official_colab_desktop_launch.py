@@ -239,7 +239,7 @@ def test_default_production_resolver_is_off_with_reasons_and_no_job(env, monkeyp
         status = client.get("/engines/official-colab/status").json()
         assert status["state"] == "DISABLED" and status["available"] is False
         codes = [reason["code"] for reason in status["reasons"]]
-        assert codes == ["FEATURE_DISABLED", "COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED"]
+        assert codes == ["FEATURE_DISABLED", "COST_GATE_CONDITIONAL"]
         assert all(reason["message"] for reason in status["reasons"])
         assert client.post("/jobs", json=request_body(env)).status_code == 400
     assert env.manager.list_jobs() == [] and env.runtime.calls == [] and env.userinfo.calls == 0
@@ -251,7 +251,7 @@ def test_fail_closed_authorizer_blocks_status_creation_and_forged_jobs_without_n
     env.install(authorizer=FailClosedLaunchAuthorizer())
     status = env.routes.official_colab_status()
     assert status["state"] == "BLOCKED" and not status["available"]
-    assert [r["code"] for r in status["reasons"]] == ["COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED"]
+    assert [r["code"] for r in status["reasons"]] == ["COST_GATE_CONDITIONAL"]
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as exc:
         create(env)

@@ -353,6 +353,10 @@ export const api = {
   disconnectColabAuth: () => request<ColabAuthStatus>('/colab/auth/disconnect', { method: 'POST', body: '{}', timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   localRuntimeStatus: (signal?: AbortSignal) => request<{ available: boolean; code: string | null; message: string }>('/runtime/local/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL }),
   officialColabStatus: (signal?: AbortSignal) => request<OfficialColabStatus>('/engines/official-colab/status', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
+  // Run-time user statement (USER_CONFIRMED, never API-verified); consumed by the next launch.
+  confirmOfficialColabCost: () => request<{ cu_balance: string; cost_confirmation: string; status: OfficialColabStatus }>('/engines/official-colab/cost-confirmation', {
+    method: 'POST', body: JSON.stringify({ cu_balance_zero_confirmed: true }), timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,
+  }),
   health: (signal?: AbortSignal) => request<{ status: 'ok' }>('/health', { signal, timeoutMs: REQUEST_TIMEOUT_MS.FAST_LOCAL }),
   scan: (folder: string, signal?: AbortSignal) => request<ScannedFile[]>('/scan', {
     method: 'POST', body: JSON.stringify({ folder }), signal, timeoutMs: REQUEST_TIMEOUT_MS.STANDARD_LOCAL,

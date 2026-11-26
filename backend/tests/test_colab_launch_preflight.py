@@ -124,9 +124,11 @@ def assert_no_mutation(colab):
 def assert_blocked(result):
     assert result.launch_approval is LaunchApproval.BLOCKED
     assert result.cost_gate is CostGate.CONDITIONAL
-    assert result.policy_gate is PolicyGate.NOT_VERIFIED
+    # Policy reviewed 2026-11-26 (official programmatic use); cost stays
+    # CONDITIONAL (no API proof of zero CU use), so preflight alone never says GO.
+    assert result.policy_gate is PolicyGate.OFFICIAL_PROGRAMMATIC_USE
     assert "COST_GATE_CONDITIONAL" in result.launch_blocking_reasons
-    assert "POLICY_GATE_NOT_VERIFIED" in result.launch_blocking_reasons
+    assert "POLICY_GATE_NOT_VERIFIED" not in result.launch_blocking_reasons
 
 
 # 1, 5, 7, 11: every readable check passes, launch stays BLOCKED.
@@ -143,22 +145,23 @@ def test_same_account_full_scope_free_t4_passes_reads_but_launch_blocked():
     assert result.launch_blocking_reasons == (
         "LAUNCH_SCOPE_NOT_VERIFIED", "CREATE_PRECONDITIONS_NOT_VERIFIED",
         "DURABLE_OWNERSHIP_RECORD_NOT_CHECKED", "RUNTIME_OWNERSHIP_NOT_CHECKED",
-        "EXECUTION_LEASE_NOT_CHECKED", "COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED")
+        "EXECUTION_LEASE_NOT_CHECKED", "COST_GATE_CONDITIONAL")
     assert result.paid_cu_non_consumption_evidence == "NO_PER_RUNTIME_ZERO_COST_GUARANTEE"
     assert_blocked(result)
     assert result.labels == (L.IDENTITY_VERIFIED, L.COLAB_ACCESS_VERIFIED, L.FREE_TIER_VERIFIED,
                              L.T4_ELIGIBLE, L.TECHNICAL_PRECHECK_BLOCKED,
-                             L.COST_GATE_CONDITIONAL, L.POLICY_GATE_NOT_VERIFIED)
+                             L.COST_GATE_CONDITIONAL)
     assert result.account_binding == BINDING
     assert len(userinfo.calls) == 1
     assert colab.calls == [("GET", "/v1beta/subscription"), ("GET", "/v1beta/runtimespecs")]
     assert result.remote_requests == 3
 
 
-def test_gates_have_no_verified_member_so_go_is_unreachable():
+def test_cost_gate_has_no_verified_member_so_preflight_go_is_unreachable():
     assert [g.value for g in CostGate] == ["COST_GATE_CONDITIONAL"]
-    assert [g.value for g in PolicyGate] == ["POLICY_GATE_NOT_VERIFIED"]
-    assert module._VERIFIED_COST_GATES == frozenset() and module._VERIFIED_POLICY_GATES == frozenset()
+    assert module._VERIFIED_COST_GATES == frozenset()
+    assert module.POLICY_GATE is PolicyGate.OFFICIAL_PROGRAMMATIC_USE
+    assert module._VERIFIED_POLICY_GATES == frozenset({PolicyGate.OFFICIAL_PROGRAMMATIC_USE})
 
 
 def test_unbound_first_check_verifies_identity_from_google():

@@ -32,7 +32,25 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const [startingRendezvous, setStartingRendezvous] = useState(false)
   const manualModeRef = useRef(false)
   const operationControllerRef = useRef<AbortController | null>(null)
-  const { status: officialStatus } = useOfficialColabStatus(engine)
+  const { status: officialStatus, refresh: refreshOfficialStatus } = useOfficialColabStatus(engine)
+  const [costChecked, setCostChecked] = useState(false)
+  const [costBusy, setCostBusy] = useState(false)
+  const [costError, setCostError] = useState<string | null>(null)
+  const needsCostConfirmation = !officialStatus.available
+    && officialStatus.reasons.length === 1 && officialStatus.reasons[0].code === 'COST_USER_CONFIRMATION_REQUIRED'
+  const confirmCost = async () => {
+    setCostBusy(true)
+    setCostError(null)
+    try {
+      await api.confirmOfficialColabCost()
+      setCostChecked(false)
+      await refreshOfficialStatus()
+    } catch (error) {
+      setCostError(getUserMessage(error))
+    } finally {
+      setCostBusy(false)
+    }
+  }
 
   useEffect(() => {
     operationControllerRef.current?.abort()
@@ -299,6 +317,18 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
                     {officialStatus.reasons.map((reason) => <li key={reason.code}>{reason.message}</li>)}
                   </ul>
                 )}
+                {needsCostConfirmation ? (
+                  <div className="engine-official-cost">
+                    <label>
+                      <input type="checkbox" checked={costChecked} onChange={(event) => setCostChecked(event.target.checked)} disabled={disabled || costBusy} />
+                      {' '}Colab 웹(colab.research.google.com)에서 컴퓨팅 단위 잔액이 0인 것을 방금 직접 확인했습니다.
+                    </label>
+                    <Button variant="secondary" onClick={() => void confirmCost()} disabled={disabled || costBusy || !costChecked}>
+                      {costBusy ? '확인 중…' : '이번 실행에만 확인'}
+                    </Button>
+                    {costError ? <span className="engine-official-cost-error">{costError}</span> : null}
+                  </div>
+                ) : null}
                 <span className="engine-official-local-hint">Local 전사는 그대로 사용할 수 있습니다.</span>
               </div>
             </div>

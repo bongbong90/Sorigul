@@ -430,21 +430,20 @@ class ColabFullFilePipeline:
                     if report.status == "STATE_UNCERTAIN":
                         signals.add("REMOTE_STATE_UNCERTAIN")
                     raise InferenceError(report.error_code or InferenceCode.STATE_UNCERTAIN)
-                # On file residue the adapter closes its kernel on purpose; only a
-                # confirmed kernel delete lets the verified result through.
-                residue = not report.cleanup.files_deleted
-                if not report.cleanup.kernel_retained and not (
-                        residue and not report.cleanup.kernel.cleanup_required):
-                    raise PipelineError("INFERENCE_CLEANUP_REQUIRED", "CLEANUP_REQUIRED")
                 if report.gpu_error:
                     signals.add("GPU_CPU_PATH")
-                # Persist the verified chunk before judging remote file cleanup,
-                # so a leftover temp file never costs a validated transcript.
+                # Persist the verified (hash-bound) chunk before judging any remote
+                # cleanup: a slow or failed remote DELETE never costs a validated
+                # transcript (live run 9: dir/kernel DELETEs timed out, then had
+                # in fact completed).
                 completed[chunk.index] = self._validate_result(report.result, chunk)
                 self.cache.save(source, signature, completed)
-                if residue and len(completed) < len(chunks):
-                    # The next chunk reuses this execution's output dir.
+                unclean = not report.cleanup.files_deleted or not report.cleanup.kernel_retained
+                if unclean and len(completed) < len(chunks):
+                    # The next chunk needs this kernel and output dir.
                     raise PipelineError("INFERENCE_CLEANUP_REQUIRED", "CLEANUP_REQUIRED")
+                # Last chunk: the final inference.cleanup() below re-checks kernel
+                # and files; only its verdict decides completion.
                 if len(completed) < len(chunks):
                     progress_callback(len(completed) / len(chunks))
             token.raise_if_requested()

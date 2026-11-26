@@ -182,7 +182,7 @@ class ColabJupyterInference:
 
     def __init__(self, runtime_client, transfer, *, http_request=_http_request,
                  ws_connect=_connect_ws, execution_timeout=1800.0,
-                 connect_timeout=10.0, cleanup_timeout=10.0,
+                 connect_timeout=10.0, cleanup_timeout=30.0,
                  allow_model_download=False, clock=time.monotonic, sleep=time.sleep,
                  utcnow=lambda: datetime.now(timezone.utc), reuse_kernel=False,
                  cancel_requested=lambda: False):

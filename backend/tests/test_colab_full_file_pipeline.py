@@ -811,3 +811,36 @@ def test_reissued_proxy_token_is_installed_not_treated_as_binding_change(setup, 
     result = run(setup, setup.pipeline((300.0, 12.0)))
     assert result.text == "한국어 조각 0\n한국어 조각 1"
     assert len(reads) > 3 and any(token != TOKEN for token in seen)
+
+
+def test_slow_remote_deletes_that_complete_late_still_deliver_the_transcript(setup):
+    # Live run 9: the inference-dir DELETE and then the kernel DELETE timed out,
+    # yet both had completed server-side; the final cleanup confirmed it.
+    from src.services.colab_jupyter_client import JupyterClientError, JupyterCode
+    original = setup.server.http
+    timed_out = set()
+
+    def slow_delete(method, url, headers, body, timeout):
+        kind = ("dir" if method == "DELETE" and "/inference-" in url and not url.endswith(".json")
+                else "kernel" if method == "DELETE" and "/api/kernels/" in url else None)
+        if kind and kind not in timed_out:
+            timed_out.add(kind)
+            original(method, url, headers, body, timeout)  # it does happen...
+            raise JupyterClientError(JupyterCode.NETWORK_TIMEOUT)  # ...but the reply is lost
+        return original(method, url, headers, body, timeout)
+
+    pipeline = setup.pipeline(durations=(12.0,))
+    pipeline._http = slow_delete
+    result = run(setup, pipeline)
+    assert timed_out == {"dir", "kernel"}
+    assert result.text and pipeline.last_report.status == "COMPLETED"
+    assert not pipeline.last_report.cleanup.cleanup_required
+
+
+def test_unconfirmed_kernel_delete_keeps_the_verified_chunk_cached(setup):
+    setup.server.delete_status = 500  # kernel DELETE never confirmed
+    pipeline = setup.pipeline(durations=(12.0,))
+    with pytest.raises(PipelineError) as exc:
+        run(setup, pipeline)
+    assert exc.value.code == "CLEANUP_REQUIRED"
+    assert pipeline.last_report.completed_indices == (0,)

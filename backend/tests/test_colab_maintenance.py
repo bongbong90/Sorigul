@@ -92,7 +92,7 @@ def test_expired_but_refreshable_account_is_not_reported_disconnected(tmp_path):
                                      authorizer=FailClosedLaunchAuthorizer(), cache_root=tmp_path)
     codes = [r["code"] for r in launcher.status()["reasons"]]
     assert "ACCOUNT_NOT_CONNECTED" not in codes
-    assert codes == ["COST_GATE_CONDITIONAL", "POLICY_GATE_NOT_VERIFIED"]
+    assert codes == ["COST_GATE_CONDITIONAL"]
 
 
 def test_product_provisioning_only_on_this_apps_runtime():
@@ -186,13 +186,13 @@ def test_confirmation_only_for_a_verified_free_account():
         LaunchCostConfirmation(Clock()).confirm("b" * 64, "PAID")
 
 
-def test_user_consent_never_satisfies_the_policy_gate():
+def test_user_consent_never_satisfies_the_policy_gate(monkeypatch):
+    monkeypatch.setattr(preflight_module, "_VERIFIED_POLICY_GATES", frozenset())
     confirmation = LaunchCostConfirmation(Clock())
     confirmation.confirm("b" * 64, "FREE")
     authorizer = ProductLaunchAuthorizer(confirmation)
     assert authorizer.static_blockers() == ["POLICY_GATE_UNRESOLVED"]
     assert authorizer.authorize(preflight()) is False
-    assert preflight_module.POLICY_GATE not in preflight_module._VERIFIED_POLICY_GATES
 
 
 def test_policy_verified_still_needs_fresh_matching_cost_confirmation(monkeypatch):

@@ -186,10 +186,14 @@ def confirm_official_colab_cost(req: ColabCostConfirmation):
     Bound to the last verified account + tier; consumed by the next launch."""
     if req.cu_balance_zero_confirmed is not True:
         raise HTTPException(status_code=400, detail="확인 항목이 선택되지 않았습니다.")
+    try:
+        # Fresh read-only preflight at confirmation time (identity, tier, T4).
+        preflight = colab_auth.check(include_preflight=True).get("preflight") or {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Colab 계정을 확인하지 못했습니다. 계정 연결을 확인해 주세요.") from None
     credentials = colab_auth()
-    preflight = (colab_auth.status() or {}).get("preflight") or {}
-    if credentials is None or preflight.get("tier") != "FREE":
-        raise HTTPException(status_code=400, detail="먼저 Colab 계정 확인으로 무료(FREE) 등급을 확인해 주세요.")
+    if credentials is None or preflight.get("tier") != "FREE" or preflight.get("t4") != "ELIGIBLE":
+        raise HTTPException(status_code=400, detail="무료(FREE) 등급과 T4 사용 가능 여부가 확인될 때만 진행할 수 있습니다.")
     launch_cost_confirmation.confirm(credentials.expected_account_binding, "FREE")
     return {**launch_cost_confirmation.evidence(), "status": _official_colab_status()}
 
