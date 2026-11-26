@@ -537,7 +537,7 @@ def test_product_route_oauth_to_default_off_launcher_and_job_zero_runtime(env, m
         assert routes.engine_resolver.official_colab_enabled is True
         status = client.get('/engines/official-colab/status').json()
         assert status['state'] == 'BLOCKED' and status['available'] is False
-        assert [r['code'] for r in status['reasons']] == ['COST_GATE_CONDITIONAL', 'POLICY_GATE_NOT_VERIFIED']
+        assert [r['code'] for r in status['reasons']] == ['COST_USER_CONFIRMATION_REQUIRED', 'POLICY_GATE_UNRESOLVED']
         assert client.post('/jobs', json=dict(folder=str(env.root), engine='official_colab', scope='selected',
             file_ids=['mock'], course='mock', subject='mock', week=1)).status_code == 400
         assert routes.job_manager.list_jobs() == [] and not env.colab.calls

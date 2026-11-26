@@ -140,3 +140,68 @@ def test_stage_progress_is_monotonic_and_never_reaches_100():
     numbers = [v for v in seen if v is not None]
     assert numbers == sorted(numbers) and numbers[-1] < 1
     assert 0.02 in numbers and 0.2 in numbers and 0.575 in numbers and seen[-1] is None
+
+
+# Product launch conditions (#60) -------------------------------------------
+
+from src.services import colab_launch_preflight as preflight_module
+from src.services.official_colab_launcher import LaunchCostConfirmation, ProductLaunchAuthorizer
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def preflight(binding="b" * 64, tier="FREE"):
+    return SimpleNamespace(account_binding=binding, tier=SimpleNamespace(value=tier))
+
+
+def test_cost_confirmation_is_user_evidence_single_use_and_short_lived():
+    clock = Clock()
+    confirmation = LaunchCostConfirmation(clock)
+    assert confirmation.evidence() == {"cu_balance": "NOT_API_VERIFIABLE", "cost_confirmation": "MISSING"}
+    confirmation.confirm("b" * 64, "FREE")
+    assert confirmation.evidence()["cost_confirmation"] == "USER_CONFIRMED"
+    assert confirmation.consume("b" * 64, "FREE") is True
+    assert confirmation.consume("b" * 64, "FREE") is False  # one launch only
+    confirmation.confirm("b" * 64, "FREE")
+    clock.now += LaunchCostConfirmation.TTL_SECONDS + 1
+    assert confirmation.consume("b" * 64, "FREE") is False  # not a standing guarantee
+
+
+@pytest.mark.parametrize("binding,tier", [("c" * 64, "FREE"), ("b" * 64, "PAID")])
+def test_account_or_subscription_change_voids_confirmation(binding, tier):
+    confirmation = LaunchCostConfirmation(Clock())
+    confirmation.confirm("b" * 64, "FREE")
+    assert confirmation.consume(binding, tier) is False
+    assert confirmation.evidence()["cost_confirmation"] == "MISSING"
+
+
+def test_confirmation_only_for_a_verified_free_account():
+    with pytest.raises(ValueError):
+        LaunchCostConfirmation(Clock()).confirm("b" * 64, "PAID")
+
+
+def test_user_consent_never_satisfies_the_policy_gate():
+    confirmation = LaunchCostConfirmation(Clock())
+    confirmation.confirm("b" * 64, "FREE")
+    authorizer = ProductLaunchAuthorizer(confirmation)
+    assert authorizer.static_blockers() == ["POLICY_GATE_UNRESOLVED"]
+    assert authorizer.authorize(preflight()) is False
+    assert preflight_module.POLICY_GATE not in preflight_module._VERIFIED_POLICY_GATES
+
+
+def test_policy_verified_still_needs_fresh_matching_cost_confirmation(monkeypatch):
+    monkeypatch.setattr(preflight_module, "_VERIFIED_POLICY_GATES", {preflight_module.POLICY_GATE})
+    confirmation = LaunchCostConfirmation(Clock())
+    authorizer = ProductLaunchAuthorizer(confirmation)
+    assert authorizer.static_blockers() == ["COST_USER_CONFIRMATION_REQUIRED"]
+    assert authorizer.authorize(preflight()) is False
+    confirmation.confirm("b" * 64, "FREE")
+    assert authorizer.static_blockers() == []
+    assert authorizer.authorize(preflight()) is True
+    assert authorizer.authorize(preflight()) is False

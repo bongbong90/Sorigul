@@ -1,8 +1,8 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Dict, List, Literal, Optional
 from src.services.scanner import FileScanner
 from src.services.classification import StageRequiredError, resolve_stage
@@ -53,11 +53,13 @@ from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.services.drive_destination import DriveDestinationService, DriveFolderPage, DriveFolderSelection
 from src.utils.paths import get_app_data_dir
-from src.api.colab_oauth_routes import account_router
+from src.api.colab_oauth_routes import account_router, trusted_origin
 from src.services.colab_oauth import ColabOAuthService
 from src.services.colab_oauth_store import ColabSecretStore
 from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore
-from src.services.official_colab_launcher import OfficialColabLauncher, OwnedRuntimeProvisioningAuthorizer
+from src.services.official_colab_launcher import (
+    LaunchCostConfirmation, OfficialColabLauncher, OwnedRuntimeProvisioningAuthorizer, ProductLaunchAuthorizer,
+)
 from src.services.colab_maintenance import ColabMaintenance
 
 logger = logging.getLogger(__name__)
@@ -100,10 +102,13 @@ colab_auth = ColabOAuthService(
     drive_client_path=app_data_dir / "auth" / "google_oauth_client.json",
     ownership_unresolved=_colab_connection_change_blocked,
 )
-# One-click path is wired end to end; the default FailClosedLaunchAuthorizer
-# keeps it BLOCKED while COST_GATE / POLICY_GATE are not satisfied (#60).
+# One-click path is wired end to end. ProductLaunchAuthorizer needs a fresh
+# run-time CU confirmation (user-confirmed, never API-verified) AND a verified
+# POLICY gate, which stays unresolved, so launch remains BLOCKED (#60).
+launch_cost_confirmation = LaunchCostConfirmation()
 official_colab_launcher = OfficialColabLauncher(
     credential_provider=colab_auth, ownership_store=colab_ownership_store,
+    authorizer=ProductLaunchAuthorizer(launch_cost_confirmation),
     cache_root=app_data_dir / "cache" / "colab" / "official-colab",
     provisioning_authorizer=OwnedRuntimeProvisioningAuthorizer(),
 )
@@ -168,6 +173,25 @@ def _official_colab_status() -> dict:
         from src.services.official_colab_launcher import disabled_status
         return disabled_status()
     return status()
+
+
+class ColabCostConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cu_balance_zero_confirmed: bool
+
+
+@router.post("/engines/official-colab/cost-confirmation", dependencies=[Depends(trusted_origin)])
+def confirm_official_colab_cost(req: ColabCostConfirmation):
+    """The user states they just checked a 0 CU balance on the Colab web page.
+    Bound to the last verified account + tier; consumed by the next launch."""
+    if req.cu_balance_zero_confirmed is not True:
+        raise HTTPException(status_code=400, detail="확인 항목이 선택되지 않았습니다.")
+    credentials = colab_auth()
+    preflight = (colab_auth.status() or {}).get("preflight") or {}
+    if credentials is None or preflight.get("tier") != "FREE":
+        raise HTTPException(status_code=400, detail="먼저 Colab 계정 확인으로 무료(FREE) 등급을 확인해 주세요.")
+    launch_cost_confirmation.confirm(credentials.expected_account_binding, "FREE")
+    return {**launch_cost_confirmation.evidence(), "status": _official_colab_status()}
 
 
 @router.get("/engines/official-colab/status")

@@ -43,6 +43,12 @@ REASON_MESSAGES = {
     "POLICY_GATE_NOT_VERIFIED": "Google 무료 이용 정책 적합성이 아직 확인되지 않았습니다.",
     "ACCOUNT_NOT_CONNECTED": "공식 Colab에 사용할 Google 계정이 연결되지 않았습니다.",
     "OWNERSHIP_UNRESOLVED": "이전 원격 작업의 정리 여부를 먼저 확인해야 합니다.",
+    "COST_USER_CONFIRMATION_REQUIRED": (
+        "앱은 Colab 컴퓨팅 단위(CU) 잔액을 조회할 수 없습니다(공식 API 미제공). 실행 직전에 Colab 웹에서 "
+        "잔액이 0인지 직접 확인해야 하며, 이 확인은 비용 0원을 기술적으로 보장하지 않습니다."),
+    "POLICY_GATE_UNRESOLVED": (
+        "공식 문서에서 무료 등급의 Colab API 자동 실행 허용 여부를 확인할 수 없습니다(FAQ: 원격 제어·노트북 UI "
+        "우회 제한). 확인 전까지 공식 Colab 자동 실행을 차단합니다."),
 }
 
 
@@ -80,6 +86,72 @@ class FailClosedLaunchAuthorizer:
 
     def authorize(self, preflight):
         return preflight.launch_approval is LaunchApproval.GO
+
+
+class LaunchCostConfirmation:
+    """Run-time user confirmation that the Colab compute-unit balance is 0 (#60).
+
+    The CU balance cannot be read by this app (no public API field; ccu-info
+    refuses our client), so this is USER_CONFIRMED evidence, never
+    API_VERIFIED. It is in memory only, single-use, short-lived and bound to
+    the verified account binding + subscription tier: a different account or
+    tier at launch voids it. No standing (e.g. 30-day) free-run guarantee.
+    """
+
+    TTL_SECONDS = 600
+
+    def __init__(self, clock=None):
+        import threading
+        import time
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._pending = None
+
+    def confirm(self, account_binding, tier):
+        if not isinstance(account_binding, str) or not account_binding or tier != "FREE":
+            raise ValueError("confirmation needs a verified FREE account")
+        with self._lock:
+            self._pending = (account_binding, tier, self._clock())
+
+    def evidence(self):
+        with self._lock:
+            fresh = self._pending is not None and self._clock() - self._pending[2] <= self.TTL_SECONDS
+            if not fresh:
+                self._pending = None
+            return {"cu_balance": "NOT_API_VERIFIABLE",
+                    "cost_confirmation": "USER_CONFIRMED" if fresh else "MISSING"}
+
+    def consume(self, account_binding, tier):
+        with self._lock:
+            pending, self._pending = self._pending, None  # single use, even on mismatch
+        return (pending is not None and self._clock() - pending[2] <= self.TTL_SECONDS
+                and pending[0] == account_binding and pending[1] == tier == "FREE")
+
+
+class ProductLaunchAuthorizer:
+    """Product gate. Automatic checks (account match, FREE, T4, no unresolved
+    Runtime, owned-only lifecycle) run in launch() itself. On top of them:
+    - cost: a fresh run-time user confirmation (LaunchCostConfirmation);
+    - policy: the preflight module's POLICY gate, which stays NOT VERIFIED
+      because official sources do not state that free-tier programmatic use
+      of the Colab API is allowed. User consent never satisfies it.
+    """
+
+    def __init__(self, confirmation):
+        self.confirmation = confirmation
+
+    def static_blockers(self):
+        blockers = []
+        if self.confirmation.evidence()["cost_confirmation"] != "USER_CONFIRMED":
+            blockers.append("COST_USER_CONFIRMATION_REQUIRED")
+        if preflight_module.POLICY_GATE not in preflight_module._VERIFIED_POLICY_GATES:
+            blockers.append("POLICY_GATE_UNRESOLVED")
+        return blockers
+
+    def authorize(self, preflight):
+        if preflight_module.POLICY_GATE not in preflight_module._VERIFIED_POLICY_GATES:
+            return False
+        return self.confirmation.consume(preflight.account_binding, getattr(preflight.tier, "value", preflight.tier))
 
 
 def default_ownership_factory(store, credentials):
