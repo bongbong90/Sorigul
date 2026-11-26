@@ -1,7 +1,7 @@
 """Trusted, self-contained remote worker. Imported locally without ML imports.
 
 Provisioning (installed only by the separate authorized provisioner): faster-whisper==1.2.1,
-ctranslate2==4.6.0, huggingface-hub==0.36.0. No pip or external scripts.
+ctranslate2==4.6.0, huggingface-hub==0.36.0, nvidia-cublas-cu12==12.4.5.8. No pip or external scripts.
 Model: Systran/faster-whisper-large-v3 at the immutable revision below.
 References: https://github.com/SYSTRAN/faster-whisper/tree/v1.2.1
 https://huggingface.co/Systran/faster-whisper-large-v3/commits/main
@@ -12,7 +12,13 @@ The default requires a pre-provisioned cache. Real Colab support NOT VERIFIED.
 import re
 
 
-PACKAGES = {"faster-whisper": "1.2.1", "ctranslate2": "4.6.0", "huggingface-hub": "0.36.0"}
+# ctranslate2 4.6.0 is a CUDA 12.2 build that dlopens "libcublas.so.12" (wheel
+# ELF, CUDA_DYNAMIC_LOADING=ON; cudart static, cuDNN 9.1 bundled). Colab images
+# can be CUDA 13 only, so cuBLAS 12 comes from this pinned wheel (12.x >= 12.2,
+# no Python deps; its .so needs only glibc + libcublasLt via $ORIGIN). It does
+# not replace the image's CUDA 13 / PyTorch libraries.
+PACKAGES = {"faster-whisper": "1.2.1", "ctranslate2": "4.6.0", "huggingface-hub": "0.36.0",
+            "nvidia-cublas-cu12": "12.4.5.8"}
 MODEL_REPOSITORY = "Systran/faster-whisper-large-v3"
 MODEL_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
 MAX_RESULT_BYTES = 32 * 1024  # base64 + Contents envelope fits PHASE 03's 64 KiB
@@ -93,6 +99,7 @@ def _sorigul_worker(params):
         text = re.sub(r"https?://\S+", "<url>", text)
         text = re.sub(r"[0-9a-fA-F]{24,}", "<id>", text)
         text = re.sub(r"[A-Za-z0-9_\-]{40,}", "<redacted>", text)
+        text = re.sub(r"(?i)\S*(?:token|secret|passw|credential|bearer|api.?key|hf_[A-Za-z0-9])\S*", "<redacted>", text)
         return " ".join(text.split())[:240]
 
     def probe():

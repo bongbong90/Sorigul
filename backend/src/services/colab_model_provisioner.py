@@ -132,9 +132,37 @@ def _sorigul_provision(params):
 
     receipt = dict(execution_id=params["execution_id"], action=params["action"],
                    revision=params["revision"], missing=[], model_cached=False,
-                   error_code=None, device="cuda")
+                   error_code=None, device="cuda", diagnostic=None)
     previous = logging.root.manager.disable
-    error = "GPU_UNAVAILABLE"
+    error, stage, detail = "GPU_UNAVAILABLE", "gpu_check", None
+
+    import re
+
+    def clean(text):
+        # ASCII only, no ids/URLs/secret-shaped runs, bounded.
+        text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in str(text))
+        text = re.sub(r"https?://\S+", "<url>", text)
+        text = re.sub(r"[0-9a-fA-F]{24,}", "<id>", text)
+        text = re.sub(r"[A-Za-z0-9_\-]{40,}", "<redacted>", text)
+        text = re.sub(r"(?i)\S*(?:token|secret|passw|credential|bearer|api.?key|hf_[A-Za-z0-9])\S*", "<redacted>", text)
+        return " ".join(text.split())[-240:]
+
+    def preload_cublas12():
+        # dlopen("libcublas.so.12") by ctranslate2 then resolves to this copy.
+        import ctypes
+        import site
+        try:
+            ctypes.CDLL("libcublas.so.12", mode=ctypes.RTLD_GLOBAL)
+            return
+        except OSError:
+            pass
+        for root in site.getsitepackages():
+            try:
+                ctypes.CDLL(root + "/nvidia/cublas/lib/libcublas.so.12", mode=ctypes.RTLD_GLOBAL)
+                return
+            except OSError:
+                continue
+        raise OSError("libcublas.so.12 not loadable (nvidia-cublas-cu12 missing)")
     try:
         logging.disable(logging.CRITICAL)
         with contextlib.redirect_stdout(Discard()), contextlib.redirect_stderr(Discard()):
@@ -162,15 +190,19 @@ def _sorigul_provision(params):
 
             needed = missing()
             if params["action"] == "INSTALL" and needed:
-                error = "PACKAGE_INSTALL_FAILED"
+                error, stage = "PACKAGE_INSTALL_FAILED", "package_install"
                 pip_env = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
                 pip_env["PIP_CONFIG_FILE"] = os.devnull
-                subprocess.run([
+                result = subprocess.run([
                     sys.executable, "-m", "pip", "--isolated", "--disable-pip-version-check",
                     "--no-input", "install", "--only-binary=:all:", "--index-url", "https://pypi.org/simple",
                     *[p + "==" + params["packages"][p] for p in needed]],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=1200,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1200,
                     env=pip_env)
+                if result.returncode != 0:
+                    detail = "pip exit %d: %s" % (result.returncode,
+                                                  result.stderr.decode("utf-8", "replace")[-600:])
+                    raise RuntimeError("pip failed")
                 importlib.invalidate_caches()
                 # Loaded mismatched native modules cannot safely be upgraded in place.
                 # The controller only provisions before any ML imports in this session.
@@ -184,7 +216,7 @@ def _sorigul_provision(params):
                     receipt["error_code"] = "PACKAGE_VERSION_MISMATCH"
                 return receipt
 
-            error = "PACKAGE_IMPORT_FAILED"
+            error, stage = "PACKAGE_IMPORT_FAILED", "package_import"
             import ctranslate2
             import faster_whisper
             import huggingface_hub
@@ -195,7 +227,7 @@ def _sorigul_provision(params):
                        ("faster-whisper", faster_whisper), ("huggingface-hub", huggingface_hub))):
                 receipt["error_code"] = "PACKAGE_IMPORT_FAILED"
                 return receipt
-            error = "GPU_UNAVAILABLE"
+            error, stage = "GPU_UNAVAILABLE", "gpu_check"
             if ctranslate2.get_cuda_device_count() < 1:
                 receipt["error_code"] = error
                 return receipt
@@ -221,7 +253,7 @@ def _sorigul_provision(params):
                     return None
                 return path
 
-            error = "MODEL_REVISION_MISMATCH"
+            error, stage = "MODEL_REVISION_MISMATCH", "model_cache"
             path = cache()
             if params["action"] == "DOWNLOAD" and path is None:
                 error = "MODEL_DOWNLOAD_FAILED"
@@ -231,14 +263,29 @@ def _sorigul_provision(params):
                 receipt["error_code"] = "MODEL_CACHE_INCOMPLETE"
                 return receipt
             if params["action"] == "VERIFY":
-                error = "MODEL_LOAD_FAILED"
+                error, stage = "CUDA_FAILED", "cublas_load"
+                preload_cublas12()
+                error, stage = "MODEL_LOAD_FAILED", "model_init"
                 # Loading validates corrupt contents beyond file names/lengths.
                 model = WhisperModel(str(path), device="cuda", compute_type="float16")
+                # A load alone does not prove GPU compute: cuBLAS/cuDNN are only
+                # dlopened at the first kernel. One encoder pass over 30 s of
+                # silence exercises GEMM + conv on the GPU (no audio, no decode).
+                error, stage = "CUDA_FAILED", "gpu_verify"
+                import numpy as np
+                extractor = model.feature_extractor
+                features = np.zeros((1, extractor.feature_size, extractor.nb_max_frames), dtype=np.float32)
+                model.model.encode(ctranslate2.StorageView.from_array(features), to_cpu=True)
                 globals().setdefault("_sorigul_models_v1", {})[
                     (params["revision"], "cuda", "float16")] = model
             return receipt
-    except Exception:
+    except Exception as exc:
         receipt["error_code"] = error
+        try:
+            receipt["diagnostic"] = {"stage": stage, "exception": clean(type(exc).__name__),
+                                     "message": clean(detail if detail else exc), "runtime": None}
+        except Exception:
+            receipt["diagnostic"] = None
         return receipt
     finally:
         logging.disable(previous)

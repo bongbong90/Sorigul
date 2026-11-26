@@ -462,6 +462,10 @@ class ColabFullFilePipeline:
         except Exception as exc:
             error = exc if isinstance(exc, (PipelineError, RuntimeClientError, TransferError, InferenceError, EngineError)) else PipelineError("PIPELINE_FAILED")
             signals.add(self._signal(error))
+            if diagnostic is None and inference is not None:
+                diagnostic = getattr(inference, "last_diagnostic", None)
+                if diagnostic is not None:
+                    logger.warning("Colab preparation failed: %s", json.dumps(diagnostic, sort_keys=True))
         finally:
             inference_cleanup = uploads_cleanup = None
             inference_failed = uploads_failed = False

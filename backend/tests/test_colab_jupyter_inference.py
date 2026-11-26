@@ -33,7 +33,8 @@ def deny_network(monkeypatch):
 
 @pytest.fixture
 def ml(monkeypatch):
-    state = SimpleNamespace(cuda=1, load_fail=False, decode_fail=False, audio_fail=False, rows=[
+    state = SimpleNamespace(cuda=1, load_fail=False, decode_fail=False, audio_fail=False,
+        cublas=True, gpu_compute_fail=False, encodes=[], rows=[
         SimpleNamespace(start=0.2, end=1.2, text="가상 전사 내용")],
         loads=[], decodes=[], downloads=[], duration=2.0)
 
@@ -43,6 +44,13 @@ def ml(monkeypatch):
             self.device = kwargs["device"]
             if state.load_fail is True or state.load_fail == self.device:
                 raise RuntimeError(TOKEN + "가상 전사 내용")
+            self.feature_extractor = SimpleNamespace(feature_size=128, nb_max_frames=3000)
+
+            def encode(features, to_cpu):
+                state.encodes.append((features.shape, to_cpu))
+                if state.gpu_compute_fail:
+                    raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            self.model = SimpleNamespace(encode=encode)
 
         def transcribe(self, source, **kwargs):
             # Real libraries can emit progress or sensitive exception context.
@@ -115,7 +123,17 @@ def ml(monkeypatch):
                                                fifo=SimpleNamespace(AudioFifo=Fifo)))
     monkeypatch.setitem(sys.modules, "av", av)
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
-    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(get_cuda_device_count=lambda: state.cuda))
+    monkeypatch.setitem(sys.modules, "ctranslate2", SimpleNamespace(
+        get_cuda_device_count=lambda: state.cuda, StorageView=SimpleNamespace(from_array=lambda a: a)))
+    import ctypes
+    real_cdll = ctypes.CDLL
+
+    def cdll(name, *args, **kwargs):
+        # Stand-in for the pinned nvidia-cublas-cu12 wheel on a Colab runtime.
+        if str(name).endswith("libcublas.so.12") and state.cublas:
+            return SimpleNamespace()
+        return real_cdll(name, *args, **kwargs)
+    monkeypatch.setattr(ctypes, "CDLL", cdll)
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
     return state
 

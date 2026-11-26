@@ -114,7 +114,8 @@ def _unique_object(pairs):
     return value
 
 
-_DIAG_STAGES = {"audio_decode", "model_init", "inference_start", "inference", "result", "worker"}
+_DIAG_STAGES = {"audio_decode", "model_init", "inference_start", "inference", "result", "worker",
+                "gpu_check", "package_install", "package_import", "model_cache", "cublas_load", "gpu_verify"}
 
 
 def _diag_text(value, secrets=()):
@@ -129,6 +130,7 @@ def _diag_text(value, secrets=()):
     value = re.sub(r"https?://\S+", "<url>", value)
     value = re.sub(r"[0-9a-fA-F]{24,}", "<id>", value)
     value = re.sub(r"[A-Za-z0-9_\-]{40,}", "<redacted>", value)
+    value = re.sub(r"(?i)\S*(?:token|secret|passw|credential|bearer|api.?key|hf_[A-Za-z0-9])\S*", "<redacted>", value)
     return " ".join(value.split())[:240]
 
 
@@ -516,7 +518,8 @@ class ColabJupyterInference:
                     if self._provision_action is not None:
                         from src.services.colab_inference_worker import PACKAGES
                         if (not isinstance(receipt, dict) or set(receipt) != {
-                                "execution_id", "action", "revision", "missing", "model_cached", "error_code", "device"}
+                                "execution_id", "action", "revision", "missing", "model_cached", "error_code", "device",
+                                "diagnostic"}
                                 or receipt["execution_id"] != self.execution_id
                                 or receipt["action"] != self._provision_action
                                 or receipt["revision"] != MODEL_REVISION or receipt["device"] != "cuda"
@@ -525,13 +528,22 @@ class ColabJupyterInference:
                                 or any(not isinstance(p, str) or p not in PACKAGES for p in receipt["missing"])
                                 or len(set(receipt["missing"])) != len(receipt["missing"])):
                             raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                        try:
+                            token = getattr(getattr(self._client, "_info", None), "token", None)
+                            diagnostic = sanitize_diagnostic(receipt["diagnostic"], (token,))
+                        except ValueError:
+                            raise InferenceError(InferenceCode.STATE_UNCERTAIN) from None
                         if receipt["error_code"] is not None:
                             allowed = {"PYTHON_UNSUPPORTED", "GPU_UNAVAILABLE", "PACKAGE_INSTALL_FAILED",
                                        "PACKAGE_VERSION_MISMATCH", "PACKAGE_IMPORT_FAILED", "MODEL_DOWNLOAD_FAILED",
-                                       "MODEL_REVISION_MISMATCH", "MODEL_CACHE_INCOMPLETE", "MODEL_LOAD_FAILED"}
+                                       "MODEL_REVISION_MISMATCH", "MODEL_CACHE_INCOMPLETE", "MODEL_LOAD_FAILED",
+                                       "CUDA_FAILED"}
                             if receipt["error_code"] not in allowed:
                                 raise InferenceError(InferenceCode.STATE_UNCERTAIN)
+                            self.last_diagnostic = diagnostic
                             raise InferenceError(InferenceCode(receipt["error_code"]))
+                        if diagnostic is not None:
+                            raise InferenceError(InferenceCode.STATE_UNCERTAIN)
                         self._provision_receipt = receipt
                         return True, True
                     if (not isinstance(receipt, dict) or set(receipt) != {

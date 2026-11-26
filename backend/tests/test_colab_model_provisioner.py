@@ -418,3 +418,24 @@ def test_two_files_recheck_versions_but_install_and_download_only_once(env, remo
     assert finished.status is FileStatus.DONE and finished.done_files == 2
     assert len(remote.installs) == len(remote.downloads) == 1
     assert actions(env.server).count("CHECK") == actions(env.server).count("VERIFY") == 2
+
+
+def test_verify_proves_gpu_compute_not_only_model_load(setup, remote):
+    pipeline = setup.pipeline()
+    pipeline._provisioning_authorizer = Approve()
+    pipeline_run(setup, pipeline)
+    # One encoder pass on 30 s of silence before any audio is decoded.
+    assert setup.ml.encodes[0] == ((1, 128, 3000), True)
+
+
+@pytest.mark.parametrize("fault,stage", [("gpu_compute_fail", "gpu_verify"), ("cublas", "cublas_load")])
+def test_gpu_library_failure_stops_before_upload_with_stage(setup, remote, fault, stage, caplog):
+    setattr(setup.ml, fault, fault == "gpu_compute_fail")
+    pipeline = setup.pipeline()
+    pipeline._provisioning_authorizer = Approve()
+    with pytest.raises(PipelineError) as exc:
+        pipeline_run(setup, pipeline)
+    assert exc.value.code == "CUDA_FAILED"
+    assert pipeline.last_report.diagnostic["stage"] == stage
+    assert not setup.ml.decodes and not any(m == "PUT" for m, p in setup.server.calls)
+    assert "SECRET_TOKEN" not in caplog.text + str(pipeline.last_report)
