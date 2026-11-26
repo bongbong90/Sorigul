@@ -194,6 +194,7 @@ class Server:
         self.mutate = self.on_recv = None
         self.hash_supported = True
         self.clock_value = 0
+        self.status_replies = []  # queued GET /api/status results; default 200
 
     def clock(self):
         self.clock_value += 0.1
@@ -211,6 +212,12 @@ class Server:
         assert headers["X-Colab-Runtime-Proxy-Token"] == TOKEN
         assert "Authorization" not in headers
         suffix = url[len(URL):]
+        if suffix == "/api/status":
+            assert method == "GET" and body is None
+            reply = self.status_replies.pop(0) if self.status_replies else 200
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply, {"started": "now"}
         self.calls.append((method, suffix))
         if suffix == "/api/kernels":
             assert method == "POST" and body == {"name": "python3"}
@@ -669,3 +676,26 @@ def test_diagnostic_shape_is_bounded(bad):
     from src.services.colab_jupyter_inference import sanitize_diagnostic
     with pytest.raises(ValueError):
         sanitize_diagnostic(bad)
+
+
+def test_fresh_runtime_is_awaited_before_the_single_kernel_post(setup):
+    # Live run 8: the first kernel POST to a just-created Runtime timed out.
+    from src.services.colab_jupyter_client import JupyterClientError, JupyterCode
+    # What the real _http_request raises for a transport timeout.
+    setup.server.status_replies = [JupyterClientError(JupyterCode.NETWORK_TIMEOUT), 502, 200]
+    slept = []
+    adapter = setup.adapter(sleep=lambda s: (slept.append(s), setattr(
+        setup.server, "clock_value", setup.server.clock_value + s)))
+    report = adapter.run(0)
+    assert report.status == "OK" and len(slept) == 2
+    assert [c for c in setup.server.calls if c == ("POST", "/api/kernels")] == [("POST", "/api/kernels")]
+
+
+def test_never_ready_runtime_fails_clean_without_any_kernel_post(setup):
+    setup.server.status_replies = [503] * 1000
+    adapter = setup.adapter(sleep=lambda s: setattr(
+        setup.server, "clock_value", setup.server.clock_value + s))
+    report = adapter.run(0)
+    assert report.error_code is Code.CONNECTION_FAILED and report.status == "NOT_RUN"
+    assert ("POST", "/api/kernels") not in setup.server.calls
+    assert not report.cleanup.cleanup_required

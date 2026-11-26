@@ -25,7 +25,7 @@ from src.services.colab_inference_worker import (
     MAX_RESULT_BYTES, MODEL_REVISION, build_preparation_code, build_worker_code,
 )
 from src.services.colab_jupyter_client import (
-    MAX_MESSAGE_BYTES, CleanupResult, ColabJupyterClient, _connect_ws, _http_request,
+    MAX_MESSAGE_BYTES, CleanupResult, ColabJupyterClient, JupyterClientError, _connect_ws, _http_request,
 )
 from src.services.colab_jupyter_files import (
     RemoteOwnership, TransferError, TransferStatus, listing_is_empty,
@@ -183,7 +183,7 @@ class ColabJupyterInference:
     def __init__(self, runtime_client, transfer, *, http_request=_http_request,
                  ws_connect=_connect_ws, execution_timeout=1800.0,
                  connect_timeout=10.0, cleanup_timeout=10.0,
-                 allow_model_download=False, clock=time.monotonic,
+                 allow_model_download=False, clock=time.monotonic, sleep=time.sleep,
                  utcnow=lambda: datetime.now(timezone.utc), reuse_kernel=False,
                  cancel_requested=lambda: False):
         for value in (execution_timeout, connect_timeout, cleanup_timeout):
@@ -199,6 +199,7 @@ class ColabJupyterInference:
         self._execution_timeout = execution_timeout
         self._connect_timeout, self._cleanup_timeout = connect_timeout, cleanup_timeout
         self._allow_download, self._clock, self._utcnow = allow_model_download, clock, utcnow
+        self._sleep = sleep
         self._lock, self._cancel = threading.RLock(), threading.Event()
         self._attempted = self._sent = self._output_owned = self._output_uncertain = False
         self._client = None
@@ -322,13 +323,39 @@ class ColabJupyterInference:
                                    cleanup, result, device, compute, gpu_error, silence,
                                    self.last_diagnostic if state != "OK" else None)
 
+    # A just-created Runtime's Jupyter proxy may not answer yet (live run 8:
+    # the first kernel POST timed out, leaving its result uncertain). Waiting on
+    # the idempotent GET /api/status first never creates anything remotely.
+    READY_WAIT_SECONDS = 90.0
+    READY_POLL_SECONDS = 3.0
+    KERNEL_CREATE_TIMEOUT = 30.0
+
+    def _await_jupyter_ready(self, client):
+        deadline = self._clock() + self.READY_WAIT_SECONDS
+        while True:
+            self._check_cancel()
+            try:
+                status, _ = client._http("GET", "/api/status")
+            except JupyterClientError:
+                status = None
+            if status == 200:
+                return
+            if status in (401, 403):
+                self._check_http_status(status)
+            if self._clock() >= deadline:
+                raise InferenceError(InferenceCode.CONNECTION_FAILED)  # nothing was created
+            self._sleep(self.READY_POLL_SECONDS)
+
     def _ensure_kernel(self):
         self._check_cancel()
         client = self._client
         if client._kernel_id is not None:
             return
+        self._await_jupyter_ready(client)
+        self._check_cancel()
         client._unknown_kernel = True
-        status, model = client._http("POST", "/api/kernels", {"name": "python3"})
+        status, model = client._http("POST", "/api/kernels", {"name": "python3"},
+                                     timeout=max(self._connect_timeout, self.KERNEL_CREATE_TIMEOUT))
         if status != 201:
             if status in (400, 401, 403, 404, 405, 429):
                 client._unknown_kernel = False
