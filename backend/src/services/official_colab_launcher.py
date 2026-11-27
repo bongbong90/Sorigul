@@ -175,6 +175,24 @@ _CREATE_ERRORS = {
 }
 
 
+# Runtime-creation delay (Google GPU allocation) is reported apart from
+# transcription errors. Both keep the cleanup obligation for recovery.
+_CREATE_WAIT_ERRORS = {
+    RuntimeErrorCode.CREATE_WAIT_EXCEEDED: (
+        "GPU_ALLOCATION_DELAYED",
+        "Google GPU 할당이 최대 대기시간(5분) 안에 끝나지 않아 전사를 시작하지 않았습니다. "
+        "전사 오류가 아니며, 요청한 런타임은 자동으로 정리됩니다. 정리가 끝난 뒤 다시 시도해 주세요."),
+    RuntimeErrorCode.CREATE_WAIT_CANCELLED: (
+        "GPU_ALLOCATION_CANCELLED",
+        "Google GPU 할당 대기 중 사용자가 중지했습니다. 요청한 런타임은 자동으로 정리됩니다."),
+}
+
+
+def gpu_wait_message(elapsed_seconds):
+    seconds = max(0, int(elapsed_seconds))
+    return f"Google GPU 할당 대기 중입니다 (경과 {seconds // 60}분 {seconds % 60:02d}초, 최대 5분)."
+
+
 class LaunchedOfficialColabEngine:
     """The existing engine plus one owned Runtime that this launch created."""
 
@@ -220,8 +238,12 @@ class OfficialColabLauncher:
     def __init__(self, *, credential_provider, ownership_store=None,
                  ownership_factory=default_ownership_factory, authorizer=None,
                  pipeline_factory=ColabFullFilePipeline, cache_root: Path,
-                 preflight_options=None, provisioning_authorizer=None, provisioning_event=lambda event: None):
+                 preflight_options=None, provisioning_authorizer=None, provisioning_event=lambda event: None,
+                 on_unresolved=lambda: None):
         self._credentials = credential_provider
+        # Starts the existing ownership-based recovery right after a create
+        # that left a cleanup obligation (wait exceeded, cancelled, uncertain).
+        self._on_unresolved = on_unresolved
         self._store = ownership_store if ownership_store is not None else OwnershipStore()
         self._ownership_factory = ownership_factory
         self._authorizer = authorizer if authorizer is not None else FailClosedLaunchAuthorizer()
@@ -271,7 +293,13 @@ class OfficialColabLauncher:
         return {"state": "BLOCKED" if reasons else "READY", "available": not reasons,
                 "reasons": status_reasons(reasons)}
 
-    def launch(self):
+    def _unresolved(self):
+        try:
+            self._on_unresolved()
+        except Exception:
+            pass
+
+    def launch(self, *, wait_event=None, abort_requested=None):
         if self._authorizer.static_blockers():
             raise _error("LAUNCH_BLOCKED", "실행 조건이 확인되지 않아 공식 Colab 전사를 시작하지 않았습니다.",
                          category=ErrorCategory.CONFIGURATION)
@@ -310,13 +338,21 @@ class OfficialColabLauncher:
             if ownership.client.verified_account_binding() != result.account_binding:
                 raise _error("ACCOUNT_MISMATCH", "연결된 Google 계정이 이전에 확인한 계정과 다릅니다.",
                              category=ErrorCategory.AUTHENTICATION)
+            set_hooks = getattr(ownership.client, "set_create_wait_hooks", None)
+            if set_hooks is not None:
+                set_hooks(observer=wait_event, abort_requested=abort_requested)
             ownership.create()
         except OfficialColabEngineError:
             ownership.client.close()
             raise
         except RuntimeClientError as exc:
             ownership.client.close()
+            if exc.code in _CREATE_WAIT_ERRORS:
+                self._unresolved()
+                kind, message = _CREATE_WAIT_ERRORS[exc.code]
+                raise _error(kind, message, local=False, cleanup=True) from None
             if exc.cleanup_required:
+                self._unresolved()
                 raise _error("CLEANUP_REQUIRED", "원격 작업 정리가 필요합니다.", cleanup=True) from None
             if exc.code is RuntimeErrorCode.PRECONDITION_UNVERIFIED:
                 raise _error("AUTH_REQUIRED", "계정과 접근 권한을 확인해 주세요.",
@@ -329,6 +365,7 @@ class OfficialColabLauncher:
             raise _error(kind, message, category=category) from None
         except Exception:
             ownership.client.close()
+            self._unresolved()
             raise _error("STATE_UNCERTAIN", "원격 작업 상태를 확인할 수 없어 작업을 중단했습니다.",
                          local=False, cleanup=True) from None
 

@@ -78,11 +78,23 @@ def no_real_network(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 @pytest.fixture
 def setup_client():
     server = Server()
+    clock = FakeClock()
     client = ColabRuntimeClient(OAUTH, transport=httpx.MockTransport(server.handle),
-                                max_polls=2, sleep=lambda seconds: None)
+                                max_polls=2, sleep=clock.sleep, clock=clock)
     yield client, server
     client.close()
 
@@ -224,8 +236,10 @@ def test_bounded_polling_then_explicit_resume_no_new_allocation(setup_client):
     client, server = setup_client
     server.pending = True
     server.overrides["GET", "/v1/operations/mock-op"] = lambda req: httpx.Response(200, json=server.operation(False))
-    fails(Code.STATE_UNCERTAIN, client.create_runtime)
-    assert len([r for r in server.calls if r.url.path.startswith("/v1/operations/")]) == 2
+    error = fails(Code.CREATE_WAIT_EXCEEDED, client.create_runtime)
+    assert error.cleanup_required and not error.local_fallback_allowed
+    # 300 s GPU-allocation window at the 2 s create interval, status GETs only.
+    assert len([r for r in server.calls if r.url.path.startswith("/v1/operations/")]) == 150
     fails(Code.STATE_UNCERTAIN, client.delete_owned_runtime)
     del server.overrides["GET", "/v1/operations/mock-op"]
     assert client.resume_operation().name == server.runtime_name
@@ -388,3 +402,48 @@ def test_nonempty_delete_response_not_reported_as_success(setup_client):
     error = fails(Code.DELETE_FAILED, client.delete_owned_runtime)
     assert client.cleanup_required
     assert PROXY not in repr(error)
+
+
+def test_create_waits_past_old_window_reports_elapsed_and_never_reposts(setup_client):
+    client, server = setup_client
+    server.pending = True
+    gets = {"n": 0}
+
+    def slow_operation(request):
+        gets["n"] += 1
+        return httpx.Response(200, json=server.operation(gets["n"] >= 60))  # done at ~120 s
+    server.overrides["GET", "/v1/operations/mock-op"] = slow_operation
+    seen = []
+    client.set_create_wait_hooks(observer=seen.append)
+    runtime = client.create_runtime()
+    assert runtime.name == server.runtime_name
+    assert len([r for r in server.calls if r.method == "POST"]) == 1
+    assert seen[0] == 0 and seen[-1] == pytest.approx(118.0) and seen == sorted(seen)
+
+
+def test_user_stop_during_gpu_wait_keeps_cleanup_obligation(setup_client):
+    client, server = setup_client
+    server.pending = True
+    server.overrides["GET", "/v1/operations/mock-op"] = lambda req: httpx.Response(200, json=server.operation(False))
+    polls = {"n": 0}
+
+    def abort():
+        polls["n"] += 1
+        return polls["n"] > 3
+    client.set_create_wait_hooks(abort_requested=abort)
+    error = fails(Code.CREATE_WAIT_CANCELLED, client.create_runtime)
+    assert error.cleanup_required
+    assert len([r for r in server.calls if r.url.path.startswith("/v1/operations/")]) == 3
+    assert len([r for r in server.calls if r.method == "POST"]) == 1
+    assert not any(r.method == "DELETE" for r in server.calls)
+
+
+def test_recovery_poll_stays_short_while_create_wait_is_long(setup_client):
+    client, server = setup_client
+    server.pending = True
+    server.overrides["GET", "/v1/operations/mock-op"] = lambda req: httpx.Response(200, json=server.operation(False))
+    fails(Code.CREATE_WAIT_EXCEEDED, client.create_runtime)
+    before = len([r for r in server.calls if r.url.path.startswith("/v1/operations/")])
+    fails(Code.STATE_UNCERTAIN, client.resume_operation)
+    after = len([r for r in server.calls if r.url.path.startswith("/v1/operations/")])
+    assert after - before == 3  # max_polls=2: the bounded reconciliation is unchanged

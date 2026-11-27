@@ -34,7 +34,7 @@ from src.services.transcription_runner import (
 )
 from test_colab_full_file_pipeline import FullServer, Splitter, UserInfo, ml  # noqa: F401 (fixture)
 from test_colab_jupyter_files import TOKEN, URL
-from test_colab_runtime_client import OAUTH, PROXY, Server as RuntimeServer
+from test_colab_runtime_client import OAUTH, PROXY, FakeClock, Server as RuntimeServer
 
 import hashlib
 
@@ -130,10 +130,12 @@ def env(tmp_path, monkeypatch, ml):
     owners, pipelines = [], []
     durations = {"value": (300.0, 12.0)}
 
+    clock = FakeClock()
+
     def ownership_factory(store_, credentials):
         client = ColabRuntimeClient(credentials.access_token, transport=httpx.MockTransport(handle),
                                     account_verifier=GoogleAccountVerifier(opener=userinfo),
-                                    sleep=lambda _: None)
+                                    sleep=clock.sleep, clock=clock)
         owner = RuntimeOwnership(store_, client)
         owners.append(owner)
         return owner
@@ -161,9 +163,9 @@ def env(tmp_path, monkeypatch, ml):
             **provisioning_options)
         original_launch = launcher.launch
 
-        def recording_launch():
+        def recording_launch(**hooks):
             try:
-                return original_launch()
+                return original_launch(**hooks)
             except Exception as exc:
                 launch_errors.append(getattr(exc, "code", type(exc).__name__))
                 raise
@@ -531,3 +533,64 @@ def test_tokens_accounts_runtime_and_proxy_never_persist_log_or_surface(env, cap
             assert secret not in surface
     assert runtime_name not in jobs_file and runtime_name not in status_text
     assert "official_colab" not in status_text
+
+
+# GPU allocation wait (create Operation pending) --------------------------------
+
+def _pending_operation(env, done_after=None):
+    gets = {"n": 0}
+
+    def operation(request):
+        gets["n"] += 1
+        done = done_after is not None and gets["n"] >= done_after
+        return httpx.Response(200, json=env.runtime.operation(done))
+    env.runtime.pending = True
+    env.runtime.overrides["GET", "/v1/operations/mock-op"] = operation
+    return gets
+
+
+def _gpu_wait_events(job):
+    return [e.message for e in job.events if e.category == "ColabProvisioning:GPU_WAIT"]
+
+
+def test_gpu_allocation_delay_is_reported_apart_from_transcription_and_recovered(env):
+    unresolved = []
+    env.install(on_unresolved=lambda: unresolved.append(True))
+    _pending_operation(env)
+    finished = run(env, create(env))
+    assert failed_with(env, finished) == "OFFICIAL_COLAB_GPU_ALLOCATION_DELAYED"
+    assert "Google GPU 할당" in finished.error and "전사 오류가 아니며" in finished.error
+    assert "PC 전사를 선택할 수 있습니다" not in finished.error  # no Local switch
+    waits = _gpu_wait_events(finished)
+    assert waits and "경과 0분 00초" in waits[0] and "최대 5분" in waits[0]
+    assert len(waits) == 19  # throttled to >=15 s; at the 2 s poll that is every 16 s of 300 s
+    assert len(posts(env)) == 1 and env.server.calls == []
+    assert unresolved == [True]
+    assert [r.state for r in records(env)] != [OwnershipState.CLEANED]
+
+
+def test_slow_gpu_allocation_within_window_completes_with_one_post(env):
+    env.install()
+    _pending_operation(env, done_after=60)  # ~2 minutes, past the old 30 s window
+    finished = run(env, create(env))
+    assert finished.status is FileStatus.DONE
+    assert len(_gpu_wait_events(finished)) >= 8
+    assert len(posts(env)) == 1 and len(deletes(env)) == 1
+
+
+def test_user_stop_during_gpu_wait_fails_with_cleanup_and_no_second_post(env):
+    unresolved = []
+    env.install(on_unresolved=lambda: unresolved.append(True))
+    gets = _pending_operation(env)
+    token = CancellationToken()
+    original = env.runtime.overrides["GET", "/v1/operations/mock-op"]
+
+    def stop_after_three(request):
+        if gets["n"] >= 3:
+            token.request_stop()
+        return original(request)
+    env.runtime.overrides["GET", "/v1/operations/mock-op"] = stop_after_three
+    finished = run(env, create(env), token=token)
+    assert failed_with(env, finished) == "OFFICIAL_COLAB_GPU_ALLOCATION_CANCELLED"
+    assert "사용자가 중지" in finished.error
+    assert len(posts(env)) == 1 and unresolved == [True]
