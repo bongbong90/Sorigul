@@ -1,8 +1,8 @@
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Dict, List, Literal, Optional
 from src.services.scanner import FileScanner
 from src.services.classification import StageRequiredError, resolve_stage
@@ -53,6 +53,14 @@ from src.services.folder_revision import FolderRevision, folder_revision
 from src.services.settings import RuntimeSettings, SettingsManager, SettingsPatch
 from src.services.drive_destination import DriveDestinationService, DriveFolderPage, DriveFolderSelection
 from src.utils.paths import get_app_data_dir
+from src.api.colab_oauth_routes import account_router, trusted_origin
+from src.services.colab_oauth import ColabOAuthService
+from src.services.colab_oauth_store import ColabSecretStore
+from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore
+from src.services.official_colab_launcher import (
+    LaunchCostConfirmation, OfficialColabLauncher, OwnedRuntimeProvisioningAuthorizer, ProductLaunchAuthorizer,
+)
+from src.services.colab_maintenance import ColabMaintenance
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,10 +83,52 @@ drive_auth = GoogleOAuthService(
 )
 drive_service = DriveUploadService(job_manager, drive_auth, settings_manager)
 colab_rendezvous_service = ColabRendezvousService(drive_auth)
-engine_resolver = DefaultEngineResolver()
+colab_ownership_store = OwnershipStore()
+
+
+def _colab_connection_change_blocked():
+    # Active Jobs protect credentials even before Runtime create publishes its receipt.
+    active_id = execution_service.active_job_id()
+    if active_id is not None:
+        job = job_manager.get_job(active_id)
+        if job is None or job.engine == "official_colab":
+            return True
+    return any(record.state is not OwnershipState.CLEANED for record in colab_ownership_store.load())
+
+
+colab_auth = ColabOAuthService(
+    app_data_dir / "auth" / "google_colab_oauth_client.json",
+    ColabSecretStore(app_data_dir / "auth" / "google_colab_credentials.dpapi"),
+    drive_client_path=app_data_dir / "auth" / "google_oauth_client.json",
+    ownership_unresolved=_colab_connection_change_blocked,
+)
+# One-click path is wired end to end. ProductLaunchAuthorizer needs a fresh
+# run-time CU confirmation (user-confirmed, never API-verified) AND a verified
+# POLICY gate, which stays unresolved, so launch remains BLOCKED (#60).
+launch_cost_confirmation = LaunchCostConfirmation()
+official_colab_launcher = OfficialColabLauncher(
+    credential_provider=colab_auth, ownership_store=colab_ownership_store,
+    authorizer=ProductLaunchAuthorizer(launch_cost_confirmation),
+    cache_root=app_data_dir / "cache" / "colab" / "official-colab",
+    provisioning_authorizer=OwnedRuntimeProvisioningAuthorizer(),
+)
+engine_resolver = DefaultEngineResolver(
+    official_colab_launcher=official_colab_launcher, official_colab_launcher_enabled=True)
+account_router(colab_auth, router)
 
 
 drive_execution_service = DriveExecutionService(drive_service)
+
+colab_maintenance = ColabMaintenance(
+    colab_auth=colab_auth, drive_auth=drive_auth, store=colab_ownership_store,
+    cache_root=app_data_dir / "cache" / "colab" / "official-colab",
+    job_active=lambda: execution_service.active_job_id() is not None,
+)
+
+
+def start_background_maintenance():
+    """App start: renew Google tokens, recover owned Runtimes, settle locks."""
+    colab_maintenance.start(force=True)
 
 
 def handle_file_completed(job_id: str, file_id: str, filename: str):
@@ -115,6 +165,47 @@ def health():
 def local_runtime_status():
     # Reuse the existing verification/cache without executing transcription.
     return engine_resolver.local_runtime_status()
+
+
+def _official_colab_status() -> dict:
+    status = getattr(engine_resolver, "official_colab_status", None)
+    if status is None:
+        from src.services.official_colab_launcher import disabled_status
+        return disabled_status()
+    return status()
+
+
+class ColabCostConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cu_balance_zero_confirmed: bool
+
+
+@router.post("/engines/official-colab/cost-confirmation", dependencies=[Depends(trusted_origin)])
+def confirm_official_colab_cost(req: ColabCostConfirmation):
+    """The user states they just checked a 0 CU balance on the Colab web page.
+    Bound to the last verified account + tier; consumed by the next launch."""
+    if req.cu_balance_zero_confirmed is not True:
+        raise HTTPException(status_code=400, detail="확인 항목이 선택되지 않았습니다.")
+    try:
+        # Fresh read-only preflight at confirmation time (identity, tier, T4).
+        preflight = colab_auth.check(include_preflight=True).get("preflight") or {}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Colab 계정을 확인하지 못했습니다. 계정 연결을 확인해 주세요.") from None
+    credentials = colab_auth()
+    if credentials is None or preflight.get("tier") != "FREE" or preflight.get("t4") != "ELIGIBLE":
+        raise HTTPException(status_code=400, detail="무료(FREE) 등급과 T4 사용 가능 여부가 확인될 때만 진행할 수 있습니다.")
+    launch_cost_confirmation.confirm(credentials.expected_account_binding, "FREE")
+    return {**launch_cost_confirmation.evidence(), "status": _official_colab_status()}
+
+
+@router.get("/engines/official-colab/status")
+def official_colab_status():
+    # No network: enabled state, static launch gates and local ownership only.
+    # Never returns credentials, account identifiers, Runtime names or URLs.
+    status = _official_colab_status()
+    if any(r.get("code") == "OWNERSHIP_UNRESOLVED" for r in status.get("reasons") or []):
+        colab_maintenance.start(refresh=False)  # background, throttled self-heal
+    return status
 
 
 @router.get("/events")
@@ -473,7 +564,20 @@ class CreateJobRequest(BaseModel):
 
 @router.post("/jobs", response_model=JobModel)
 def create_job(req: CreateJobRequest):
-    if req.engine not in {"local_whisper", "direct_colab"}:
+    if req.engine == "official_colab":
+        if getattr(engine_resolver, "official_colab_enabled", False) is not True:
+            raise HTTPException(status_code=400, detail="Official Colab engine is disabled.")
+        if req.colab_url is not None:
+            raise HTTPException(status_code=400, detail="Official Colab does not accept connection settings.")
+        official_status = _official_colab_status()
+        if official_status.get("available") is not True:
+            reasons = official_status.get("reasons") or []
+            first = reasons[0]["message"] if reasons else "실행 조건이 확인되지 않았습니다."
+            raise HTTPException(
+                status_code=400,
+                detail=f"공식 Colab 자동 연결을 지금 사용할 수 없습니다. {first}",
+            )
+    elif req.engine not in {"local_whisper", "direct_colab"}:
         raise HTTPException(status_code=400, detail="Unsupported transcription engine.")
     if req.engine == "direct_colab" and not req.colab_url:
         raise HTTPException(status_code=400, detail="Colab URL is required.")

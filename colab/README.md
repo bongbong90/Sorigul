@@ -9,9 +9,15 @@ Google Colab GPU 런타임을 사용하여 Sorigul 전사를 수행하기 위한
 3. 첫 번째 셀에 다음 코드를 입력하여 실행합니다:
 
 ```bash
-!git clone https://github.com/bongbong90/Sorigul.git
-!cd Sorigul && pip install -r colab/requirements.txt
-!python Sorigul/colab/sorigul_colab_bootstrap.py
+%%bash
+set -eu
+work=$(mktemp -d)
+cd "$work"
+git init -q
+git fetch -q --depth=1 https://github.com/bongbong90/Sorigul.git 23c0429759e286566632f0155f1a4e4c6ee3c720
+git checkout -q --detach FETCH_HEAD
+python -m pip install -r colab/requirements.txt
+python colab/sorigul_colab_bootstrap.py
 ```
 4. Google Drive 마운트 권한을 허용합니다.
 5. 터널이 생성되고 백엔드가 시작되면, Sorigul 데스크톱 앱으로 돌아갑니다.

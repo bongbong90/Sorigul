@@ -260,6 +260,11 @@ def main(argv: "list[str] | None" = None) -> int:
             return job_storage_exit_code(exc.code)
         raise
 
+    try:
+        from src.api.routes import start_background_maintenance
+        start_background_maintenance()  # token renew + owned Runtime / lock recovery
+    except Exception:
+        pass  # best effort; never blocks the backend from starting
     uvicorn.run(app, host="127.0.0.1", port=args.port)
     return 0
 

@@ -1,7 +1,8 @@
 import json
+import hashlib
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -11,6 +12,8 @@ from src.domain.transcription import (
     ErrorCategory,
     StopRequested,
     TranscriptionResult,
+    SILENCE_MARKER,
+    validate_silence_marker,
 )
 
 
@@ -19,6 +22,7 @@ class BundlePaths:
     txt: Path
     json: Path
     srt: Path
+    source: Optional[Path] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def final_for(cls, source_path: Path) -> "BundlePaths":
@@ -26,6 +30,7 @@ class BundlePaths:
             txt=source_path.with_suffix(".txt"),
             json=source_path.with_suffix(".json"),
             srt=source_path.with_suffix(".srt"),
+            source=source_path,
         )
 
     def as_dict(self) -> Dict[str, Path]:
@@ -33,8 +38,38 @@ class BundlePaths:
 
 
 class OutputBundleValidator:
+    @staticmethod
+    def _unique_fields(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate result field")
+            value[key] = item
+        return value
+
+    @staticmethod
+    def _validate_silence(paths, payload):
+        try:
+            marker = payload[SILENCE_MARKER]
+            validate_silence_marker(marker, "file")
+            if (set(payload) != {"text", "segments", SILENCE_MARKER}
+                    or payload["text"] != "" or payload["segments"] != []
+                    or paths.txt.stat().st_size != 0 or paths.srt.stat().st_size != 0
+                    or paths.source is None or paths.source.suffix.lower() != ".mp3"
+                    or not paths.source.is_file() or paths.source.stat().st_size != marker["source_size"]):
+                raise ValueError
+            digest = hashlib.sha256()
+            with paths.source.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() != marker["source_sha256"]:
+                raise ValueError
+        except (OSError, ValueError, TypeError, KeyError):
+            raise EngineError("SILENCE_INVALID", ErrorCategory.OUTPUT,
+                              "무음 완료 결과의 형식 또는 원본 파일이 일치하지 않습니다.") from None
+
     def validate(self, paths: BundlePaths):
-        if not paths.txt.exists() or paths.txt.stat().st_size <= 0:
+        if not paths.txt.exists():
             raise EngineError(
                 "TXT_INVALID",
                 ErrorCategory.OUTPUT,
@@ -54,8 +89,8 @@ class OutputBundleValidator:
             )
 
         try:
-            payload = json.loads(paths.json.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            payload = json.loads(paths.json.read_text(encoding="utf-8"), object_pairs_hook=self._unique_fields)
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
             raise EngineError(
                 "JSON_INVALID",
                 ErrorCategory.OUTPUT,
@@ -68,6 +103,10 @@ class OutputBundleValidator:
                 ErrorCategory.OUTPUT,
                 "JSON 결과에 text 또는 segments가 없습니다.",
             )
+        if SILENCE_MARKER in payload:
+            self._validate_silence(paths, payload)
+        elif paths.txt.stat().st_size <= 0:
+            raise EngineError("TXT_INVALID", ErrorCategory.OUTPUT, "TXT 결과가 비어 있거나 존재하지 않습니다.")
         try:
             TranscriptionResult.from_engine_payload(payload)
         except (TypeError, ValueError) as exc:
@@ -110,6 +149,7 @@ class OutputBundleWriter:
             txt=source_path.parent / f".{source_path.stem}.{token}.txt.tmp",
             json=source_path.parent / f".{source_path.stem}.{token}.json.tmp",
             srt=source_path.parent / f".{source_path.stem}.{token}.srt.tmp",
+            source=source_path,
         )
         backup_paths = BundlePaths(
             txt=source_path.parent / f".{source_path.stem}.{token}.txt.bak",
