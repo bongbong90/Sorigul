@@ -1,14 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import { api, getUserMessage, isRequestAbort, isRequestTimeout } from '../../api/client'
-import type { RendezvousState } from '../../api/client'
+import type { EngineId, RendezvousState } from '../../api/client'
 import { AlertTriangle, CheckCircle, Loader2 } from 'lucide-react'
+import { useOfficialColabStatus } from '../../hooks/useOfficialColabStatus'
 import { Button } from '../ui/Button'
 import { COLAB_BOOTSTRAP_COMMANDS, COLAB_NEW_NOTEBOOK_URL } from '../../lib/colabSetup'
 import { openInBrowser } from '../../lib/native'
 
 export interface EngineConnection {
-  engine: 'local_whisper' | 'direct_colab'
-  onChangeEngine: (engine: 'local_whisper' | 'direct_colab') => void
+  engine: EngineId
+  onChangeEngine: (engine: EngineId) => void
   connectedBaseUrl: string | null
   onBaseUrlChange: (url: string | null) => void
 }
@@ -31,6 +32,25 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
   const [startingRendezvous, setStartingRendezvous] = useState(false)
   const manualModeRef = useRef(false)
   const operationControllerRef = useRef<AbortController | null>(null)
+  const { status: officialStatus, refresh: refreshOfficialStatus } = useOfficialColabStatus(engine)
+  const [costChecked, setCostChecked] = useState(false)
+  const [costBusy, setCostBusy] = useState(false)
+  const [costError, setCostError] = useState<string | null>(null)
+  const needsCostConfirmation = !officialStatus.available
+    && officialStatus.reasons.length === 1 && officialStatus.reasons[0].code === 'COST_USER_CONFIRMATION_REQUIRED'
+  const confirmCost = async () => {
+    setCostBusy(true)
+    setCostError(null)
+    try {
+      await api.confirmOfficialColabCost()
+      setCostChecked(false)
+      await refreshOfficialStatus()
+    } catch (failure) {
+      setCostError(getUserMessage(failure))
+    } finally {
+      setCostBusy(false)
+    }
+  }
 
   useEffect(() => {
     operationControllerRef.current?.abort()
@@ -260,7 +280,61 @@ export function EngineSection({ engine, onChangeEngine, connectedBaseUrl, onBase
           </div>
           {engine === 'direct_colab' && <CheckCircle className="engine-icon" aria-hidden="true" />}
         </label>
+
+        <label className={`engine-option${engine === 'official_colab' ? ' engine-option-selected' : ''}${disabled ? ' engine-option-disabled' : ''}`}>
+          <input
+            type="radio"
+            name="engine"
+            value="official_colab"
+            checked={engine === 'official_colab'}
+            onChange={() => onChangeEngine('official_colab')}
+            className="visually-hidden"
+            disabled={disabled}
+          />
+          <div className="engine-option-copy">
+            <strong>Colab 자동 연결</strong>
+            <span>Whisper large-v3 · URL 입력·Notebook 실행 없이 · {officialStatus.available ? '사용 가능' : '현재 사용 불가'}</span>
+          </div>
+          {engine === 'official_colab' && <CheckCircle className="engine-icon" aria-hidden="true" />}
+        </label>
       </div>
+
+      {engine === 'official_colab' && (
+        <div className="engine-official-panel" aria-live="polite">
+          {officialStatus.available ? (
+            <span className="engine-state engine-state-connected">
+              <CheckCircle className="engine-icon-small" aria-hidden="true" /> 전사 시작 한 번으로 자동 연결·전사·정리합니다.
+            </span>
+          ) : (
+            <div className="engine-error" role="status">
+              <AlertTriangle className="engine-icon-small" aria-hidden="true" />
+              <div>
+                <strong>지금은 자동 연결로 전사를 시작할 수 없습니다.</strong>
+                {compact ? (
+                  <span> {officialStatus.reasons[0]?.message ?? ''}</span>
+                ) : (
+                  <ul className="engine-official-reasons">
+                    {officialStatus.reasons.map((reason) => <li key={reason.code}>{reason.message}</li>)}
+                  </ul>
+                )}
+                {needsCostConfirmation ? (
+                  <div className="engine-official-cost">
+                    <label>
+                      <input type="checkbox" checked={costChecked} onChange={(event) => setCostChecked(event.target.checked)} disabled={disabled || costBusy} />
+                      {' '}Colab 웹(colab.research.google.com)에서 컴퓨팅 단위 잔액이 0인 것을 방금 직접 확인했습니다.
+                    </label>
+                    <Button variant="secondary" onClick={() => void confirmCost()} disabled={disabled || costBusy || !costChecked}>
+                      {costBusy ? '확인 중…' : '이번 실행에만 확인'}
+                    </Button>
+                    {costError ? <span className="engine-official-cost-error">{costError}</span> : null}
+                  </div>
+                ) : null}
+                <span className="engine-official-local-hint">Local 전사는 그대로 사용할 수 있습니다.</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {compact && engine === 'direct_colab' ? <div className="inline-actions"><span>Google Colab · {connectedBaseUrl ? '연결됨' : '연결 필요'}</span><Button variant="secondary" onClick={onManage}>Colab 연결 설정</Button></div> : null}
       {!compact && engine === 'direct_colab' && (

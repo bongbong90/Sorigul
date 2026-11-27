@@ -30,6 +30,8 @@ import { CurrentTaskSection, type CurrentTaskStatus } from '../components/transc
 import { FolderSection } from '../components/transcription/FolderSection'
 import { QueueTable, type QueueRow, type QueueStatus } from '../components/transcription/QueueTable'
 import { EngineSection, type EngineConnection } from '../components/transcription/EngineSection'
+import { useOfficialColabStatus } from '../hooks/useOfficialColabStatus'
+import type { EngineId } from '../api/client'
 import { HeaderActions } from '../components/layout/HeaderActions'
 
 import { OverallProgress, TranscriptionActions } from '../components/transcription/TranscriptionActions'
@@ -114,12 +116,13 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const [driveAuth, setDriveAuth] = useState('UNAUTHENTICATED')
   const [dialog, setDialog] = useState<DialogKind>(null)
 
-  const [fallbackEngine, setFallbackEngine] = useState<'local_whisper' | 'direct_colab'>('local_whisper')
+  const [fallbackEngine, setFallbackEngine] = useState<EngineId>('local_whisper')
   const [fallbackBaseUrl, setFallbackBaseUrl] = useState<string | null>(null)
   const engine = connection?.engine ?? fallbackEngine
   const setEngine = connection?.onChangeEngine ?? setFallbackEngine
   const connectedBaseUrl = connection ? connection.connectedBaseUrl : fallbackBaseUrl
   const setConnectedBaseUrl = connection?.onBaseUrlChange ?? setFallbackBaseUrl
+  const { refresh: refreshOfficialColabStatus } = useOfficialColabStatus(engine)
 
 
   const [pendingIds, setPendingIds] = useState<string[]>([])
@@ -173,9 +176,9 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   const overrideStage = overrideStageFor(subject, settings?.subject_stage_overrides ?? {})
   const needsStagePrompt = Boolean(subject.trim()) && !knownStage && (!overrideStage || editingOverride)
 
-  function changeEngine(nextEngine: 'local_whisper' | 'direct_colab') {
+  function changeEngine(nextEngine: EngineId) {
     setEngine(nextEngine)
-    if (nextEngine === 'local_whisper') {
+    if (nextEngine !== 'direct_colab') {
       setConnectedBaseUrl(null)
     }
   }
@@ -408,7 +411,7 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
   }, [pollGlobalRun])
 
   const runStartMs = latestRunStartMs(job?.events ?? [])
-  const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab')
+  const isTranscribingWithRuntime = (job?.engine === 'local_whisper' || job?.engine === 'direct_colab' || job?.engine === 'official_colab')
     && job.status === 'TRANSCRIBING'
   useEffect(() => {
     if (!isTranscribingWithRuntime) return
@@ -570,6 +573,22 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       setDialog(null)
       return
     }
+    if (engine === 'official_colab') {
+      // Fresh server answer at click time; the server re-checks on Job
+      // creation and again before any remote work, so this is UX only.
+      void refreshOfficialColabStatus().then((status) => {
+        if (status.available) startAttemptChecked(ids, force, scope)
+        else {
+          setMessage(`Colab 자동 연결을 지금 사용할 수 없습니다. ${status.reasons[0]?.message ?? ''} Local 전사를 선택할 수 있습니다.`.trim())
+          setDialog(null)
+        }
+      })
+      return
+    }
+    startAttemptChecked(ids, force, scope)
+  }
+
+  function startAttemptChecked(ids: string[], force: boolean, scope: 'selected' | 'all_incomplete') {
     if (preflightLockRef.current) return
     // #180: validate and snapshot the week before taking the lock; a paused
     // review later resumes with this value, never the live input.
@@ -729,7 +748,10 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       setJob(started); setGlobalActiveJob(started)
       // Only remember a course/subject that actually produced a valid Job.
       if (settings) {
-        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: engine })) }
+        // last_engine keeps its existing two-value schema: official Colab is
+        // never persisted, so older versions and defaults stay compatible.
+        const lastEngine = engine === 'official_colab' ? settings.last_engine : engine
+        try { setSettings(await api.saveSettings({ ...settings, last_course: courseValue, last_subject: subjectValue, last_engine: lastEngine })) }
         catch { /* best-effort */ }
       }
       releasePreflight()
@@ -931,7 +953,7 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       <OverallProgress progressDoneCount={job?.done_files ?? null} progressTotalCount={job && job.total_files > 0 ? job.total_files : null} selectedCount={selectedIds.length} engine={job?.engine} />
       {job?.error ? <div className="status-banner status-banner-warning" role="alert"><AlertTriangle aria-hidden="true" /><span>{job.error}</span><Button variant="secondary" onClick={onOpenSettings}>연결 상태 확인</Button></div> : null}
       {job && job.failed_files > 0 ? <div className="result-summary" aria-live="polite"><div><strong>{job.done_files}개 완료</strong><span>{job.failed_files}개 실패 · 성공한 결과는 유지됩니다.</span></div><Badge tone="failed">부분 실패</Badge></div> : null}
-      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} />
+      <CurrentTaskSection filename={currentRow?.filename ?? job?.current_file ?? undefined} progress={job?.current_progress ?? null} status={runState} engine={job?.engine} elapsedSeconds={validElapsedSeconds} etaSeconds={job?.eta_seconds ?? null} stageMessage={officialColabStageMessage(job)} />
       <QueueTable rows={rows} selectedIds={selectedIds} currentId={currentRow?.id} onToggle={(id) => { if (!isPreflighting) toggle(id) }} onToggleAll={() => { if (!isPreflighting) setSelectedIds(selectedIds.length === rows.length ? [] : rows.map((row) => row.id)) }} onRetry={() => { if (!isPreflighting) void action('retry') }} onRetranscribe={(id) => { if (!isPreflighting) { setPendingIds([id]); setDialog('retranscribe') } }} actionsDisabled={globalRunActive} />
       <FilenameReview preview={normalization} mode={filenameMode} value={filenameValue} onValueChange={setFilenameValue} onContinueOriginal={() => void onContinueOriginalForCurrent()} onEdit={() => setFilenameMode('editing')} onApply={() => void onApplyEditedName()} onUseFileClassification={() => void onUseFileClassificationForCurrent()} onRenameToTyped={() => void onRenameToTypedForCurrent()} onEditWeek={onEditWeekForCurrent} />
       {dialog ? <div className="dialog-backdrop" role="presentation"><div className="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
@@ -941,6 +963,18 @@ export function TranscriptionPage({ active = true, connection, onOpenSettings }:
       </div></div> : null}
     </div>
   )
+}
+
+// Latest official Colab stage from the Job's provisioning events (#60).
+function officialColabStageMessage(job: { engine?: string; events?: { category: string; message: string }[] } | null | undefined): string | null {
+  if (!job || job.engine !== 'official_colab') return null
+  const events = job.events ?? []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (!event.category.startsWith('ColabProvisioning:')) continue
+    return event.category === 'ColabProvisioning:READY' ? 'Colab GPU에서 전사하고 있습니다' : event.message
+  }
+  return null
 }
 
 // Mirrors DriveClassifier's folder chain (backend/src/services/drive.py):

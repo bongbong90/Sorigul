@@ -27,4 +27,6 @@ app.include_router(router, prefix="/api")
 
 if __name__ == "__main__":
     import uvicorn
+    from src.api.routes import start_background_maintenance
+    start_background_maintenance()
     uvicorn.run(app, host="127.0.0.1", port=8000)

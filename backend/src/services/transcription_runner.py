@@ -26,6 +26,10 @@ from src.engines.local_whisper import (
     LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
     LocalWhisperEngine,
 )
+from src.engines.official_colab import OfficialColabJobEngine, disabled_error, OfficialColabEngineError
+from src.services.colab_full_file_pipeline import ColabFullFilePipeline
+from src.services.colab_runtime_ownership import RuntimeOwnership
+from src.services.official_colab_launcher import disabled_status
 from src.services.job_manager import JobManager
 from src.services.colab_security import PairingRegistry, pairing_registry
 from src.services.output_bundle import OutputBundleWriter
@@ -48,6 +52,36 @@ TERMINAL_JOB_EVENTS = {
     FileStatus.FAILED: ("error", "Job 실패"),
 }
 
+REMOTE_CLEANUP_UNCONFIRMED_MESSAGE = (
+    "원격 작업 정리를 확인하지 못했습니다. 다음 실행 전에 정리 상태를 확인해야 합니다."
+)
+UNEXPECTED_RUNNER_ERROR_MESSAGE = "전사 작업 중 내부 오류가 발생해 작업을 중단했습니다."
+
+
+class _EngineSession:
+    """Once-only cleanup guard for a resolved engine's remote session (#248).
+
+    ``close()`` calls the engine's close_session() at most once per run and
+    returns the same result on every later call, so an owned Runtime is never
+    deleted twice and its cleanup result cannot be re-interpreted.
+    """
+
+    def __init__(self, runner: "TranscriptionRunner", job_id: str, engine):
+        self._runner = runner
+        self._job_id = job_id
+        self._engine = engine
+        self._result: Optional[bool] = None
+
+    @property
+    def owns_remote(self) -> bool:
+        return getattr(self._engine, "close_session", None) is not None
+
+    def close(self) -> bool:
+        if self._result is None:
+            self._result = False  # claimed before the call: no re-entry
+            self._result = self._runner._close_engine_session(self._job_id, self._engine)
+        return self._result
+
 
 class DefaultEngineResolver:
     def local_runtime_status(self) -> dict:
@@ -57,14 +91,58 @@ class DefaultEngineResolver:
         self,
         cache_root: Optional[Path] = None,
         registry: PairingRegistry = pairing_registry,
+        *, official_colab_enabled=False, official_colab_ownership=None,
+        official_colab_pipeline_factory=ColabFullFilePipeline,
+        official_colab_launcher=None,
+        official_colab_launcher_enabled=True,
     ):
+        if type(official_colab_enabled) is not bool:
+            raise ValueError("Invalid internal engine switch")
         self._local = LocalWhisperEngine()
         self._colab: Dict[str, DirectColabEngine] = {}
         self._lock = threading.Lock()
         self._cache_root = cache_root or (get_app_data_dir() / "cache" / "colab")
         self._registry = registry
+        self._official_colab_enabled = official_colab_enabled
+        self._official_colab_ownership = official_colab_ownership
+        self._official_colab_pipeline_factory = official_colab_pipeline_factory
+        # Server-constructed only (#245); never derived from requests/settings.
+        self._official_colab_launcher = official_colab_launcher
+        self._official_colab_launcher_enabled = official_colab_launcher_enabled is True
+
+    @property
+    def official_colab_enabled(self):
+        if self._official_colab_launcher is not None:
+            return self._official_colab_launcher_enabled
+        return self._official_colab_enabled and isinstance(self._official_colab_ownership, RuntimeOwnership)
+
+    def official_colab_status(self) -> dict:
+        """No network. DISABLED unless the server injected a launcher."""
+        if self._official_colab_launcher is not None:
+            if not self._official_colab_launcher_enabled:
+                return disabled_status()
+            return self._official_colab_launcher.status()
+        if self.official_colab_enabled:
+            return {"state": "READY", "available": True, "reasons": []}
+        return disabled_status()
 
     def __call__(self, job: JobModel) -> TranscriptionEngine:
+        if job.engine == "official_colab" and self._official_colab_launcher is not None:
+            if not self.official_colab_enabled:
+                raise disabled_error()
+            if job.engine_config:
+                raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
+                                                category=ErrorCategory.CONFIGURATION)
+            return self._official_colab_launcher.launch()
+        if job.engine == "official_colab":
+            if not self.official_colab_enabled:
+                raise disabled_error()
+            if job.engine_config:
+                raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
+                                                category=ErrorCategory.CONFIGURATION)
+            return OfficialColabJobEngine(
+                self._official_colab_ownership, ColabRecoveryCache(self._cache_root / "official-colab"),
+                pipeline_factory=self._official_colab_pipeline_factory)
         if job.engine == "local_whisper":
             return self._local
         if job.engine == "direct_colab":
@@ -122,19 +200,36 @@ class TranscriptionRunner:
         if job is None:
             return
         self._clear_eta(job_id)
-        local_observations: list[tuple[float, float]] = []
-        colab_observations: list[tuple[float, float]] = []
-        observes_local_speed = job.engine == "local_whisper"
-        observes_colab_speed = job.engine == "direct_colab"
         try:
             engine = self.engine_resolver(job)
         except EngineError as exc:
             self._finish_fatal(job_id, token, exc)
             return
 
+        # From here a remote session (official Colab owned Runtime) may exist.
+        # Every exit path -- normal, STOP/CANCEL, scan failure, unexpected
+        # runner/JobManager errors, even BaseException -- attempts its cleanup
+        # exactly once (#248). Engines without close_session are unaffected.
+        session = _EngineSession(self, job_id, engine)
+        try:
+            self._run_engine(job, job_id, token, engine, session)
+        except Exception as exc:
+            if not session.owns_remote:
+                raise
+            session.close()
+            self._finish_unexpected(job_id, token, exc)
+        finally:
+            session.close()
+
+    def _run_engine(self, job: JobModel, job_id: str, token: CancellationToken, engine, session):
+        local_observations: list[tuple[float, float]] = []
+        colab_observations: list[tuple[float, float]] = []
+        observes_local_speed = job.engine == "local_whisper"
+        observes_colab_speed = job.engine == "direct_colab"
         try:
             scanned = {item.id: item for item in FileScanner(job.folder).scan()}
         except OSError as exc:
+            session.close()
             self._finish_fatal(
                 job_id,
                 token,
@@ -286,6 +381,8 @@ class TranscriptionRunner:
                     LOCAL_RUNTIME_PROCESS_CLEANUP_FAILED,
                 }:
                     process_cleanup_failed = True
+                if job.engine == "official_colab" and getattr(exc, "cleanup_required", False):
+                    process_cleanup_failed = True
                 if exc.fatal:
                     fatal_error = True
                     break
@@ -307,7 +404,67 @@ class TranscriptionRunner:
                 if observes_colab_speed:
                     self._update_colab_eta(job_id, colab_observations, scanned)
 
+        if not session.close():
+            process_cleanup_failed = True
         self._finalize(job_id, token, fatal_error, process_cleanup_failed)
+
+    def _close_engine_session(self, job_id: str, engine) -> bool:
+        """Release a per-Job remote session (official Colab owned Runtime).
+
+        Engines without close_session() are unaffected. A failed or uncertain
+        remote cleanup keeps the Job from being reported as a clean finish.
+        Called once per run via _EngineSession; never raises.
+        """
+        close = getattr(engine, "close_session", None)
+        if close is None:
+            return True
+        try:
+            clean = close() is True
+        except Exception:
+            clean = False
+        if not clean:
+            try:
+                self._event(job_id, "error", "Colab", REMOTE_CLEANUP_UNCONFIRMED_MESSAGE)
+            except Exception:
+                # The ownership store already holds the unresolved record and
+                # blocks the next launch; the Job event is best effort.
+                logger.error("Could not record remote cleanup failure for job %s", job_id)
+        return clean
+
+    def _finish_unexpected(self, job_id: str, token: CancellationToken, exc: Exception):
+        """Record a sanitized FAILED state after an unexpected runner error.
+
+        Only for engines holding a remote session, after its cleanup attempt.
+        Committed DONE files are kept; an already persisted terminal state is
+        never rewritten. If the Job store itself cannot persist, the error
+        propagates (the token stays unfinished, nothing is shown as success)
+        and the ownership store still blocks the next launch.
+        """
+        logger.error(
+            "Unexpected transcription runner error for job %s (%s)", job_id, type(exc).__name__
+        )
+        if token.is_finished:
+            return
+
+        def mutation(job: JobModel):
+            for file_id, state in job.files.items():
+                if state in IN_PROGRESS_STATES or state == FileStatus.CANCEL_REQUESTED:
+                    job.files[file_id] = FileStatus.FAILED
+            job.status = FileStatus.FAILED
+            job.batch_completed = False
+            job.current_file = None
+            job.current_progress = None
+            job.eta_seconds = None
+            job.error = UNEXPECTED_RUNNER_ERROR_MESSAGE
+            job.events.append(
+                JobEvent(level="error", category="Job", message=UNEXPECTED_RUNNER_ERROR_MESSAGE)
+            )
+            self._update_counts(job)
+            self._append_terminal_event(job)
+
+        # Same as _finish_fatal: no job_finished callback (no Drive upload) for
+        # a run that ended on an internal error.
+        self.job_manager.mutate_job(job_id, mutation, after_persist=token.mark_finished)
 
     def _clear_eta(self, job_id: str):
         self.job_manager.mutate_job(job_id, lambda job: setattr(job, "eta_seconds", None))
