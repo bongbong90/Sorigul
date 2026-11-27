@@ -126,6 +126,28 @@ class DefaultEngineResolver:
             return {"state": "READY", "available": True, "reasons": []}
         return disabled_status()
 
+    def resolve_with_context(self, job: JobModel, *, event=None, abort_requested=None) -> TranscriptionEngine:
+        """Like __call__, plus Job-visible GPU-allocation waiting and user stop
+        for the official Colab launch. Other engines are unchanged."""
+        if job.engine == "official_colab" and self._official_colab_launcher is not None:
+            if not self.official_colab_enabled:
+                raise disabled_error()
+            if job.engine_config:
+                raise OfficialColabEngineError("CONFIG_INVALID", "이 전사 방식은 Job 연결 설정을 받지 않습니다.",
+                                                category=ErrorCategory.CONFIGURATION)
+            from src.services.official_colab_launcher import gpu_wait_message
+            shown = {"at": None}
+
+            def wait_event(elapsed):
+                # One event roughly every 15 s keeps the Job log readable.
+                if event is None or (shown["at"] is not None and elapsed - shown["at"] < 15):
+                    return
+                shown["at"] = elapsed
+                event("ColabProvisioning:GPU_WAIT", gpu_wait_message(elapsed))
+
+            return self._official_colab_launcher.launch(wait_event=wait_event, abort_requested=abort_requested)
+        return self(job)
+
     def __call__(self, job: JobModel) -> TranscriptionEngine:
         if job.engine == "official_colab" and self._official_colab_launcher is not None:
             if not self.official_colab_enabled:
@@ -201,7 +223,15 @@ class TranscriptionRunner:
             return
         self._clear_eta(job_id)
         try:
-            engine = self.engine_resolver(job)
+            resolve = getattr(self.engine_resolver, "resolve_with_context", None)
+            if resolve is not None:
+                engine = resolve(
+                    job,
+                    event=lambda category, message: self._event(job_id, "info", category, message),
+                    abort_requested=lambda: token.is_stop_requested or token.is_cancel_requested,
+                )
+            else:
+                engine = self.engine_resolver(job)
         except EngineError as exc:
             self._finish_fatal(job_id, token, exc)
             return
