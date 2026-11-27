@@ -46,6 +46,10 @@ class RuntimeErrorCode(str, Enum):
     PRECONDITION_UNVERIFIED = "COLAB_PRECONDITION_UNVERIFIED"
     DUPLICATE_CREATE = "COLAB_DUPLICATE_CREATE_BLOCKED"
     NOT_OWNED = "COLAB_RUNTIME_NOT_OWNED"
+    # The create Operation is still pending: Google is allocating the GPU.
+    # Distinct from transcription errors; cleanup obligation is kept.
+    CREATE_WAIT_EXCEEDED = "COLAB_GPU_ALLOCATION_WAIT_EXCEEDED"
+    CREATE_WAIT_CANCELLED = "COLAB_GPU_ALLOCATION_WAIT_CANCELLED"
 
 
 class RuntimeClientError(Exception):
@@ -97,14 +101,18 @@ class ColabRuntimeClient:
     def __init__(self, access_token: str, *, transport=None, timeout_seconds=10.0,
                  max_polls=30, poll_interval_seconds=1.0,
                  sleep: Callable[[float], None] = time.sleep,
-                 account_verifier: Callable[[str], str | None] | None = None):
+                 account_verifier: Callable[[str], str | None] | None = None,
+                 create_wait_seconds=300.0, create_poll_interval_seconds=2.0,
+                 clock: Callable[[], float] = time.monotonic):
         if not isinstance(access_token, str) or not access_token.strip() or any(
             ord(char) < 33 or ord(char) > 126 for char in access_token
         ):
             raise RuntimeClientError(RuntimeErrorCode.AUTH_EXPIRED)
         if (not math.isfinite(timeout_seconds) or timeout_seconds <= 0
                 or not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0
-                or type(max_polls) is not int or not 1 <= max_polls <= 120):
+                or type(max_polls) is not int or not 1 <= max_polls <= 120
+                or not math.isfinite(create_wait_seconds) or not 0 < create_wait_seconds <= 600
+                or not math.isfinite(create_poll_interval_seconds) or create_poll_interval_seconds <= 0):
             raise ValueError("Invalid bounded request/poll configuration")
         self._http = httpx.Client(
             headers={"Authorization": f"Bearer {access_token}"},
@@ -114,6 +122,13 @@ class ColabRuntimeClient:
         self._max_polls = max_polls
         self._interval = poll_interval_seconds
         self._sleep = sleep
+        # Only the create path waits this long (GPU allocation); recovery keeps
+        # the short bounded poll because it runs under the ownership lock.
+        self._create_wait = create_wait_seconds
+        self._create_interval = create_poll_interval_seconds
+        self._clock = clock
+        self._create_wait_observer = None
+        self._create_abort_requested = None
         self._lock = threading.RLock()
         self._attempted = False
         self._runtime_name = None
@@ -290,6 +305,13 @@ class ColabRuntimeClient:
                                      cleanup_required=self._cleanup_required)
         return dict(T4_STANDARD)
 
+    def set_create_wait_hooks(self, *, observer=None, abort_requested=None):
+        """observer(elapsed_seconds) while Google allocates the GPU;
+        abort_requested() -> True stops waiting (user stop/cancel). Neither
+        ever sends a request; a stopped wait keeps the cleanup obligation."""
+        self._create_wait_observer = observer
+        self._create_abort_requested = abort_requested
+
     def create_runtime(self, *, checkpoint=None, account_binding=None):
         with self._lock:
             if self._attempted:
@@ -324,16 +346,38 @@ class ColabRuntimeClient:
                     self._emit_checkpoint("CREATE_REJECTED")
                     raise RuntimeClientError(exc.code, http_status=exc.http_status) from None
                 raise
-            return self._finish_operation(operation)
+            return self._finish_operation(operation, create_wait=True)
 
-    def _finish_operation(self, operation):
+    def _create_wait_tick(self, started):
+        """Between create-Operation GETs only. Returns the error to raise, or None."""
+        elapsed = self._clock() - started
+        abort = self._create_abort_requested
+        try:
+            aborted = abort is not None and abort() is True
+        except Exception:
+            aborted = False
+        if aborted:
+            return RuntimeClientError(RuntimeErrorCode.CREATE_WAIT_CANCELLED, cleanup_required=True)
+        if elapsed >= self._create_wait:
+            return RuntimeClientError(RuntimeErrorCode.CREATE_WAIT_EXCEEDED, cleanup_required=True)
+        observer = self._create_wait_observer
+        if observer is not None:
+            try:
+                observer(elapsed)
+            except Exception:
+                pass
+        return None
+
+    def _finish_operation(self, operation, *, create_wait=False):
         name = operation.get("name")
         if not isinstance(name, str) or not re.fullmatch(r"operations/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", name):
             raise RuntimeClientError(RuntimeErrorCode.STATE_UNCERTAIN, cleanup_required=True)
         if self._operation_name is not None and name != self._operation_name:
             raise RuntimeClientError(RuntimeErrorCode.STATE_UNCERTAIN, cleanup_required=True)
         self._operation_name = name
-        for poll in range(self._max_polls + 1):
+        started = self._clock()
+        poll = 0
+        while True:
             self._emit_checkpoint("OPERATION_OBSERVED")
             done = operation.get("done", False)
             if type(done) is not bool or (not done and ("error" in operation or "response" in operation)):
@@ -357,9 +401,17 @@ class ColabRuntimeClient:
                     break
                 self._pending_operation = False
                 return self.get_owned_runtime()
-            if poll == self._max_polls:
-                break
-            self._sleep(self._interval)
+            if create_wait:
+                stop = self._create_wait_tick(started)
+                if stop is not None:
+                    raise stop
+                self._sleep(self._create_interval)
+            else:
+                if poll == self._max_polls:
+                    break
+                self._sleep(self._interval)
+            poll += 1
+            # Official Operation status lookup only; never a second create POST.
             operation = self._request("GET", "/v1/" + name)
             if operation.get("name") != name:
                 break

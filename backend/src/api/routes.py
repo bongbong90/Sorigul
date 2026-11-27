@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -111,7 +113,19 @@ official_colab_launcher = OfficialColabLauncher(
     authorizer=ProductLaunchAuthorizer(launch_cost_confirmation),
     cache_root=app_data_dir / "cache" / "colab" / "official-colab",
     provisioning_authorizer=OwnedRuntimeProvisioningAuthorizer(),
+    # Defined below; looked up at call time. Starts the existing recovery as
+    # soon as the failed Job has finished, instead of the next status poll.
+    on_unresolved=lambda: _recover_owned_runtime_when_idle(),
 )
+
+
+def _recover_owned_runtime_when_idle(timeout_seconds=120.0):
+    def work():
+        deadline = time.monotonic() + timeout_seconds
+        while execution_service.active_job_id() is not None and time.monotonic() < deadline:
+            time.sleep(1.0)
+        colab_maintenance.start(refresh=False, force=True)
+    threading.Thread(target=work, name="colab-recover-after-launch", daemon=True).start()
 engine_resolver = DefaultEngineResolver(
     official_colab_launcher=official_colab_launcher, official_colab_launcher_enabled=True)
 account_router(colab_auth, router)
