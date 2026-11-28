@@ -569,6 +569,20 @@ def test_gpu_allocation_delay_is_reported_apart_from_transcription_and_recovered
     assert [r.state for r in records(env)] != [OwnershipState.CLEANED]
 
 
+def test_google_create_deadline_reports_allocation_failure_and_preserves_cleanup(env):
+    unresolved = []
+    env.install(on_unresolved=lambda: unresolved.append(True))
+    env.runtime.pending = True
+    env.runtime.overrides["GET", "/v1/operations/mock-op"] = httpx.Response(200, json={
+        "name": "operations/mock-op", "done": True, "error": {"code": 4},
+    })
+    finished = run(env, create(env))
+    assert failed_with(env, finished) == "OFFICIAL_COLAB_GPU_ALLOCATION_DEADLINE"
+    assert "GPU 할당 단계에서 시간 초과" in finished.error
+    assert unresolved == [True] and records(env)[0].cleanup_required
+    assert len(posts(env)) == 1 and env.server.calls == []
+
+
 def test_slow_gpu_allocation_within_window_completes_with_one_post(env):
     env.install()
     _pending_operation(env, done_after=60)  # ~2 minutes, past the old 30 s window

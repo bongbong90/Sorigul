@@ -178,6 +178,10 @@ _CREATE_ERRORS = {
 # Runtime-creation delay (Google GPU allocation) is reported apart from
 # transcription errors. Both keep the cleanup obligation for recovery.
 _CREATE_WAIT_ERRORS = {
+    RuntimeErrorCode.CREATE_OPERATION_DEADLINE: (
+        "GPU_ALLOCATION_DEADLINE",
+        "Google의 런타임 생성 요청이 GPU 할당 단계에서 시간 초과로 종료되었습니다. "
+        "전사는 시작되지 않았습니다. 요청한 런타임은 자동으로 정리됩니다."),
     RuntimeErrorCode.CREATE_WAIT_EXCEEDED: (
         "GPU_ALLOCATION_DELAYED",
         "Google GPU 할당이 최대 대기시간(5분) 안에 끝나지 않아 전사를 시작하지 않았습니다. "
