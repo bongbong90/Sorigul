@@ -37,6 +37,7 @@ class RuntimeErrorCode(str, Enum):
     USAGE_LIMIT = "COLAB_USAGE_LIMIT"
     ACCESS_DENIED = "COLAB_ACCESS_DENIED"
     AUTH_EXPIRED = "COLAB_AUTH_EXPIRED"
+    CREATE_OPERATION_DEADLINE = "COLAB_CREATE_OPERATION_DEADLINE"
     CREATE_FAILED = "COLAB_RUNTIME_CREATE_FAILED"
     NETWORK_TIMEOUT = "COLAB_NETWORK_TIMEOUT"
     NETWORK_ERROR = "COLAB_NETWORK_ERROR"
@@ -211,6 +212,10 @@ class ColabRuntimeClient:
             return RuntimeErrorCode.SERVICE_RESTRICTED
         if http_status is not None and 500 <= http_status <= 599:
             return RuntimeErrorCode.NETWORK_ERROR
+        # Only a terminal create Operation has no HTTP error status here.
+        if http_status is None and (grpc == 4 or status == "DEADLINE_EXCEEDED"
+                                    or "DEADLINE_EXCEEDED" in reasons):
+            return RuntimeErrorCode.CREATE_OPERATION_DEADLINE
         return RuntimeErrorCode.CREATE_FAILED
 
     def _request(self, method, path, *, body=None, params=None):
