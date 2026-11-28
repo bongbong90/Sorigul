@@ -45,7 +45,7 @@ function mount(saved = initial) {
     selectDriveDestination: async (folderId, accountId) => {
       writes.push(['select', folderId, accountId])
       if (saveFailure) throw new Error(saveFailure)
-      stored = { ...stored, drive_parent: { folder_id: folderId, account_id: accountId, display_path: fixture(folderId).breadcrumbs.map(x => x.name).join(' / ') } }
+      stored = { ...stored, drive_parent: { layout: 'transcript_root', folder_id: folderId, account_id: accountId, display_path: fixture(folderId).breadcrumbs.map(x => x.name).join(' / ') } }
       return clone(stored)
     },
     resetDriveDestination: async () => {
@@ -102,6 +102,7 @@ async function choose(h, id = 'alpha') {
   await scenario('unicode_duplicates_and_exact_id', async () => {
     const h = mount(); await choose(h, 'duplicate')
     assert.match(h.text(), /이 폴더를 상위 저장 위치/); assert.match(h.text(), /폴더 ID: duplicate/)
+    assert.match(h.text(), /업로드 경로: 내 드라이브 \/ 한글 Δ 子 \/ 과정 \/ \[단계\] 과목/)
     assert.equal(h.writes.length, 0)
     await h.click('확인 후 저장')
     assert.deepEqual(h.writes, [['select', 'duplicate', 'account-A']])

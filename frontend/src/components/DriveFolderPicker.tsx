@@ -73,9 +73,12 @@ export function DriveFolderPicker({ settings, disabled, onSaved }: {
 
   const location = settings.drive_parent?.display_path || '내 드라이브 (기본 위치)'
   const preview = page?.breadcrumbs.map(part => part.name).join(' / ')
+  const suffix = '과정 / [단계] 과목 / 과정_과목_N주차'
+  const currentRoot = settings.drive_parent?.layout === 'transcript_root'
+    ? location : `${location} / ${settings.drive_exam_root} / 전사자료`
   return <div className="drive-destination">
-    <div className="setting-note"><strong>현재 저장 위치</strong><span>{location}</span>
-      <small>{settings.drive_exam_root} / 전사자료 / 과정 / 과목 / 주차 아래에 TXT·JSON·SRT를 저장합니다.</small>
+    <div className="setting-note"><strong>현재 저장 위치</strong><span>{currentRoot}</span>
+      <small>{suffix} 아래에 TXT·JSON·SRT를 저장합니다.</small>
       <small>변경한 위치는 새 작업에 적용됩니다. 기존 작업의 저장 위치는 유지됩니다.</small>
     </div>
     <div className="inline-actions">
@@ -98,6 +101,7 @@ export function DriveFolderPicker({ settings, disabled, onSaved }: {
         </li>)}</ul>
         {page.children.length === 0 ? <p>하위 폴더가 없습니다.</p> : null}
         {page.next_page_token ? <Button variant="secondary" disabled={disabled || busy !== null} onClick={() => void browse(page.folder.folder_id, page.account_id, page.next_page_token!)}>폴더 더 보기</Button> : null}
+        <p>업로드 경로: {preview} / {suffix} / TXT·JSON·SRT</p>
         {confirming ? <div className="setting-note" role="status"><strong>이 폴더를 상위 저장 위치로 사용하시겠습니까?</strong><span>{preview}</span><small>폴더 ID: {page.folder.folder_id}</small></div> : null}
         {!page.folder.can_select ? <p role="alert">이 폴더에 저장할 권한이 없습니다.</p> : null}
         <div className="inline-actions">
