@@ -544,7 +544,9 @@ class ColabRecoveryCache:
         payload = {
             "fingerprint": self.source_fingerprint(source_path, engine_signature),
             "completed": {
-                str(index): result.output_payload()
+                str(index): {**result.output_payload(), **(
+                    {"duration_seconds": result.metadata["duration_seconds"]}
+                    if engine_signature.startswith("official-jupyter-v1:") and "duration_seconds" in result.metadata else {})}
                 for index, result in sorted(completed.items())
             },
         }

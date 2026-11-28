@@ -4,12 +4,49 @@ No credentials/config from Job data, Runtime creation, OAuth or Local switch.
 Only sanitized error codes and user messages cross into the existing Runner.
 """
 
+import json
+import logging
 import math
+from logging.handlers import RotatingFileHandler
+from threading import Lock
 
 from src.domain.transcription import (
     CancelRequested, EngineError, ErrorCategory, StopRequested, TranscriptionResult,
 )
 from src.services.colab_full_file_pipeline import ColabFullFilePipeline, PipelineError
+from src.utils.paths import get_app_data_dir
+
+_log_lock = Lock()
+
+
+def _record_failure(report, error, event_callback):
+    facts = getattr(report, "diagnostic", None) or {}
+    # Copy only controller fields and validated worker enums. Remote exception
+    # messages, runtime probes, request data and transcript never enter either sink.
+    detail = {k: facts[k] for k in ("stage", "chunk", "condition", "line", "location", "status") if k in facts}
+    detail["code"] = getattr(report, "error_code", None) or getattr(error, "code", "PIPELINE_FAILED")
+    detail.setdefault("stage", "pipeline")
+    detail.setdefault("condition", detail["code"])
+    detail.setdefault("chunk", None)
+    if "location" not in detail:
+        frame = error.__traceback__
+        while frame.tb_next:
+            frame = frame.tb_next
+        detail["location"] = f"{frame.tb_frame.f_code.co_name}:{frame.tb_lineno}"
+    message = json.dumps(detail, sort_keys=True)
+    event_callback("error", "ColabDiagnostic", message)
+    try:
+        with _log_lock:
+            directory = get_app_data_dir() / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(directory / "core.log", maxBytes=1024 * 1024,
+                                          backupCount=3, encoding="utf-8")
+            try:
+                handler.emit(logging.LogRecord("core", logging.ERROR, "", 0, message, (), None))
+            finally:
+                handler.close()
+    except OSError:
+        pass  # The Job event still carries the same evidence.
 
 
 class OfficialColabEngineError(EngineError):
@@ -55,7 +92,7 @@ class OfficialColabJobEngine:
         code = getattr(error, "code", None)
         code = getattr(code, "value", code)
         stage = (report.diagnostic or {}).get("stage") if report is not None and getattr(report, "diagnostic", None) else None
-        if cleanup or code == "CLEANUP_REQUIRED":
+        if cleanup or code == "CLEANUP_REQUIRED" or "CLEANUP_REQUIRED" in signals:
             return OfficialColabEngineError(
                 "CLEANUP_REQUIRED", "원격 작업 정리가 확인되지 않았습니다. 앱이 정리를 자동으로 다시 확인합니다.",
                 cleanup_required=True)
@@ -77,6 +114,28 @@ class OfficialColabJobEngine:
                                             category=ErrorCategory.CONFIGURATION, local_selection_possible=local)
         if "FREE_RESOURCE_UNAVAILABLE" in signals:
             return OfficialColabEngineError("RESOURCE_UNAVAILABLE", "무료 전사 자원을 사용할 수 없습니다.",
+                                            local_selection_possible=local)
+        if code in {"CACHE_MANIFEST_INVALID", "CACHE_MANIFEST_TOO_LARGE"}:
+            return OfficialColabEngineError(code, "기존 청크 캐시를 읽을 수 없어 복구를 위해 작업을 중단했습니다.")
+        if code == "RESULT_DOWNLOAD_FAILED":
+            return OfficialColabEngineError(code, "생성된 전사 결과 파일을 내려받지 못했습니다.",
+                                            category=ErrorCategory.NETWORK, local_selection_possible=local)
+        if code in {"RESULT_INVALID", "CHUNK_RESULT_INVALID"}:
+            condition = (getattr(report, "diagnostic", None) or {}).get("condition")
+            messages = {
+                "end_beyond_duration": "전사 구간이 실제 음성 길이를 초과했습니다.",
+                "timestamp_reversed": "전사 구간의 시간 순서가 뒤바뀌었습니다.",
+                "interval_invalid": "전사 구간의 시작 또는 길이가 유효하지 않습니다.",
+                "duration_invalid": "전사 결과에 기록된 음성 길이가 유효하지 않습니다.",
+                "timestamp_invalid": "전사 구간의 시간 값을 읽을 수 없습니다.",
+                "payload_mismatch": "전사 본문과 구간별 텍스트가 일치하지 않습니다.",
+                "empty_text": "전사 구간의 텍스트가 비어 있습니다.",
+                "repetition_suspected": "전사 결과에서 과도한 문구 반복이 감지되었습니다.",
+                "text_limit": "전사 텍스트가 처리 가능한 크기를 초과했습니다.",
+                "rows_limit": "전사 구간 수가 한도를 초과했습니다.",
+                "envelope_limit": "전사 결과 파일이 크기 한도를 초과했습니다.",
+            }
+            return OfficialColabEngineError(code, messages.get(condition, "전사 결과 파일의 검증에 실패했습니다."),
                                             local_selection_possible=local)
         if "NETWORK_ERROR" in signals:
             return OfficialColabEngineError("NETWORK_ERROR", "전사 연결을 확인해 주세요.",
@@ -165,6 +224,7 @@ class OfficialColabJobEngine:
         except (StopRequested, CancelRequested):
             raise
         except Exception as exc:
+            _record_failure(self._pipeline.last_report, exc, event_callback)
             normalized = self._normalize(exc, self._pipeline.last_report)
             self._blocked = normalized.fatal
             raise normalized from None

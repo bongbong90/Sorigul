@@ -174,6 +174,9 @@ def test_forced_retranscription_preserves_prior_bundle_until_valid_promotion(env
     finished = execute(env, job, resolver, writer=InspectWriter())
     if failure:
         assert finished.status is FileStatus.FAILED
+        diagnostic, = [json.loads(event.message) for event in finished.events if event.category == "ColabDiagnostic"]
+        assert diagnostic["code"] and diagnostic["location"] and diagnostic["stage"]
+        assert diagnostic["chunk"] == 0
         assert all(path.read_bytes() == value for path, value in before.items())
     else:
         assert finished.status is FileStatus.DONE

@@ -42,6 +42,7 @@ class JupyterCode(str, Enum):
     INVALID_CONNECTION = "INVALID_CONNECTION"
     TOKEN_REFRESH_REQUIRED = "TOKEN_REFRESH_REQUIRED"
     AUTH_REJECTED = "AUTH_REJECTED"
+    TRANSPORT_FAILED = "TRANSPORT_FAILED"
     CONNECTION_REJECTED = "CONNECTION_REJECTED"
     NETWORK_TIMEOUT = "NETWORK_TIMEOUT"
     STATE_UNCERTAIN = "STATE_UNCERTAIN"
@@ -95,8 +96,12 @@ def _http_request(method, url, headers, body, timeout):
     try:
         with opener.open(request, timeout=timeout) as response:
             status = response.status
-            raw = response.read(MAX_MESSAGE_BYTES + 1)
-            if len(raw) > MAX_MESSAGE_BYTES:
+            limit = MAX_MESSAGE_BYTES
+            if method == "GET" and url.endswith("/result.json?content=1&format=base64"):
+                from src.services.colab_inference_worker import MAX_RESULT_BYTES
+                limit = 2 * MAX_RESULT_BYTES + 4096  # wrapped base64 plus Contents metadata
+            raw = response.read(limit + 1)
+            if len(raw) > limit:
                 failure = JupyterCode.STATE_UNCERTAIN
             elif raw:
                 try:
@@ -110,9 +115,12 @@ def _http_request(method, url, headers, body, timeout):
         failure = JupyterCode.NETWORK_TIMEOUT
     except urllib.error.URLError as exc:
         failure = (JupyterCode.NETWORK_TIMEOUT if isinstance(exc.reason, TimeoutError)
-                   else JupyterCode.CONNECTION_REJECTED)
-    except OSError:
+                   else JupyterCode.CONNECTION_REJECTED if isinstance(exc.reason, ConnectionError)
+                   else JupyterCode.TRANSPORT_FAILED)
+    except ConnectionError:
         failure = JupyterCode.CONNECTION_REJECTED
+    except OSError:
+        failure = JupyterCode.TRANSPORT_FAILED
     # Never chain raw URL-bearing transport exceptions.
     if failure:
         raise JupyterClientError(failure)

@@ -205,3 +205,22 @@ def test_policy_verified_still_needs_fresh_matching_cost_confirmation(monkeypatc
     assert authorizer.static_blockers() == []
     assert authorizer.authorize(preflight()) is True
     assert authorizer.authorize(preflight()) is False
+
+def test_job_and_rotating_log_only_store_failure_facts(tmp_path, monkeypatch):
+    import json
+    from src.engines import official_colab
+    monkeypatch.setattr(official_colab, "get_app_data_dir", lambda: tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "core.log").write_bytes(b"." * (1024 * 1024))
+    diagnostic = {"stage": "download_validation", "chunk": 5, "condition": "timestamp_reversed",
+                  "line": 123, "location": "colab_full_file_pipeline.py:456",
+                  "message": "secret private transcript", "runtime": {"token": "private"}}
+    events = []
+    official_colab._record_failure(report(diagnostic), PipelineError("RESULT_INVALID"),
+                                   lambda *args: events.append(args))
+    message = (logs / "core.log").read_text().strip()
+    assert (logs / "core.log.1").is_file()
+    assert events == [("error", "ColabDiagnostic", message)]
+    assert json.loads(message) == {k: v for k, v in dict(diagnostic, code="X").items()
+                                   if k not in ("message", "runtime")}

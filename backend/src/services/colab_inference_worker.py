@@ -21,10 +21,54 @@ PACKAGES = {"faster-whisper": "1.2.1", "ctranslate2": "4.6.0", "huggingface-hub"
             "nvidia-cublas-cu12": "12.4.5.8"}
 MODEL_REPOSITORY = "Systran/faster-whisper-large-v3"
 MODEL_REVISION = "edaa852ec7e145841d8ffdb056a99866b5f0a478"
-MAX_RESULT_BYTES = 32 * 1024  # base64 + Contents envelope fits PHASE 03's 64 KiB
+# The same source runs in the standalone kernel and in both local validators.
+RESULT_CONTRACT = r'''
+import math
 
+MAX_TEXT_BYTES = 128 * 1024
+MAX_ROWS = 4000
+# JSON may escape each text byte sixfold and includes two copies of the text.
+MAX_RESULT_BYTES = 12 * MAX_TEXT_BYTES + 160 * MAX_ROWS + 4096
+TIMESTAMP_SLACK = 0.15
 
-WORKER_SOURCE = r'''
+class ResultViolation(ValueError):
+    pass
+
+def check_duration(duration):
+    if type(duration) not in (int, float) or not math.isfinite(duration) or not 0 < duration <= 301:
+        raise ResultViolation("duration_invalid")
+def checked_end(start, end, previous, duration):
+    if any(type(v) not in (float, int) or not math.isfinite(v) for v in (start, end)):
+        raise ResultViolation("timestamp_invalid")
+    if end < start or (previous and (start < previous["start"] or end < previous["end"])):
+        raise ResultViolation("timestamp_reversed")
+    if start < 0 or start >= duration or end == start:
+        raise ResultViolation("interval_invalid")
+    if end > duration + TIMESTAMP_SLACK:
+        raise ResultViolation("end_beyond_duration")
+    return min(end, duration)
+
+def repeated_phrase(rows):
+    # Require a short, exactly periodic phrase across the result. Length or
+    # frequent vocabulary alone is insufficient evidence of a decoding loop.
+    text = " ".join(" ".join(row["text"] for row in rows).split())
+    for candidate in (text, text + " "):
+        period = (candidate + candidate).find(candidate, 1)
+        if 0 < period <= 256 and period * 64 <= len(candidate):
+            return True
+    return False
+
+def check_size(rows, text_bytes, *, complete=False):
+    oversized = len(rows) > MAX_ROWS or text_bytes > MAX_TEXT_BYTES
+    if (oversized or complete) and text_bytes > 12000 and repeated_phrase(rows):
+        raise ResultViolation("repetition_suspected")
+    if not oversized:
+        return
+    raise ResultViolation("rows_limit" if len(rows) > MAX_ROWS else "text_limit")
+'''
+exec(RESULT_CONTRACT)
+
+WORKER_SOURCE = RESULT_CONTRACT + r'''
 def _sorigul_prepare(params):
     import contextlib
     import importlib.metadata
@@ -186,7 +230,11 @@ def _sorigul_worker(params):
                     continue
 
     def diagnose(stage, cause):
-        return {"stage": stage, "exception": clean(type(cause).__name__) if cause else None,
+        frame = cause.__traceback__ if cause is not None else None
+        # First frame identifies the trusted worker call site, even when a
+        # third-party library raised the exception.
+        return {"stage": stage, "line": frame.tb_lineno if frame else 0,
+                "exception": clean(type(cause).__name__) if cause else None,
                 "message": clean(cause) if cause else None, "runtime": probe()}
 
     def decode_audio(handle):
@@ -339,24 +387,24 @@ def _sorigul_worker(params):
                     )
                     rows, text_bytes = [], 0
                     duration = info.duration
-                    if not math.isfinite(duration) or not 0 < duration <= 301:
-                        raise Failure("RESULT_INVALID", "result")
+                    check_duration(duration)
                     envelope["duration_seconds"] = duration
                     stage = "inference"
-                    for s in segments:  # exhaust lazy generator before completion
-                        if (not math.isfinite(s.start) or not math.isfinite(s.end)
-                                or not 0 <= s.start <= s.end <= duration + 0.1
-                                or not isinstance(s.text, str) or not s.text.strip()):
-                            raise Failure("RESULT_INVALID", "result")
+                    for s in segments:
+                        end = checked_end(s.start, s.end, rows[-1] if rows else None, duration)
+                        if not isinstance(s.text, str) or not s.text.strip():
+                            raise ResultViolation("empty_text")
+                        rows.append({"start": s.start, "end": end, "text": s.text})
                         text_bytes += len(s.text.encode("utf-8"))
-                        if len(rows) >= 2000 or text_bytes > 12000:
-                            raise Failure("RESULT_INVALID", "result")
-                        rows.append({"start": s.start, "end": s.end, "text": s.text})
+                        check_size(rows, text_bytes)
+                    check_size(rows, text_bytes, complete=True)
                     stage = "result"
                     check_input()  # never publish a result after input mutation
                     envelope["payload"] = {"text": "".join(s["text"] for s in rows),
                                            "language": "ko", "segments": rows}
                     envelope["silence"] = not rows
+                except ResultViolation as exc:
+                    raise Failure("RESULT_INVALID", "result", exc) from None
                 except Failure:
                     raise
                 except Exception as exc:
@@ -365,7 +413,12 @@ def _sorigul_worker(params):
     except Failure as exc:
         envelope["error_code"] = str(exc)
         envelope["payload"] = None
-        if exc.stage is not None:
+        if isinstance(exc.cause, ResultViolation):
+            frame = exc.cause.__traceback__
+            while frame.tb_next:
+                frame = frame.tb_next
+            envelope["diagnostic"] = {"stage": "result", "condition": str(exc.cause), "line": frame.tb_lineno}
+        elif exc.stage is not None:
             try:
                 envelope["diagnostic"] = diagnose(exc.stage, exc.cause)
             except Exception:
@@ -381,8 +434,8 @@ def _sorigul_worker(params):
     finally:
         logging.disable(previous_logging)
     raw = json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    if len(raw) > 32768:
-        envelope.update(error_code="RESULT_INVALID", payload=None, silence=False, diagnostic=None)
+    if len(raw) > MAX_RESULT_BYTES:
+        envelope.update(error_code="RESULT_INVALID", payload=None, silence=False, diagnostic={"stage": "result", "condition": "envelope_limit", "line": 0})
         raw = json.dumps(envelope).encode("utf-8")
     with (output_dir / "result.tmp").open("xb") as result:
         result.write(raw)

@@ -316,6 +316,13 @@ def test_invalid_failed_cache_not_reused(setup, change):
     setup.server.upload_failure = None
     setup.server.ws.namespace = {}
     second = setup.pipeline()
+    if change == "duplicate-key":
+        before = manifest.read_bytes()
+        with pytest.raises(PipelineError) as error:
+            run(setup, second)
+        assert error.value.code == "CACHE_MANIFEST_INVALID" and manifest.read_bytes() == before
+        assert len(setup.ml.decodes) == 1
+        return
     run(setup, second)
     assert not second.last_report.cache_used
     assert len(setup.ml.decodes) == 3
@@ -844,3 +851,20 @@ def test_unconfirmed_kernel_delete_keeps_the_verified_chunk_cached(setup):
         run(setup, pipeline)
     assert exc.value.code == "CLEANUP_REQUIRED"
     assert pipeline.last_report.completed_indices == (0,)
+
+def test_one_corrupt_cache_entry_preserves_its_neighbors(setup):
+    durations = (300.0, 300.0, 300.0, 12.0)
+    setup.server.upload_failure = 3
+    with pytest.raises(PipelineError):
+        run(setup, setup.pipeline(durations))
+    manifest = setup.cache._file_dir(setup.source) / "manifest.json"
+    data = json.loads(manifest.read_bytes())
+    assert sorted(data["completed"]) == ["0", "1", "2"]
+    data["completed"]["1"]["segments"][0]["end"] = 315
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    setup.server.upload_failure = None
+    setup.server.ws.namespace = {}
+    second = setup.pipeline(durations)
+    result = run(setup, second)
+    assert second.last_report.cache_used and len(setup.ml.decodes) == 5
+    assert len(result.segments) == 4
