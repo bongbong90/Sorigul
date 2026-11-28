@@ -1004,9 +1004,8 @@ function DrivePathPreview({ course, subject, week, settings }: { course: string;
   return (
     <div className="setting-note">
       <div className="drive-path-preview">
-        {settings.drive_parent?.display_path || '내 드라이브'}{'\n/ '}
-        {driveRoot}
-{'\n/ '}전사자료
+        {settings.drive_parent?.display_path || '내 드라이브'}
+        {settings.drive_parent?.layout !== 'transcript_root' && `\n/ ${driveRoot}\n/ 전사자료`}
 {'\n/ '}{trimmedCourse}
 {'\n/ '}[{stage}] {folderSubject}
 {'\n/ '}{weekValue !== undefined ? `${trimmedCourse}_${weekSubject}_${weekValue}주차` : '주차를 입력하면 주차 폴더가 표시됩니다.'}

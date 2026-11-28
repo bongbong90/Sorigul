@@ -177,6 +177,7 @@ export interface RuntimeSettings {
 }
 
 export interface DriveParentFolder {
+  layout?: 'exam_parent' | 'transcript_root'
   folder_id: string
   account_id: string
   display_path: string

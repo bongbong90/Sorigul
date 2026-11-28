@@ -84,7 +84,8 @@ class DriveClassification:
 class DriveClassifier:
     _standard = re.compile(r"^(?P<course>[^_]+)_(?P<subject>[^_]+)_(?P<week>\d+)주차_(?P<lesson>\d+)강$")
 
-    def classify(self, job: JobModel, file_id: str, exam_root: str) -> DriveClassification:
+    def classify(self, job: JobModel, file_id: str, exam_root: Optional[str]) -> DriveClassification:
+        prefix = (exam_root, "전사자료") if exam_root is not None else ()
         file_metadata = job.file_metadata.get(file_id)
         has_full_metadata = (
             job.course is not None and
@@ -119,7 +120,7 @@ class DriveClassifier:
                 subject=subject,
                 week=week,
                 lesson=lesson,
-                folders=(exam_root, "전사자료", course, subject_folder, week_folder),
+                folders=(*prefix, course, subject_folder, week_folder),
             )
 
         if has_partial_metadata:
@@ -146,7 +147,7 @@ class DriveClassifier:
             subject=subject,
             week=week,
             lesson=lesson,
-            folders=(exam_root, "전사자료", course, subject_folder, week_folder),
+            folders=(*prefix, course, subject_folder, week_folder),
         )
 
 
@@ -850,6 +851,8 @@ class DriveUploadService:
 
         try:
             exam_root = destination.exam_root
+            if destination.parent and destination.parent.layout == "transcript_root":
+                exam_root = None
             classification = self.classifier.classify(job, file_id, exam_root)
         except DriveError as exc:
             self._set_state(job_id, file_id, DriveStatus.CLASSIFICATION_FAILED, exc.user_message)

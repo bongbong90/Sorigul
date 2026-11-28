@@ -222,9 +222,9 @@ def test_mock_bundle_e2e_preserves_tree_three_files_and_update_or_create(environ
     before = {path.name: path.read_bytes() for path in folder.iterdir()}
     upload = DriveUploadService(manager, auth, settings)
     assert upload.upload(job.job_id, stem).status == DriveStatus.DONE
-    assert sdk.created[0][1] == {"name": "시험 이름", "mimeType": FOLDER_MIME, "parents": ["alpha" if custom else "root"]}
+    assert sdk.created[0][1] == {"name": "개념완성" if custom else "시험 이름", "mimeType": FOLDER_MIME, "parents": ["alpha" if custom else "root"]}
     hierarchy = [body["name"] for _, body in sdk.created if body.get("mimeType") == FOLDER_MIME]
-    assert hierarchy == ["시험 이름", "전사자료", "개념완성", "[1차] 민법", "개념완성_민법_8주차"]
+    assert hierarchy == ([] if custom else ["시험 이름", "전사자료"]) + ["개념완성", "[1차] 민법", "개념완성_민법_8주차"]
     uploaded = [body["name"] for _, body in sdk.created if "mimeType" not in body]
     assert set(uploaded) == {f"{stem}.txt", f"{stem}.json", f"{stem}.srt"}
     assert upload.retry(job.job_id, stem).status == DriveStatus.DONE
@@ -249,7 +249,7 @@ def test_job_destination_survives_settings_change_restart_and_retry(environment,
     sdk.fail_upload = False
     assert uploader.retry(job.job_id, stem).status == DriveStatus.DONE
     assert sdk.created[0][1]["parents"] == ["alpha"]
-    assert sdk.created[0][1]["name"] == "원래 시험"
+    assert sdk.created[0][1]["name"] == "개념완성"
     assert reloaded.get_job(job.job_id).drive_destination == original
     with pytest.raises(ValidationError): original.exam_root = "changed"
     with pytest.raises(ValidationError): original.parent.folder_id = "duplicate"
@@ -286,6 +286,21 @@ def test_renamed_or_moved_folder_uses_same_id_not_same_name_sibling(environment,
     sdk.nodes["alpha"]["parents"] = ["duplicate"]
     assert DriveUploadService(manager, auth, settings).retry(job.job_id, stem).status == DriveStatus.DONE
     assert sdk.created[0][1]["parents"] == ["alpha"]
+
+
+def test_existing_selected_job_without_layout_retries_in_original_tree(environment, tmp_path):
+    sdk, auth, settings, selection = environment
+    select(selection)
+    manager, job, stem, _ = done_job(tmp_path, settings)
+    path = tmp_path / "jobs.json"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    del saved[job.job_id]["drive_destination"]["parent"]["layout"]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    select(selection, "duplicate")
+    uploader = DriveUploadService(JobManager(str(path)), auth, settings)
+    assert uploader.retry(job.job_id, stem).status == DriveStatus.DONE
+    assert sdk.created[0][1]["parents"] == ["alpha"]
+    assert [body["name"] for _, body in sdk.created[:2]] == [job.drive_destination.exam_root, "전사자료"]
 
 
 def test_legacy_jobs_load_without_migration_or_automatic_reupload(environment, tmp_path):
@@ -386,8 +401,8 @@ def test_existing_automatic_folder_collision_remains_fail_closed(environment, tm
     sdk, auth, settings, selection = environment
     select(selection)
     manager, job, stem, _ = done_job(tmp_path, settings)
-    sdk.add("exam1", settings.get().drive_exam_root, "alpha")
-    sdk.add("exam2", settings.get().drive_exam_root, "alpha")
+    sdk.add("exam1", "개념완성", "alpha")
+    sdk.add("exam2", "개념완성", "alpha")
     result = DriveUploadService(manager, auth, settings).upload(job.job_id, stem)
     assert result.status == DriveStatus.FAILED
     assert "같은 이름" in result.error

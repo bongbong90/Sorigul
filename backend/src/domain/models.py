@@ -84,6 +84,8 @@ class DriveParentFolder(BaseModel):
     folder_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,256}$")
     account_id: str = Field(min_length=1, max_length=256)
     display_path: str = Field(min_length=1, max_length=8192)
+    # Older settings and job snapshots included exam_root / 전사자료.
+    layout: Literal["exam_parent", "transcript_root"] = "exam_parent"
 
 
 class DriveDestination(BaseModel):

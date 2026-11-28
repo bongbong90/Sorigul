@@ -146,7 +146,7 @@ class DriveDestinationService:
         if not page.folder.can_select:
             raise DriveError("DRIVE_FOLDER_FORBIDDEN", "선택한 폴더에 저장할 권한이 없습니다.")
         parent = DriveParentFolder(
-            folder_id=page.folder.folder_id, account_id=page.account_id,
+            folder_id=page.folder.folder_id, account_id=page.account_id, layout="transcript_root",
             display_path=" / ".join(part.name for part in page.breadcrumbs),
         )
         try:
