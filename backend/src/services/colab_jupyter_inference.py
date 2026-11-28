@@ -22,10 +22,10 @@ from urllib.parse import urlencode
 
 from src.domain.transcription import TranscriptionResult
 from src.services.colab_inference_worker import (
-    MAX_RESULT_BYTES, MODEL_REVISION, build_preparation_code, build_worker_code,
+    MAX_RESULT_BYTES, MODEL_REVISION, ResultViolation, check_duration, check_size, checked_end, build_preparation_code, build_worker_code,
 )
 from src.services.colab_jupyter_client import (
-    MAX_MESSAGE_BYTES, CleanupResult, ColabJupyterClient, JupyterClientError, _connect_ws, _http_request,
+    MAX_MESSAGE_BYTES, CleanupResult, JupyterCode, ColabJupyterClient, JupyterClientError, _connect_ws, _http_request,
 )
 from src.services.colab_jupyter_files import (
     RemoteOwnership, TransferError, TransferStatus, listing_is_empty,
@@ -134,10 +134,25 @@ def _diag_text(value, secrets=()):
     return " ".join(value.split())[:240]
 
 
+RESULT_CONDITIONS = {"duration_invalid", "timestamp_invalid", "timestamp_reversed", "interval_invalid",
+                     "end_beyond_duration", "empty_text", "rows_limit", "text_limit",
+                     "envelope_limit", "repetition_suspected", "envelope_invalid", "payload_mismatch"}
+
 def sanitize_diagnostic(value, secrets=()):
     """Second, client-side pass over the worker's diagnostic. Bounded shape."""
     if value is None:
         return None
+    if (isinstance(value, dict) and set(value) == {"stage", "condition", "line"}
+            and value["stage"] == "result" and value["condition"] in RESULT_CONDITIONS
+            and type(value["line"]) is int and 0 <= value["line"] <= 10000):
+        return value.copy()
+    line = {}
+    if isinstance(value, dict) and "line" in value:
+        value = value.copy()
+        number = value.pop("line")
+        if type(number) is not int or not 0 <= number <= 100000:
+            raise ValueError("RESULT_INVALID")
+        line = {"line": number}
     if (not isinstance(value, dict) or set(value) != {"stage", "exception", "message", "runtime"}
             or value["stage"] not in _DIAG_STAGES):
         raise ValueError("RESULT_INVALID")
@@ -164,7 +179,7 @@ def sanitize_diagnostic(value, secrets=()):
                 clean_runtime[key] = item
             else:
                 clean_runtime[key] = _diag_text(item, secrets)
-    return {"stage": value["stage"], "exception": _diag_text(value["exception"], secrets),
+    return {**line, "stage": value["stage"], "exception": _diag_text(value["exception"], secrets),
             "message": _diag_text(value["message"], secrets), "runtime": clean_runtime}
 
 
@@ -290,6 +305,7 @@ class ColabJupyterInference:
                 if envelope["error_code"] is not None:
                     raise InferenceError(InferenceCode(envelope["error_code"]))
                 result = TranscriptionResult.from_engine_payload(envelope["payload"])
+                result.metadata["duration_seconds"] = envelope["duration_seconds"]
                 device, compute = envelope["device"], envelope["compute_type"]
                 gpu_error = InferenceCode(envelope["gpu_error"]) if envelope["gpu_error"] else None
                 silence, state = envelope["silence"], "OK"
@@ -595,11 +611,27 @@ class ColabJupyterInference:
         raise InferenceError(InferenceCode.STATE_UNCERTAIN)
 
     def _download(self, record):
-        try:
-            status, model = self._client._http(
-                "GET", "/api/contents/" + self._output_path + "?content=1&format=base64")
-        except Exception:
-            raise InferenceError(InferenceCode.RESULT_DOWNLOAD_FAILED) from None
+        path = "/api/contents/" + self._output_path + "?content=1&format=base64"
+        for attempt in range(2):
+            self._check_cancel()
+            try:
+                status, model = self._client._http("GET", path)
+            except Exception as exc:
+                transient = isinstance(exc, (TimeoutError, ConnectionError)) or (
+                    isinstance(exc, JupyterClientError) and exc.code in {
+                        JupyterCode.NETWORK_TIMEOUT, JupyterCode.CONNECTION_REJECTED})
+                if transient and attempt == 0:
+                    continue
+                invalid = isinstance(exc, JupyterClientError) and exc.code == JupyterCode.STATE_UNCERTAIN
+                self.last_diagnostic = {"stage": "download_validation" if invalid else "download",
+                                        "condition": "envelope_invalid" if invalid else "download_transport"}
+                raise InferenceError(InferenceCode.RESULT_INVALID if invalid else
+                                     InferenceCode.RESULT_DOWNLOAD_FAILED) from None
+            if status in (408, 502, 503, 504) and attempt == 0:
+                continue
+            break
+        if status != 200:
+            self.last_diagnostic = {"stage": "download", "condition": "download_status", "status": status}
         self._check_http_status(status)
         if status != 200:
             raise InferenceError(InferenceCode.RESULT_DOWNLOAD_FAILED)
@@ -607,15 +639,15 @@ class ColabJupyterInference:
             if (not isinstance(model, dict) or model.get("path") != self._output_path
                     or model.get("type") != "file" or model.get("format") != "base64"
                     or not isinstance(model.get("content"), str)):
-                raise ValueError
+                raise ResultViolation("contents_schema")
             # Jupyter Server serves file content via base64.encodebytes (a "\n"
             # every 76 chars). Accept exactly that line wrapping, nothing else.
             content = model["content"].replace("\n", "")
             if len(content) > 4 * ((MAX_RESULT_BYTES + 2) // 3):
-                raise ValueError
+                raise ResultViolation("envelope_limit")
             raw = base64.b64decode(content, validate=True)
             if len(raw) > MAX_RESULT_BYTES:
-                raise ValueError
+                raise ResultViolation("envelope_limit")
             value = _loads(raw.decode("utf-8"))
             keys = {"execution_id", "run_id", "index", "input_sha256", "complete", "error_code",
                     "device", "compute_type", "gpu_error", "silence", "payload", "duration_seconds",
@@ -624,44 +656,51 @@ class ColabJupyterInference:
                     or value["execution_id"] != self.execution_id or value["run_id"] != self._transfer.run_id
                     or type(value["index"]) is not int or value["index"] != record.index
                     or value["input_sha256"] != record.sha256 or type(value["silence"]) is not bool):
-                raise ValueError
+                raise ResultViolation("identity_or_schema")
             if value["error_code"] is not None:
                 allowed = {"INPUT_MISSING", "INPUT_INTEGRITY_MISMATCH", "MODEL_INSTALL_REQUIRED",
                            "MODEL_LOAD_FAILED", "CUDA_FAILED", "GPU_UNAVAILABLE", "KERNEL_EXECUTION_FAILED", "RESULT_INVALID"}
                 if value["error_code"] not in allowed or value["payload"] is not None:
-                    raise ValueError
+                    raise ResultViolation("invalid_error_envelope")
                 token = getattr(getattr(self._client, "_info", None), "token", None)
                 value["diagnostic"] = sanitize_diagnostic(value["diagnostic"], (token,))
                 self.last_diagnostic = value["diagnostic"]
                 return value
             if value["diagnostic"] is not None:
-                raise ValueError
+                raise ResultViolation("unexpected_diagnostic")
             if ((value["device"], value["compute_type"]) not in (("cuda", "float16"), ("cpu", "int8"))
-                    or value["gpu_error"] not in (None, "GPU_UNAVAILABLE", "CUDA_FAILED")
-                    or type(value["duration_seconds"]) not in (int, float)
-                    or not math.isfinite(value["duration_seconds"])
-                    or not 0 < value["duration_seconds"] <= 301):
-                raise ValueError
+                    or value["gpu_error"] not in (None, "GPU_UNAVAILABLE", "CUDA_FAILED")):
+                raise ResultViolation("device_invalid")
+            check_duration(value["duration_seconds"])
             if self._require_cuda and (value["device"] != "cuda" or value["gpu_error"] is not None):
                 raise InferenceError(InferenceCode.GPU_UNAVAILABLE)
             payload = value["payload"]
             if (not isinstance(payload, dict) or set(payload) != {"text", "language", "segments"}
                     or payload["language"] != "ko" or not isinstance(payload["text"], str)
-                    or not isinstance(payload["segments"], list) or len(payload["segments"]) > 2000):
-                raise ValueError
+                    or not isinstance(payload["segments"], list)):
+                raise ResultViolation("payload_schema")
+            previous = None
             for segment in payload["segments"]:
-                if (not isinstance(segment, dict) or set(segment) != {"start", "end", "text"}
-                        or any(type(segment[k]) not in (int, float) or not math.isfinite(segment[k])
-                               for k in ("start", "end"))
-                        or not 0 <= segment["start"] <= segment["end"] <= 301
-                        or not isinstance(segment["text"], str) or not segment["text"].strip()):
-                    raise ValueError
+                if not isinstance(segment, dict) or set(segment) != {"start", "end", "text"}:
+                    raise ResultViolation("segment_schema")
+                if not isinstance(segment["text"], str) or not segment["text"].strip():
+                    raise ResultViolation("empty_text")
+                segment["end"] = checked_end(segment["start"], segment["end"], previous, value["duration_seconds"])
+                previous = segment
+            check_size(payload["segments"], len(payload["text"].encode("utf-8")), complete=True)
             if (payload["text"] != "".join(s["text"] for s in payload["segments"])
                     or value["silence"] != (not payload["segments"])):
-                raise ValueError
+                raise ResultViolation("payload_mismatch")
             TranscriptionResult.from_engine_payload(payload)
             return value
-        except Exception:
+        except InferenceError:
+            raise
+        except Exception as exc:
+            frame = exc.__traceback__
+            while frame.tb_next:
+                frame = frame.tb_next
+            self.last_diagnostic = {"stage": "download_validation", "line": frame.tb_lineno,
+                                    "condition": str(exc) if isinstance(exc, ResultViolation) else "envelope_invalid"}
             raise InferenceError(InferenceCode.RESULT_INVALID) from None
 
     def cleanup(self):

@@ -444,3 +444,21 @@ def test_caller_interrupt_still_attempts_owned_kernel_cleanup(setup_client):
         client.run_validation()
     assert server.ws.closed
     assert [call[0] for call in server.calls] == ["POST", "DELETE"]
+
+def test_large_http_response_budget_is_scoped_to_result_file(monkeypatch):
+    from io import BytesIO
+    data = json.dumps({"content": "a" * (module.MAX_MESSAGE_BYTES + 1)}).encode()
+
+    class Response(BytesIO):
+        status = 200
+
+    class Opener:
+        def open(self, request, timeout):
+            return Response(data)
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *args: Opener())
+    status, model = module._http_request("GET", URL + "/api/contents/result.json?content=1&format=base64", {}, None, 1)
+    assert status == 200 and len(model["content"]) > module.MAX_MESSAGE_BYTES
+    with pytest.raises(JupyterClientError) as error:
+        module._http_request("GET", URL + "/api/status", {}, None, 1)
+    assert error.value.code == Code.STATE_UNCERTAIN

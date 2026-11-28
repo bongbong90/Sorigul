@@ -9,7 +9,6 @@ Only the kernel, uploads and splitter temporaries created here are cleaned.
 
 import hashlib
 import json
-import logging
 import math
 import re
 import threading
@@ -22,7 +21,7 @@ from src.domain.transcription import (
     SILENCE_MARKER, TranscriptionResult, validate_silence_marker,
 )
 from src.engines.colab import CHUNK_SECONDS, ColabRecoveryCache, DirectColabEngine, FFmpegAudioSplitter
-from src.services.colab_inference_worker import MODEL_REVISION, PACKAGES
+from src.services.colab_inference_worker import MAX_RESULT_BYTES, MODEL_REVISION, PACKAGES, ResultViolation, check_duration, check_size, checked_end
 from src.services.colab_jupyter_client import _connect_ws, _http_request
 from src.services.colab_jupyter_files import (
     ColabJupyterFileTransfer, RemoteOwnership, TransferCode, TransferError, TransferStatus,
@@ -33,7 +32,7 @@ from src.services.colab_runtime_ownership import OwnershipState, OwnershipStore,
 
 
 
-logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class PipelineCleanup:
@@ -221,22 +220,34 @@ class ColabFullFilePipeline:
     @staticmethod
     def _validate_result(result, chunk, *, cached=False):
         if (not isinstance(result, TranscriptionResult) or result.language not in ((None, "ko") if cached else ("ko",))
-                or result.text != "".join(s.text for s in result.segments)
-                or len(result.text.encode("utf-8")) > 12000 or len(result.segments) > 2000):
-            raise PipelineError("CHUNK_RESULT_INVALID", "RESULT_INVALID")
+                or result.text != "".join(s.text for s in result.segments)):
+            raise ResultViolation("payload_mismatch")
+        duration = result.metadata.get("duration_seconds")
+        legacy = cached and duration is None
+        if legacy:
+            duration = chunk.duration_seconds
+        else:
+            check_duration(duration)
+        rows = []
         for segment in result.segments:
-            if (not math.isfinite(segment.start) or not math.isfinite(segment.end)
-                    or not 0 <= segment.start <= segment.end <= chunk.duration_seconds + 0.1
-                    or not segment.text.strip() or segment.metadata):
-                raise PipelineError("CHUNK_RESULT_INVALID", "RESULT_INVALID")
-        validated = TranscriptionResult.from_engine_payload({
-            "text": result.text, "language": "ko", "segments": [
-                {"start": s.start, "end": s.end, "text": s.text} for s in result.segments]})
+            if not segment.text.strip() or segment.metadata:
+                raise ResultViolation("empty_text")
+            if legacy:
+                if not 0 <= segment.start <= segment.end <= duration + 0.1:
+                    raise ResultViolation("interval_invalid")
+                end = segment.end
+            else:
+                end = checked_end(segment.start, segment.end, rows[-1] if rows else None, duration)
+            rows.append({"start": segment.start, "end": end, "text": segment.text})
+        check_size(rows, len(result.text.encode("utf-8")), complete=not cached)
+        validated = TranscriptionResult.from_engine_payload({"text": result.text, "language": "ko", "segments": rows})
+        if not legacy:
+            validated.metadata["duration_seconds"] = duration
         if result.text == "" and result.segments == []:
             marker = result.silence_proof
             validate_silence_marker(marker, "chunk")
             if (marker["index"] != chunk.index or marker["model_revision"] != MODEL_REVISION
-                    or marker["duration_seconds"] > chunk.duration_seconds + 0.1):
+                    or (marker["duration_seconds"] > duration + 0.1 if legacy else marker["duration_seconds"] != duration)):
                 raise PipelineError("CHUNK_RESULT_INVALID", "RESULT_INVALID")
             validated._set_verified_silence(marker)
         elif result.silence_proof is not None:
@@ -251,41 +262,44 @@ class ColabFullFilePipeline:
             return {}
         _no_links(path)
         try:
+            # Include JSON indentation in the on-disk budget for multi-chunk lectures.
+            limit = max(8 * 1024 * 1024, min(128 * 1024 * 1024, len(chunks) * MAX_RESULT_BYTES))
             with path.open("rb") as handle:
-                raw = handle.read(8 * 1024 * 1024 + 1)
-            if len(raw) > 8 * 1024 * 1024:
-                raise ValueError
+                raw = handle.read(limit + 1)
+            if len(raw) > limit:
+                raise PipelineError("CACHE_MANIFEST_TOO_LARGE")
             manifest = _loads(raw)
             if (not isinstance(manifest, dict) or set(manifest) != {"fingerprint", "completed"}
-                    or manifest["fingerprint"] != self.cache.source_fingerprint(source, signature)
                     or not isinstance(manifest["completed"], dict)):
                 raise ValueError
-            for key, payload in manifest["completed"].items():
-                if (not re.fullmatch(r"0|[1-9][0-9]*", key) or int(key) >= len(chunks)
-                        or not isinstance(payload, dict)
-                        or set(payload) not in ({"text", "segments"}, {"text", "segments", SILENCE_MARKER})
-                        or not isinstance(payload["text"], str) or not isinstance(payload["segments"], list)):
-                    raise ValueError
-                for row in payload["segments"]:
-                    if (not isinstance(row, dict) or set(row) != {"start", "end", "text"}
-                            or any(type(row[k]) not in (int, float) for k in ("start", "end"))):
-                        raise ValueError
-            loaded = self.cache.load(source, signature)
-            for index, result in loaded.items():
-                raw = manifest["completed"][str(index)]
-                if SILENCE_MARKER in raw:
-                    marker = raw[SILENCE_MARKER]
+        except (ValueError, TypeError, KeyError):
+            raise PipelineError("CACHE_MANIFEST_INVALID") from None
+        if manifest["fingerprint"] != self.cache.source_fingerprint(source, signature):
+            return {}
+        loaded = {}
+        for key, payload in manifest["completed"].items():
+            try:
+                if not re.fullmatch(r"0|[1-9][0-9]*", key) or int(key) >= len(chunks):
+                    continue
+                index = int(key)
+                if not isinstance(payload, dict) or set(payload) - {"text", "segments", SILENCE_MARKER, "duration_seconds"}:
+                    continue
+                if not all(isinstance(row, dict) and set(row) == {"start", "end", "text"}
+                           for row in payload["segments"]):
+                    continue
+                if any(type(row[k]) not in (int, float) for row in payload["segments"] for k in ("start", "end")):
+                    continue
+                result = TranscriptionResult.from_engine_payload(payload)
+                if SILENCE_MARKER in payload:
+                    marker = payload[SILENCE_MARKER]
                     validate_silence_marker(marker, "chunk")
                     if marker["input_sha256"] != proof[index][3]:
-                        raise ValueError("Cached silence input mismatch")
+                        continue
                     result._set_verified_silence(marker)
-            return {index: self._validate_result(result, chunks[index], cached=True)
-                    for index, result in loaded.items()}
-        except (ValueError, TypeError, KeyError, PipelineError):
-            self.cache.clear(source)
-            if directory.exists():
-                raise PipelineError("CACHE_CLEAR_FAILED", "CLEANUP_REQUIRED") from None
-            return {}
+                loaded[index] = self._validate_result(result, chunks[index], cached=True)
+            except (ValueError, TypeError, KeyError, PipelineError):
+                continue
+        return loaded
 
     @staticmethod
     def _signal(error):
@@ -333,6 +347,8 @@ class ColabFullFilePipeline:
         execution_id = uuid.uuid4().hex
         completed, signals, result, error = {}, set(), None, None
         diagnostic = None
+        chunk_index = None
+        stage = "preparation"
         state, used_cache, clear_cache, cache_failed = "FAILED", False, False, False
         try:
             token.raise_if_requested()
@@ -366,10 +382,12 @@ class ColabFullFilePipeline:
             if (_sha256(source), source.stat().st_size, source.stat().st_mtime_ns) != fingerprint:
                 clear_cache = True
                 raise PipelineError("SOURCE_CHANGED", "INPUT_INVALID")
+            stage = "cache_load"
             completed = self._load_cache(source, signature, chunks, proof)
             used_cache = bool(completed)
             progress_callback(len(completed) / len(chunks) if len(completed) < len(chunks) else 0.0)
             if len(completed) != len(chunks):
+                stage = "preparation"
                 transfer = self._transfer_factory(
                     runtime.connection_info, http_request=self._http, cancel_requested=requested)
                 inference = self._inference_factory(
@@ -396,6 +414,8 @@ class ColabFullFilePipeline:
                 token.raise_if_requested()
                 if chunk.index in completed:
                     continue
+                chunk_index = chunk.index
+                stage = "upload"
                 bound.get_owned_runtime()  # recheck exact account/Runtime before each upload
                 token.raise_if_requested()
                 for attempt in range(2):
@@ -418,15 +438,13 @@ class ColabFullFilePipeline:
                                         self._signal(TransferError(upload.error_code or TransferCode.NOT_OWNED)))
                 if upload.sha256 != proof[chunk.index][3]:
                     raise PipelineError("CHUNK_CHANGED", "INPUT_INVALID")
+                stage = "inference"
                 report = inference.run(chunk.index)
                 if report.execution_started and not (report.execute_reply_received and report.iopub_idle_received):
                     signals.add("REMOTE_STATE_UNCERTAIN")
                 token.raise_if_requested()
                 if report.status != "OK":
                     diagnostic = report.diagnostic
-                    if diagnostic is not None:
-                        logger.warning("Colab chunk %s failed: %s", chunk.index,
-                                       json.dumps(diagnostic, sort_keys=True))
                     if report.status == "STATE_UNCERTAIN":
                         signals.add("REMOTE_STATE_UNCERTAIN")
                     raise InferenceError(report.error_code or InferenceCode.STATE_UNCERTAIN)
@@ -436,7 +454,9 @@ class ColabFullFilePipeline:
                 # cleanup: a slow or failed remote DELETE never costs a validated
                 # transcript (live run 9: dir/kernel DELETEs timed out, then had
                 # in fact completed).
+                stage = "chunk_validation"
                 completed[chunk.index] = self._validate_result(report.result, chunk)
+                stage = "cache_save"
                 self.cache.save(source, signature, completed)
                 unclean = not report.cleanup.files_deleted or not report.cleanup.kernel_retained
                 if unclean and len(completed) < len(chunks):
@@ -451,6 +471,8 @@ class ColabFullFilePipeline:
                     or (_sha256(source), source.stat().st_size, source.stat().st_mtime_ns) != fingerprint):
                 clear_cache = True
                 raise PipelineError("SOURCE_OR_CHUNKS_CHANGED", "INPUT_INVALID")
+            chunk_index = None
+            stage = "merge"
             result = DirectColabEngine._merge(chunks, completed)
             result.metadata["colab_recovery_cache_used"] = used_cache
             state, clear_cache = "COMPLETED", True
@@ -460,11 +482,21 @@ class ColabFullFilePipeline:
             state = "CANCELLED" if isinstance(exc, CancelRequested) else "STOPPED"
         except Exception as exc:
             error = exc if isinstance(exc, (PipelineError, RuntimeClientError, TransferError, InferenceError, EngineError)) else PipelineError("PIPELINE_FAILED")
+            if isinstance(exc, ResultViolation):
+                error = PipelineError("CHUNK_RESULT_INVALID", "RESULT_INVALID")
+                diagnostic = {"condition": str(exc)}
             signals.add(self._signal(error))
             if diagnostic is None and inference is not None:
                 diagnostic = getattr(inference, "last_diagnostic", None)
-                if diagnostic is not None:
-                    logger.warning("Colab preparation failed: %s", json.dumps(diagnostic, sort_keys=True))
+            frame = exc.__traceback__
+            while frame.tb_next:
+                frame = frame.tb_next
+            diagnostic = dict(diagnostic or {})
+            if diagnostic.get("condition") == "download_transport":
+                signals.add("NETWORK_ERROR")
+            diagnostic.setdefault("stage", stage)
+            diagnostic["chunk"] = chunk_index
+            diagnostic["location"] = f"{Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}"
         finally:
             inference_cleanup = uploads_cleanup = None
             inference_failed = uploads_failed = False

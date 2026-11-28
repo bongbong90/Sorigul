@@ -699,3 +699,61 @@ def test_never_ready_runtime_fails_clean_without_any_kernel_post(setup):
     assert report.error_code is Code.CONNECTION_FAILED and report.status == "NOT_RUN"
     assert ("POST", "/api/kernels") not in setup.server.calls
     assert not report.cleanup.cleanup_required
+
+@pytest.mark.parametrize("end,condition", [(300.12, None), (315, "end_beyond_duration"),
+                                           (298, "timestamp_reversed"), (299, "interval_invalid")])
+def test_decoded_duration_contract(setup, end, condition):
+    setup.ml.duration = 300.04
+    setup.ml.rows = [SimpleNamespace(start=299, end=end, text="마지막 문장")]
+    report = setup.adapter().run(0)
+    if condition:
+        assert report.error_code is Code.RESULT_INVALID
+        assert report.diagnostic["condition"] == condition and report.diagnostic["line"] > 0
+    else:
+        assert report.result.segments[0].end == report.result.metadata["duration_seconds"] == 300.04
+        assert report.result.text == "마지막 문장"
+
+
+def test_download_validates_against_short_actual_audio(setup):
+    def mutate(raw):
+        value = json.loads(raw)
+        value["payload"]["segments"][0]["end"] = 5.0
+        return json.dumps(value).encode()
+    setup.server.mutate = mutate
+    report = setup.adapter().run(0)
+    assert report.error_code is Code.RESULT_INVALID
+    assert report.diagnostic["stage"] == "download_validation"
+    assert report.diagnostic["condition"] == "end_beyond_duration"
+
+
+@pytest.mark.parametrize("fault,expected_gets,expected_code", [
+    (TimeoutError(), 2, None), (503, 2, None), (404, 1, Code.RESULT_DOWNLOAD_FAILED),
+    (ValueError(), 1, Code.RESULT_DOWNLOAD_FAILED)])
+def test_only_same_result_get_retried(setup, fault, expected_gets, expected_code):
+    original = setup.server.http
+    reads = []
+    def http(method, url, *args):
+        if method == "GET" and "/result.json?content=1" in url:
+            reads.append(url)
+            if len(reads) == 1:
+                if isinstance(fault, Exception):
+                    raise fault
+                return fault, None
+        return original(method, url, *args)
+    setup.server.http = http
+    report = setup.adapter().run(0)
+    assert report.error_code is expected_code
+    assert len(reads) == expected_gets and len(set(reads)) == 1
+    assert len(setup.ml.decodes) == 1
+
+
+@pytest.mark.parametrize("repeated", [False, True])
+def test_long_text_preserved_or_repetition_reported(setup, repeated):
+    text = "단어 반복 " * 4000 if repeated else " ".join(f"강의{i}" for i in range(5000))
+    setup.ml.rows[0].text = text
+    report = setup.adapter().run(0)
+    if repeated:
+        assert report.error_code is Code.RESULT_INVALID
+        assert report.diagnostic["condition"] == "repetition_suspected"
+    else:
+        assert report.result.text == report.result.segments[0].text == text
